@@ -78,10 +78,26 @@ const MERCHANTS_CONFIG_PATH = path.join(CONFIG_DIR, 'merchants.json');
 
 // 역할: SUPER_ADMIN > ADMIN > OPERATOR
 const ROLES = { SUPER_ADMIN: 'SUPER_ADMIN', ADMIN: 'ADMIN', OPERATOR: 'OPERATOR' };
-const PAGE_KEYS = ['merchants', 'pg_logs', 'internal_logs', 'traffic_analysis', 'internal_targets', 'internal_noti_settings', 'test_config', 'test_run', 'test_history', 'account', 'settings', 'account_reset'];
+const PAGE_KEYS = [
+  'merchants',
+  'pg_logs',
+  'internal_logs',
+  'dev_internal_logs',
+  'traffic_analysis',
+  'internal_targets',
+  'internal_noti_settings',
+  'dev_internal_noti_settings',
+  'test_config',
+  'test_run',
+  'test_history',
+  'account',
+  'settings',
+  'account_reset',
+];
 const INITIAL_PASSWORD_SUFFIX = '1!';
 const INTERNAL_TARGETS_CONFIG_PATH = path.join(CONFIG_DIR, 'internal-targets.json');
 const INTERNAL_NOTI_SETTINGS_PATH = path.join(CONFIG_DIR, 'internal-noti-settings.json');
+const DEV_INTERNAL_NOTI_SETTINGS_PATH = path.join(CONFIG_DIR, 'dev-internal-noti-settings.json');
 const SITE_SETTINGS_PATH = path.join(CONFIG_DIR, 'site-settings.json');
 const TEST_CONFIGS_CONFIG_PATH = path.join(CONFIG_DIR, 'test-configs.json');
 
@@ -155,9 +171,15 @@ function loadMembers() {
   try {
     const raw = fs.readFileSync(MEMBERS_CONFIG_PATH, 'utf8');
     const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
+    const list = Array.isArray(arr) ? arr : [];
+    // 기본값 보정 (구버전 members.json 호환)
+    return list.map((m) => ({
+      ...m,
+      otpFailCount: Number.isFinite(m && m.otpFailCount) ? m.otpFailCount : 0,
+      otpLocked: m && m.otpLocked === true,
+    }));
   } catch (e) {
-    return null;
+    return [];
   }
 }
 
@@ -224,6 +246,8 @@ if (!MEMBERS || MEMBERS.length === 0) {
       passwordHash: adminConfig.passwordHash,
       otpSecret: adminConfig.otpSecret || '',
       otpRequired: false,
+      otpFailCount: 0,
+      otpLocked: false,
       canAssignPermission: false,
       mustChangePassword: false,
       createdAt: new Date().toISOString(),
@@ -233,7 +257,7 @@ if (!MEMBERS || MEMBERS.length === 0) {
 }
 
 function verifyOtp(secret, token) {
-  if (!secret) return true;
+  if (!secret) return false;
   if (!token) return false;
   try {
     return speakeasy.totp.verify({
@@ -273,6 +297,10 @@ function requireRole(roles) {
 function requirePage(pageKey) {
   return (req, res, next) => {
     if (!req.session || !req.session.member) return res.redirect('/admin/login');
+    // OTP 필수 계정인데 OTP 미설정 상태라면, 계정 설정에서 먼저 OTP 설정하도록 강제
+    if (req.session.mustSetupOtp && pageKey !== 'account') {
+      return res.redirect('/admin/account?forceOtp=1');
+    }
     const m = req.session.member;
     if (m.role === ROLES.SUPER_ADMIN || m.role === ROLES.ADMIN) return next();
     if (m.role === ROLES.OPERATOR && m.permissions && m.permissions.includes(pageKey)) return next();
@@ -427,6 +455,59 @@ function applyAmountRule(amountNum, currencyCode) {
   return num;
 }
 
+// ---------- 개발 노티 설정 (전산 노티 설정과 별도 관리) ----------
+function loadDevInternalNotiSettingsFull() {
+  const loaded = loadJsonConfig(DEV_INTERNAL_NOTI_SETTINGS_PATH, null);
+  const amountRules =
+    loaded && loaded.amountRules && typeof loaded.amountRules === 'object'
+      ? { ...DEFAULT_AMOUNT_RULES, ...loaded.amountRules }
+      : DEFAULT_AMOUNT_RULES;
+  const routeNoMode =
+    loaded && loaded.routeNoMode && typeof loaded.routeNoMode === 'object'
+      ? { ...DEFAULT_ROUTE_NO_MODE, ...loaded.routeNoMode }
+      : DEFAULT_ROUTE_NO_MODE;
+  const customerIdMode =
+    loaded && loaded.customerIdMode && typeof loaded.customerIdMode === 'object'
+      ? { ...DEFAULT_CUSTOMER_ID_MODE, ...loaded.customerIdMode }
+      : DEFAULT_CUSTOMER_ID_MODE;
+  const original =
+    loaded && loaded.original && typeof loaded.original === 'object'
+      ? { ...DEFAULT_ORIGINAL, ...loaded.original }
+      : DEFAULT_ORIGINAL;
+  return { amountRules, routeNoMode, customerIdMode, original };
+}
+
+function loadDevInternalNotiSettings() {
+  const full = loadDevInternalNotiSettingsFull();
+  return full.amountRules;
+}
+
+let DEV_INTERNAL_AMOUNT_RULES = loadDevInternalNotiSettings();
+
+function saveDevInternalNotiSettings(fullOrAmountRules) {
+  ensureConfigDir();
+  const isFull =
+    fullOrAmountRules && typeof fullOrAmountRules === 'object' && fullOrAmountRules.amountRules !== undefined;
+  const full = isFull ? fullOrAmountRules : { amountRules: fullOrAmountRules || DEV_INTERNAL_AMOUNT_RULES };
+  const current = loadDevInternalNotiSettingsFull();
+  const toSave = {
+    amountRules: full.amountRules || current.amountRules,
+    routeNoMode: full.routeNoMode || current.routeNoMode,
+    customerIdMode: full.customerIdMode || current.customerIdMode,
+    original: full.original !== undefined ? full.original : current.original,
+  };
+  saveJsonConfig(DEV_INTERNAL_NOTI_SETTINGS_PATH, toSave);
+  DEV_INTERNAL_AMOUNT_RULES = toSave.amountRules;
+}
+
+function applyDevAmountRule(amountNum, currencyCode) {
+  const rule = (DEV_INTERNAL_AMOUNT_RULES && DEV_INTERNAL_AMOUNT_RULES[String(currencyCode)]) || '=';
+  const num = Number(amountNum) || 0;
+  if (rule === 'X100') return num * 100;
+  if (rule === '/100') return num / 100;
+  return num;
+}
+
 // ========== 테스트 결제 환경 설정 (test payment configs) ==========
 // id -> { id, name, environment, merchantCode, routeNo, apiKey, md5Key, currency, paymentApiUrl, returnUrl }
 function loadTestConfigs() {
@@ -450,7 +531,7 @@ function saveTestConfigs() {
   saveJsonConfig(TEST_CONFIGS_CONFIG_PATH, obj);
 }
 
-// ========== 가맹점 라우팅 설정 (merchantId -> { routeCallbackKey, routeResultKey, callbackUrl, resultUrl, routeNo, internalCustomerId, internalTargetId, enableRelay, enableInternal }) ==========
+// ========== 가맹점 라우팅 설정 (merchantId -> { routeCallbackKey, routeResultKey, callbackUrl, resultUrl, routeNo, internalCustomerId, internalTargetId, enableRelay, enableInternal, enableDevInternal }) ==========
 // routeCallbackKey / routeResultKey 는 PG에 등록할 우리 쪽 노티 URL의 마지막 경로입니다.
 // 예) PG callback URL: https://api.our-system.com/noti/rount_c1  → routeCallbackKey = 'rount_c1'
 function loadMerchants() {
@@ -474,6 +555,7 @@ function loadMerchants() {
         internalTargetId: 'ONTL_HQ_JPY',
         enableRelay: true,
         enableInternal: true,
+        enableDevInternal: false,
       },
     ],
   ]);
@@ -495,58 +577,183 @@ function saveMerchants() {
   saveJsonConfig(MERCHANTS_CONFIG_PATH, obj);
 }
 
-// 트래픽 수집 (관리자 페이지 접근, 최근 10000건)
+// 트래픽 수집 (관리자 페이지 접근, 최근 10000건 - 메모리 전용)
 const TRAFFIC_HITS = [];
 const TRAFFIC_HITS_MAX = 10000;
 
-// PG 노티 로그 메모리 저장 (최근 100건)
-const NOTI_LOGS = [];
+// ===== 노티/테스트 로그 파일 경로 =====
+const DATA_DIR = path.join(__dirname, 'data');
+const PG_NOTI_LOG_PATH = path.join(DATA_DIR, 'pg-noti.log');
+const INTERNAL_LOG_PATH = path.join(DATA_DIR, 'internal-noti.log');
+const DEV_INTERNAL_LOG_PATH = path.join(DATA_DIR, 'dev-internal-noti.log');
+const TEST_LOG_PATH = path.join(DATA_DIR, 'test-payments.log');
+const CONFIG_LOG_PATH = path.join(DATA_DIR, 'config-change.log');
 
-// 전산 저장용 로그 (최근 200건, 파일에도 기록)
-const INTERNAL_LOGS = [];
-const INTERNAL_LOG_PATH = path.join(__dirname, 'data', 'internal-noti.log');
+// ===== 공통: JSON Lines 로그 로더 (최근 7일 메모리 유지, 30일 초과 파일 정리) =====
+function loadJsonLogFile(filePath, isoKey) {
+  try {
+    if (!fs.existsSync(filePath)) return [];
+    const raw = fs.readFileSync(filePath, 'utf8');
+    if (!raw.trim()) return [];
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    const now = Date.now();
+    const memCutoff = now - 7 * 24 * 60 * 60 * 1000; // 최근 7일
+    const diskCutoff = now - 30 * 24 * 60 * 60 * 1000; // 최근 30일
+    const keptLines = [];
+    const memEntries = [];
+    for (const line of lines) {
+      let obj;
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        // 손상된 라인은 그대로 보관만 (삭제하지 않음)
+        keptLines.push(line);
+        continue;
+      }
+      const iso =
+        (isoKey && obj[isoKey]) ||
+        obj.receivedAtIso ||
+        obj.storedAtIso ||
+        obj.loggedAtIso ||
+        obj.at ||
+        null;
+      let t = Number.NaN;
+      if (iso) {
+        t = Date.parse(iso);
+      }
+      if (!Number.isNaN(t)) {
+        if (t >= memCutoff) memEntries.push(obj);
+        if (t >= diskCutoff) {
+          keptLines.push(JSON.stringify(obj));
+        }
+      } else {
+        // 시간 정보가 없으면 파일에는 남기되, 메모리에는 싣지 않음
+        keptLines.push(JSON.stringify(obj));
+      }
+    }
+    // 30일 이내 기록만 다시 파일에 저장
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(filePath, keptLines.join('\n') + (keptLines.length ? '\n' : ''));
+    } catch {
+      // 파일 정리는 실패해도 서비스에는 영향 없음
+    }
+    return memEntries;
+  } catch {
+    return [];
+  }
+}
+
+// ===== PG 노티 로그 (최근 7일 메모리 + 파일에도 기록) =====
+let NOTI_LOGS = loadJsonLogFile(PG_NOTI_LOG_PATH, 'receivedAtIso');
+
+function appendPgNotiLog(entry) {
+  const nowIso = new Date().toISOString();
+  const log = {
+    receivedAt: entry.receivedAt || getThailandNowString(),
+    receivedAtIso: entry.receivedAtIso || nowIso,
+    ...entry,
+  };
+  NOTI_LOGS.push(log);
+  // 메모리에서는 최근 7일만 유지
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  NOTI_LOGS = NOTI_LOGS.filter((e) => {
+    const t = Date.parse(e.receivedAtIso || e.receivedAt);
+    return !Number.isNaN(t) && t >= cutoff;
+  });
+  // 파일에도 기록
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFile(PG_NOTI_LOG_PATH, JSON.stringify(log) + '\n', () => {});
+  } catch {
+    // 로그 기록 실패는 서비스에 영향 없음
+  }
+}
+
+// ===== 전산 노티 로그 (최근 7일 메모리 + 파일에도 기록) =====
+let INTERNAL_LOGS = loadJsonLogFile(INTERNAL_LOG_PATH, 'storedAtIso');
 
 function appendInternalLog(entry) {
-  INTERNAL_LOGS.push(entry);
-  if (INTERNAL_LOGS.length > 200) INTERNAL_LOGS.shift();
-  const dir = path.dirname(INTERNAL_LOG_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  // 파일에도 태국 시간 기준으로 기록
-  const logWithTime = {
-    storedAt: getThailandNowString(),
-    ...entry,
-  };
-  fs.appendFile(INTERNAL_LOG_PATH, JSON.stringify(logWithTime) + '\n', () => {});
-}
-
-// 설정 변경 로그 (관리자 설정, 가맹점, 전산 대상 등)
-const CONFIG_LOG_PATH = path.join(__dirname, 'data', 'config-change.log');
-
-function appendConfigChangeLog(entry) {
-  const dir = path.dirname(CONFIG_LOG_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const nowIso = new Date().toISOString();
   const log = {
-    at: new Date().toISOString(),
     ...entry,
+    storedAt: getThailandNowString(),
+    storedAtIso: nowIso,
   };
-  fs.appendFile(CONFIG_LOG_PATH, JSON.stringify(log) + '\n', () => {});
+  INTERNAL_LOGS.push(log);
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  INTERNAL_LOGS = INTERNAL_LOGS.filter((e) => {
+    const t = Date.parse(e.storedAtIso || e.storedAt);
+    return !Number.isNaN(t) && t >= cutoff;
+  });
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFile(INTERNAL_LOG_PATH, JSON.stringify(log) + '\n', () => {});
+  } catch {
+    // 무시
+  }
 }
 
-// 테스트 결제 로그 (최근 100건, 파일에도 기록)
-const TEST_LOGS = [];
-const TEST_LOG_PATH = path.join(__dirname, 'data', 'test-payments.log');
+// ===== 개발 노티 로그 (최근 7일 메모리 + 파일에도 기록) =====
+let DEV_INTERNAL_LOGS = loadJsonLogFile(DEV_INTERNAL_LOG_PATH, 'storedAtIso');
+
+function appendDevInternalLog(entry) {
+  const nowIso = new Date().toISOString();
+  const log = {
+    ...entry,
+    storedAt: getThailandNowString(),
+    storedAtIso: nowIso,
+  };
+  DEV_INTERNAL_LOGS.push(log);
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  DEV_INTERNAL_LOGS = DEV_INTERNAL_LOGS.filter((e) => {
+    const t = Date.parse(e.storedAtIso || e.storedAt);
+    return !Number.isNaN(t) && t >= cutoff;
+  });
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFile(DEV_INTERNAL_LOG_PATH, JSON.stringify(log) + '\n', () => {});
+  } catch {
+    // 무시
+  }
+}
+
+// ===== 설정 변경 로그 (관리자 설정, 가맹점, 전산 대상 등) =====
+function appendConfigChangeLog(entry) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const log = {
+      at: new Date().toISOString(),
+      ...entry,
+    };
+    fs.appendFile(CONFIG_LOG_PATH, JSON.stringify(log) + '\n', () => {});
+  } catch {
+    // 무시
+  }
+}
+
+// ===== 테스트 결제 로그 (최근 7일 메모리 + 파일에도 기록) =====
+let TEST_LOGS = loadJsonLogFile(TEST_LOG_PATH, 'loggedAtIso');
 
 function appendTestLog(entry) {
-  TEST_LOGS.push(entry);
-  if (TEST_LOGS.length > 100) TEST_LOGS.shift();
-  const dir = path.dirname(TEST_LOG_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  // 파일에도 태국 시간 기준으로 기록
-  const logWithTime = {
-    loggedAt: getThailandNowString(),
+  const nowIso = new Date().toISOString();
+  const log = {
     ...entry,
+    loggedAt: getThailandNowString(),
+    loggedAtIso: nowIso,
   };
-  fs.appendFile(TEST_LOG_PATH, JSON.stringify(logWithTime) + '\n', () => {});
+  TEST_LOGS.push(log);
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  TEST_LOGS = TEST_LOGS.filter((e) => {
+    const t = Date.parse(e.loggedAtIso || e.loggedAt);
+    return !Number.isNaN(t) && t >= cutoff;
+  });
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFile(TEST_LOG_PATH, JSON.stringify(log) + '\n', () => {});
+  } catch {
+    // 무시
+  }
 }
 
 function normalizeCurrencyCode(value) {
@@ -669,6 +876,49 @@ function transformForInternal(original, merchant) {
 }
 
 /**
+ * 개발용 전산 노티 가공 (개발 노티 설정 기준)
+ * - 구조는 transformForInternal 과 동일하지만, DEV_INTERNAL_NOTI_SETTINGS를 사용
+ */
+function transformForDevInternal(original, merchant) {
+  const currency = String(original.Currency || '392');
+  const settings = loadDevInternalNotiSettingsFull();
+  if (settings.original && settings.original[currency]) {
+    return typeof original === 'object' && original !== null ? { ...original } : original;
+  }
+
+  const routeNo = (merchant && merchant.routeNo) || '7';
+  const internalCustomerId = (merchant && merchant.internalCustomerId) || 'M035594';
+  const routeNoMode = (settings.routeNoMode && settings.routeNoMode[currency]) || 'current';
+  const customerIdMode = (settings.customerIdMode && settings.customerIdMode[currency]) || 'current';
+
+  const amountRaw = Number(original.Amount) || 0;
+  const processed = applyDevAmountRule(amountRaw, currency);
+  const amount = Number.isInteger(processed) ? String(Math.round(processed)) : String(Number(processed).toFixed(2));
+
+  const payload = {
+    TransactionId: original.TransactionId,
+    Amount: amount,
+    OrderNo: original.OrderNo,
+    BankCode: original.BankCode,
+    PaymentDate: original.PaymentDate,
+    PaymentStatus: original.PaymentStatus,
+    BankRefCode: original.BankRefCode,
+    CurrentDate: original.CurrentDate,
+    CurrentTime: original.CurrentTime,
+    PaymentDescription: original.PaymentDescription || '',
+    CreditCardToken: original.CreditCardToken || '',
+    Currency: original.Currency,
+    CustomerName: original.CustomerName || '',
+    CardNumber: '000000000000',
+    CheckSum: original.CheckSum || '',
+  };
+  if (routeNoMode !== 'delete') payload.RouteNo = routeNo;
+  if (customerIdMode !== 'delete') payload.CustomerId = internalCustomerId;
+
+  return payload;
+}
+
+/**
  * 가맹점으로 원본 그대로 릴레이
  */
 async function relayToMerchant(callbackUrl, body) {
@@ -736,6 +986,7 @@ async function handleNotiRequest(routeKey, req, res) {
   const { merchantId, merchant, kind, targetUrl } = match;
   const enableRelay = merchant.enableRelay !== false;
   const enableInternal = merchant.enableInternal !== false;
+  const enableDevInternal = merchant.enableDevInternal === true;
 
   let relaySuccess = false;
   if (enableRelay && targetUrl) {
@@ -767,9 +1018,7 @@ async function handleNotiRequest(routeKey, req, res) {
   }
 
   // 로그 적재 (가맹점 수신 여부 포함, 최근 100건)
-  NOTI_LOGS.push({
-    receivedAt: getThailandNowString(),
-    receivedAtIso: new Date().toISOString(),
+  appendPgNotiLog({
     routeKey,
     merchantId,
     kind,
@@ -777,7 +1026,6 @@ async function handleNotiRequest(routeKey, req, res) {
     targetUrl: enableRelay ? targetUrl || '' : '',
     relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
   });
-  if (NOTI_LOGS.length > 100) NOTI_LOGS.shift();
 
   let internalDeliverySuccess = false;
   let internalTargetUrl = '';
@@ -844,6 +1092,71 @@ async function handleNotiRequest(routeKey, req, res) {
     console.log('[전산 전송 스킵] enableInternal=false');
   }
 
+  // 개발 전산 전송 (개발 노티 사용 시 별도 전송 및 로그)
+  let devDeliverySuccess = false;
+  let devInternalTargetUrl = '';
+
+  if (enableDevInternal) {
+    try {
+      const devPayload = transformForDevInternal(body, merchant);
+      let devUrl = null;
+      if (merchant.internalTargetId) {
+        devUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
+      }
+      if (!devUrl && INTERNAL_NOTI_URL) {
+        devUrl = INTERNAL_NOTI_URL;
+      }
+
+      if (!devUrl) {
+        console.log('[개발 전산 전송 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
+      } else {
+        devInternalTargetUrl = devUrl;
+        console.log('[개발 전산 전송 중] 개발 전산 시스템으로 가공 데이터 전송, merchant=', merchantId, 'url=', devUrl);
+        let devRes = await sendToInternal(devUrl, devPayload);
+        devDeliverySuccess = devRes.success;
+        if (devDeliverySuccess) {
+          console.log('[개발 전산 전송 완료]');
+        } else {
+          console.warn('[개발 전산 전송 실패] status=', devRes.status, ' 1회 재시도 예정');
+          await new Promise((r) => setTimeout(r, 2000));
+          devRes = await sendToInternal(devUrl, devPayload);
+          devDeliverySuccess = devRes.success;
+          if (devDeliverySuccess) console.log('[개발 전산 전송 재시도 성공]');
+          else console.warn('[개발 전산 전송 재시도 실패]');
+        }
+      }
+      appendDevInternalLog({
+        storedAt: new Date().toISOString(),
+        merchantId,
+        routeNo: merchant.routeNo || '',
+        internalTargetId: merchant.internalTargetId || '',
+        payload: devPayload,
+        internalTargetUrl: devInternalTargetUrl,
+        internalDeliveryStatus: devInternalTargetUrl ? (devDeliverySuccess ? 'ok' : 'fail') : 'skip',
+      });
+    } catch (err) {
+      console.error('[개발 전산 전송 실패]', err.message);
+      let failUrl = devInternalTargetUrl;
+      if (!failUrl && merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
+      if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
+      let failPayload = body;
+      try {
+        failPayload = transformForDevInternal(body, merchant);
+      } catch (_) {}
+      appendDevInternalLog({
+        storedAt: new Date().toISOString(),
+        merchantId,
+        routeNo: merchant.routeNo || '',
+        internalTargetId: merchant.internalTargetId || '',
+        payload: failPayload,
+        internalTargetUrl: failUrl || '',
+        internalDeliveryStatus: 'fail',
+      });
+    }
+  } else {
+    console.log('[개발 전산 전송 스킵] enableDevInternal=false');
+  }
+
   res.status(200).json({ ok: true, relay: relaySuccess });
 }
 
@@ -891,16 +1204,18 @@ function getAdminSidebar(locale, adminUser, member) {
   if (can('merchants')) {
     nav.push(`<div class="nav-section-title">${t(locale, 'nav_merchant')}</div><a href="/admin/merchants">${t(locale, 'nav_merchant_settings')}</a>`);
   }
-  if (can('pg_logs') || can('internal_logs') || can('traffic_analysis')) {
+  if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('traffic_analysis')) {
     nav.push(`<div class="nav-section-title">${t(locale, 'nav_logs')}</div>`);
     if (can('pg_logs')) nav.push(`<a href="/admin/logs">${t(locale, 'nav_pg_noti_log')}</a>`);
     if (can('internal_logs')) nav.push(`<a href="/admin/internal">${t(locale, 'nav_internal_noti_log')}</a>`);
+    if (can('dev_internal_logs')) nav.push(`<a href="/admin/dev-internal">${t(locale, 'nav_dev_internal_noti_log') || '개발 노티로그'}</a>`);
     if (can('traffic_analysis')) nav.push(`<a href="/admin/traffic">${t(locale, 'nav_traffic_analysis') || '트래픽분석'}</a>`);
   }
-  if (can('internal_targets') || can('internal_noti_settings')) {
+  if (can('internal_targets') || can('internal_noti_settings') || can('dev_internal_noti_settings')) {
     nav.push(`<div class="nav-section-title">${t(locale, 'nav_internal')}</div>`);
     if (can('internal_targets')) nav.push(`<a href="/admin/internal-targets">${t(locale, 'nav_internal_targets')}</a>`);
     if (can('internal_noti_settings')) nav.push(`<a href="/admin/internal-noti-settings">${t(locale, 'nav_internal_noti_settings')}</a>`);
+    if (can('dev_internal_noti_settings')) nav.push(`<a href="/admin/dev-internal-noti-settings">${t(locale, 'nav_dev_internal_noti_settings')}</a>`);
   }
   if (can('test_config') || can('test_run') || can('test_history')) {
     nav.push(`<div class="nav-section-title">${t(locale, 'nav_test')}</div>`);
@@ -928,7 +1243,7 @@ function getAdminSidebar(locale, adminUser, member) {
       <div style="margin-top:12px;font-size:12px;color:#9ca3af;">${t(locale, 'lang_switch')}: ${langLinks}</div>
     </aside>`;
 }
-function getAdminTopbar(locale, clientIp, now, adminUser, currentPath) {
+function getAdminTopbar(locale, clientIp, nowLocal, nowTh, adminUser, currentPath) {
   const back = currentPath || '/admin/merchants';
   const langLinks = SUPPORTED_LOCALES.map((l) => {
     const label = l === 'zh' ? 'CH' : l.toUpperCase();
@@ -937,7 +1252,8 @@ function getAdminTopbar(locale, clientIp, now, adminUser, currentPath) {
   const logoutLink = '<a href="/admin/logout" style="color:#0369a1;text-decoration:none;margin-left:8px;">로그아웃</a>';
   return `<div class="topbar">
     <span>${t(locale, 'topbar_ip')}: ${clientIp || '-'}</span>
-    <span>${t(locale, 'topbar_time')}: ${now}</span>
+    <span>ㅣ ${t(locale, 'topbar_time')}: ${nowLocal}</span>
+    <span>ㅣ ${t(locale, 'topbar_time_th')}: ${nowTh}</span>
     <span style="margin-left:auto;">${t(locale, 'lang_switch')}: ${langLinks}</span>
     <span>${t(locale, 'user_label')}: ${adminUser || '-'}</span>
     <span>${logoutLink}</span>
@@ -947,10 +1263,28 @@ function getAdminTopbar(locale, clientIp, now, adminUser, currentPath) {
 // 로그인 페이지 (다국어 + Google OTP 안내)
 app.get('/admin/login', (req, res) => {
   const locale = getLocale(req);
+  const err = String((req.query || {}).err || '');
+  const u = String((req.query || {}).u || '');
   const langLinks = SUPPORTED_LOCALES.map((l) => {
     const label = l === 'zh' ? 'CH' : l.toUpperCase();
     return `<a href="/admin/set-locale?lang=${l}&back=/admin/login" style="color:#93c5fd;margin:0 4px;">${label}</a>`;
   }).join(' ');
+  const escAttr = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const escJs = (s) => String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' ');
+  const remaining = Math.max(0, parseInt(String((req.query || {}).left || ''), 10) || 0);
+  const remainingText = (left) => {
+    if (!left) return '';
+    if (locale === 'ja') return ` (残り${left}回)`;
+    if (locale === 'en') return ` (${left} attempts left)`;
+    if (locale === 'th') return ` (เหลือ ${left} ครั้ง)`;
+    if (locale === 'zh') return `（剩余${left}次）`;
+    return ` (${left}회 남음)`;
+  };
+  let errMsg = '';
+  if (err === 'otp') errMsg = (t(locale, 'login_error_otp') || 'OTP 번호가 올바르지 않습니다.') + remainingText(remaining);
+  if (err === 'otp_locked') errMsg = t(locale, 'login_error_otp_locked') || 'OTP가 5회 이상 틀려 초기화(잠금)되었습니다. 관리자에게 문의하세요.';
+  if (err === 'cred') errMsg = t(locale, 'login_error_cred') || '아이디 또는 비밀번호가 올바르지 않습니다.';
+  const alertScript = errMsg ? `<script>window.alert('${escJs(errMsg)}');</script>` : '';
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -977,8 +1311,9 @@ app.get('/admin/login', (req, res) => {
     <div class="lang-bar">${t(locale, 'lang_switch')}: ${langLinks}</div>
     <div class="card">
       <h1>${t(locale, 'login_title')}</h1>
+      ${errMsg ? `<div class="error">${escAttr(errMsg)}</div>` : ''}
       <form method="post" action="/admin/login">
-        <label>${t(locale, 'login_username')}<input type="text" name="username" required /></label>
+        <label>${t(locale, 'login_username')}<input type="text" name="username" value="${escAttr(u)}" required /></label>
         <label>${t(locale, 'login_password')}<input type="password" name="password" required /></label>
         <label>${t(locale, 'login_otp')}<input type="text" name="otp" maxlength="6" placeholder="000000" /></label>
         <div class="hint">${t(locale, 'login_otp_hint')}</div>
@@ -987,6 +1322,7 @@ app.get('/admin/login', (req, res) => {
       <p style="margin-top:14px;font-size:13px;"><a href="/admin/forgot" style="color:#93c5fd;">비밀번호 초기화 요청</a> &middot; <a href="/admin/forgot-id" style="color:#93c5fd;">아이디 찾기</a></p>
     </div>
   </div>
+  ${alertScript}
 </body>
 </html>`);
 });
@@ -1037,16 +1373,71 @@ app.post('/admin/login', (req, res) => {
   MEMBERS = loadMembers();
   const member = getMemberByUserId(userId);
   if (!member) {
-    return res.status(401).send(t(locale, 'login_error_cred'));
+    return res.redirect('/admin/login?err=cred&u=' + encodeURIComponent(userId));
   }
 
   const ok = bcrypt.compareSync(password, member.passwordHash);
   if (!ok) {
-    return res.status(401).send(t(locale, 'login_error_cred'));
+    return res.redirect('/admin/login?err=cred&u=' + encodeURIComponent(userId));
   }
 
-  if (member.otpRequired && !verifyOtp(member.otpSecret, otp)) {
-    return res.status(401).send(t(locale, 'login_error_otp'));
+  const isSuperAdmin = member.role === ROLES.SUPER_ADMIN;
+  if (!isSuperAdmin && member.otpLocked) {
+    return res.redirect('/admin/login?err=otp_locked&u=' + encodeURIComponent(userId));
+  }
+
+  if (member.otpRequired) {
+    // OTP 필수인데 아직 secret이 없으면 로그인은 허용하되, 계정 설정에서 OTP를 먼저 등록하도록 강제
+    if (!member.otpSecret) {
+      OPERATOR_PERMISSIONS = loadOperatorPermissions();
+      const permissions = member.role === ROLES.OPERATOR ? (OPERATOR_PERMISSIONS[member.userId] || []) : PAGE_KEYS;
+      req.session.member = {
+        id: member.id,
+        role: member.role,
+        userId: member.userId,
+        name: member.name,
+        canAssignPermission: member.canAssignPermission === true,
+        permissions,
+      };
+      req.session.adminUser = member.userId;
+      req.session.mustSetupOtp = true;
+      return res.redirect('/admin/account?forceOtp=1');
+    }
+
+    if (!verifyOtp(member.otpSecret, otp)) {
+      if (!isSuperAdmin) {
+        MEMBERS = loadMembers();
+        const m = getMemberByUserId(userId);
+        if (m) {
+          m.otpFailCount = Number.isFinite(m.otpFailCount) ? m.otpFailCount + 1 : 1;
+          const left = Math.max(0, 5 - m.otpFailCount);
+          if (m.otpFailCount >= 5) {
+            m.otpLocked = true;
+            // 자동 초기화(잠금): 기존 OTP 무효화
+            m.otpSecret = '';
+          }
+          const idx = MEMBERS.findIndex((x) => x.id === m.id);
+          if (idx >= 0) MEMBERS[idx] = m;
+          saveMembers(MEMBERS);
+          if (m.otpLocked) return res.redirect('/admin/login?err=otp_locked&u=' + encodeURIComponent(userId));
+          return res.redirect('/admin/login?err=otp&left=' + left + '&u=' + encodeURIComponent(userId));
+        }
+      }
+      return res.redirect('/admin/login?err=otp&left=0&u=' + encodeURIComponent(userId));
+    }
+  }
+
+  // 로그인 성공 시 실패 카운트 초기화(슈퍼관리자 제외 규칙이지만, 슈퍼관리자는 별도 영향 없음)
+  if (!isSuperAdmin && (member.otpFailCount || member.otpLocked)) {
+    MEMBERS = loadMembers();
+    const m = getMemberByUserId(userId);
+    if (m) {
+      m.otpFailCount = 0;
+      m.otpLocked = false;
+      const idx = MEMBERS.findIndex((x) => x.id === m.id);
+      if (idx >= 0) MEMBERS[idx] = m;
+      saveMembers(MEMBERS);
+    }
   }
 
   OPERATOR_PERMISSIONS = loadOperatorPermissions();
@@ -1061,6 +1452,7 @@ app.post('/admin/login', (req, res) => {
   };
   req.session.adminUser = member.userId;
   if (member.mustChangePassword) req.session.mustChangePassword = true;
+  req.session.mustSetupOtp = false;
 
   if (member.mustChangePassword) {
     return res.redirect('/admin/change-password');
@@ -1162,12 +1554,15 @@ app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) 
   const currentMember = getMemberById(req.session.member.id);
   if (!currentMember) return res.redirect('/admin/login');
   const hasOtp = !!(currentMember.otpSecret && currentMember.otpSecret.length > 0);
+  const forceOtp = String((req.query || {}).forceOtp || '') === '1' || req.session.mustSetupOtp === true;
   const clientIp =
     (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
     req.ip ||
     '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
 
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
@@ -1189,7 +1584,7 @@ app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) 
     button { margin-top: 12px; padding: 9px 16px; background:#60a5fa; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; }
     button:hover { background:#3b82f6; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:280px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
     .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
     .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
     .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
@@ -1210,10 +1605,11 @@ app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) 
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'account_title')}</h1>
         <p style="font-size:13px;color:#555;">${t(locale, 'account_desc')}</p>
+        ${forceOtp ? `<div style="margin:10px 0 0;padding:10px 12px;border-radius:8px;background:#fef3c7;border:1px solid #f59e0b;color:#92400e;font-size:13px;">OTP 등록이 필요합니다. 아래에서 <strong>OTP 새로 생성</strong>을 체크한 뒤 저장하고, QR 코드를 Google OTP 앱에 등록하세요.</div>` : ''}
         <form method="post" action="/admin/account" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
           <label>${t(locale, 'account_new_username')}<input type="text" name="username" value="${(currentMember.userId || '').replace(/"/g, '&quot;')}" required /></label>
           <label>${t(locale, 'account_new_password')}<input type="password" name="password" /></label>
@@ -1258,6 +1654,8 @@ app.post('/admin/account', requireAuth, requirePage('account'), async (req, res)
       name: `Noti Admin (${m.userId})`,
     });
     m.otpSecret = secret.base32;
+    m.otpFailCount = 0;
+    m.otpLocked = false;
     const idx = MEMBERS.findIndex((x) => x.id === m.id);
     if (idx >= 0) MEMBERS[idx] = m;
     saveMembers(MEMBERS);
@@ -1272,6 +1670,11 @@ app.post('/admin/account', requireAuth, requirePage('account'), async (req, res)
       resetOtp: true,
     });
 
+    req.session.adminUser = m.userId;
+    if (req.session.member) {
+      req.session.member.userId = m.userId;
+    }
+    req.session.mustSetupOtp = false;
     return res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -1316,6 +1719,8 @@ app.post('/admin/account', requireAuth, requirePage('account'), async (req, res)
     resetOtp: false,
   });
   req.session.adminUser = m.userId;
+  // OTP 미설정 상태(otpRequired=true, otpSecret='')라면 mustSetupOtp 유지, 설정 완료 시 해제
+  if (m.otpRequired && m.otpSecret) req.session.mustSetupOtp = false;
   return res.redirect('/admin/account');
 });
 
@@ -1324,7 +1729,9 @@ app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
   const locale = getLocale(req);
   const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const site = loadSiteSettings();
   const titleVal = (site.sidebarTitle || '').replace(/"/g, '&quot;');
   const subVal = (site.sidebarSub || '').replace(/"/g, '&quot;');
@@ -1361,7 +1768,7 @@ app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'nav_settings')}</h1>
         <p class="hint">왼쪽 상단 노출 이름, 추가 문구, 브라우저 탭 제목, 파비콘(ico) URL을 설정합니다.</p>
@@ -1402,11 +1809,13 @@ const requireMemberManage = [requireAuth, requireRole([ROLES.SUPER_ADMIN, ROLES.
 
 const PAGE_KEY_LABELS = {
   merchants: '가맹점추가',
-  pg_logs: 'PG 노티로그',
-  internal_logs: '정산 노티로그',
+  pg_logs: '피지 노티',
+  internal_logs: '전산 노티',
+  dev_internal_logs: '개발 노티',
   traffic_analysis: '트래픽분석',
-  internal_targets: '노티 추가설정',
+  internal_targets: '노티 추가등록',
   internal_noti_settings: '노티 환경설정',
+  dev_internal_noti_settings: '개발 환경설정',
   test_config: '테스트 설정',
   test_run: '테스트 실행',
   test_history: '테스트 내역',
@@ -1429,7 +1838,9 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
   const locale = getLocale(req);
   const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   MEMBERS = loadMembers();
   OPERATOR_PERMISSIONS = loadOperatorPermissions();
   const cur = req.session.member;
@@ -1540,7 +1951,7 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'account_manage_title')}</h1>
         <p style="font-size:13px;color:#555;">${t(locale, 'account_list_desc')}</p>
@@ -1720,6 +2131,8 @@ app.post('/admin/members/save', requireMemberManage[0], requireMemberManage[1], 
     passwordHash: bcrypt.hashSync(initialPassword, 10),
     otpSecret: '',
     otpRequired: false,
+    otpFailCount: 0,
+    otpLocked: false,
     canAssignPermission: false,
     mustChangePassword: true,
     createdAt: new Date().toISOString(),
@@ -1768,6 +2181,8 @@ app.post('/admin/members/reset-otp', requireMemberManage[0], requireMemberManage
   const isSuper = cur.role === ROLES.SUPER_ADMIN;
   if (!isSuper && mem.role !== ROLES.OPERATOR) return res.status(403).send('Forbidden');
   mem.otpSecret = '';
+  mem.otpFailCount = 0;
+  mem.otpLocked = false;
   const idx = MEMBERS.findIndex((x) => x.id === mem.id);
   if (idx >= 0) MEMBERS[idx] = mem;
   saveMembers(MEMBERS);
@@ -1852,7 +2267,9 @@ app.get('/admin/account-reset', requireAuth, requirePage('account_reset'), (req,
   const locale = getLocale(req);
   const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const requests = loadPasswordResetRequests();
   const pwRequests = requests.filter((r) => (r.type || 'password') === 'password');
   const otpRequests = requests.filter((r) => r.type === 'otp');
@@ -1901,7 +2318,7 @@ app.get('/admin/account-reset', requireAuth, requirePage('account_reset'), (req,
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'nav_account_reset')}</h1>
         <p style="font-size:13px;color:#555;">비번 초기화·OTP 초기화 요청을 승인할 수 있습니다.</p>
@@ -1931,6 +2348,8 @@ app.post('/admin/account-reset/approve', requireAuth, requirePage('account_reset
   if (!m) return res.status(404).send('Member not found');
   if (type === 'otp') {
     m.otpSecret = '';
+    m.otpFailCount = 0;
+    m.otpLocked = false;
   } else {
     m.passwordHash = bcrypt.hashSync(mem.userId + INITIAL_PASSWORD_SUFFIX, 10);
     m.mustChangePassword = true;
@@ -1993,7 +2412,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
     req.ip ||
     '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const internalOptions = Array.from(INTERNAL_TARGETS.values())
     .map(
       (target) =>
@@ -2033,6 +2454,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       const rsUrl = m.resultUrl || '';
       const relay = m.enableRelay === false ? 'N' : 'Y';
       const internal = m.enableInternal === false ? 'N' : 'Y';
+      const devInternal = m.enableDevInternal === true ? 'Y' : 'N';
       const internalTargetId = m.internalTargetId || '';
       const confirmDel = (t(locale, 'merchants_confirm_delete') || '삭제하시겠습니까?').replace(/'/g, "\\'");
       return `<tr>
@@ -2046,6 +2468,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <td>${internalTargetId}</td>
         <td>${relay}</td>
         <td>${internal}</td>
+        <td>${devInternal}</td>
         <td class="actions-cell">
           <div style="display:flex;flex-direction:column;gap:4px;align-items:center;">
             <button
@@ -2061,6 +2484,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
               data-internal-customer-id="${m.internalCustomerId || ''}"
               data-enable-relay="${relay}"
               data-enable-internal="${internal}"
+              data-enable-dev-internal="${devInternal}"
               style="padding:4px 8px;font-size:12px;background:#facc15;color:#111827;border:none;border-radius:4px;cursor:pointer;"
             >${t(locale, 'merchants_edit')}</button>
             <form method="post" action="/admin/merchants/delete" onsubmit="return confirm('${confirmDel}');" style="margin:0;">
@@ -2114,7 +2538,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="content">
     <div class="card">
       <h1>${t(locale, 'merchants_title')}</h1>
@@ -2180,6 +2604,10 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           <input type="checkbox" name="enableInternal" checked />
           전산 노티 사용 (내부 전산 시스템으로 전송)
         </label>
+        <label>
+          <input type="checkbox" name="enableDevInternal" />
+          개발 노티 사용 (개발 전산 시스템으로 전송)
+        </label>
         <button type="submit">${t(locale, 'merchants_save')}</button>
       </form>
     </div>
@@ -2188,23 +2616,24 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       <table>
         <thead>
           <tr>
-            <th>${t(locale, 'merchants_id')}</th>
-            <th class="cell-url">${t(locale, 'merchants_route_callback')}</th>
-            <th class="cell-url">${t(locale, 'merchants_route_result')}</th>
-            <th class="cell-url">${t(locale, 'merchants_callback_url')}</th>
-            <th class="cell-url">${t(locale, 'merchants_result_url')}</th>
-            <th>${t(locale, 'merchants_route_no')}</th>
-            <th>${t(locale, 'merchants_internal_customer_id')}</th>
-            <th>${t(locale, 'merchants_internal_target')}</th>
-            <th>${t(locale, 'merchants_relay')}</th>
-            <th>${t(locale, 'merchants_internal')}</th>
-            <th class="actions-cell">${t(locale, 'internal_targets_manage')}</th>
+            <th style="width:90px;">가맹점</th>
+            <th class="cell-url">PG Callurl</th>
+            <th class="cell-url">PG Reurl</th>
+            <th class="cell-url">Origin CBurl</th>
+            <th class="cell-url">Origin Reurl</th>
+            <th style="width:70px;">Route</th>
+            <th style="width:90px;">CustomerId</th>
+            <th style="width:100px;">등록대상</th>
+            <th style="width:50px;">PG</th>
+            <th style="width:50px;">전산</th>
+            <th style="width:50px;">개발</th>
+            <th class="actions-cell" style="width:80px;">관리</th>
           </tr>
         </thead>
         <tbody>
           ${
             rows ||
-            `<tr><td colspan="11" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
+            `<tr><td colspan="12" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
           }
         </tbody>
       </table>
@@ -2293,6 +2722,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var internalCustomerInput = form.querySelector('input[name="internalCustomerId"]');
         var relayCheckbox = form.querySelector('input[name="enableRelay"]');
         var internalCheckbox = form.querySelector('input[name="enableInternal"]');
+        var devInternalCheckbox = form.querySelector('input[name="enableDevInternal"]');
 
         if (merchantIdInput) {
           merchantIdInput.value = button.dataset.merchantId || '';
@@ -2314,6 +2744,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         }
         if (internalCheckbox) {
           internalCheckbox.checked = (button.dataset.enableInternal || 'Y') === 'Y';
+        }
+        if (devInternalCheckbox) {
+          devInternalCheckbox.checked = (button.dataset.enableDevInternal || 'N') === 'Y';
         }
 
         if (cbSelect) cbSelect.value = button.dataset.routeCallbackKey || '';
@@ -2352,6 +2785,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     internalTargetId,
     enableRelay,
     enableInternal,
+    enableDevInternal,
   } = req.body;
 
   const merchantId = (rawMerchantId || '').trim();
@@ -2385,6 +2819,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     internalTargetId: internalTargetId || '',
     enableRelay: enableRelay === 'on',
     enableInternal: enableInternal === 'on',
+    enableDevInternal: enableDevInternal === 'on',
   });
 
   console.log('[관리자] 가맹점 저장:', merchantId, MERCHANTS.get(merchantId));
@@ -2440,7 +2875,9 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
     req.ip ||
     '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
 
   const reversed = [...NOTI_LOGS].slice().reverse();
   const rows = reversed
@@ -2451,19 +2888,38 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       const jsonResult = log.kind === 'result' ? JSON.stringify(log.body, null, 2) : '';
       const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const relayStatus = log.relayStatus || '-';
-      const relayLabel = relayStatus === 'ok' ? '성공' : relayStatus === 'fail' ? '실패' : relayStatus === 'skip' ? '미전송' : relayStatus;
-      const relayClass = relayStatus === 'ok' ? 'status-ok' : relayStatus === 'fail' ? 'status-fail' : '';
-      const canResend = (relayStatus === 'fail' || relayStatus === 'ok') && log.targetUrl && log.body;
+      const relayHasTarget = !!log.targetUrl;
+      const relayLabel =
+        relayStatus === 'ok'
+          ? '성공'
+          : relayStatus === 'fail'
+          ? '실패'
+          : relayStatus === 'skip' && !relayHasTarget
+          ? '노티없음'
+          : relayStatus === 'skip'
+          ? '미전송'
+          : relayStatus;
+      const relayClass =
+        relayStatus === 'ok'
+          ? 'status-ok'
+          : relayStatus === 'fail'
+          ? 'status-fail'
+          : relayStatus === 'skip' && !relayHasTarget
+          ? 'status-none'
+          : '';
+      const canResend = (relayStatus === 'fail' || relayStatus === 'ok') && relayHasTarget && log.body;
       const resendBtn = canResend
         ? `<form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('해당 노티를 가맹점으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-resend">재전송</button></form>`
+        : !relayHasTarget
+        ? '<span class="label-none">노티없음</span>'
         : '-';
       return `<tr>
-        <td class="col-time" style="white-space:nowrap;font-size:11px;">${typeof tz === 'object' && tz.th != null ? `TH: ${esc(tz.th)}<br>JP: ${esc(tz.jp)}<br>SG: ${esc(tz.sg)}<br>US: ${esc(tz.us)}` : esc(log.receivedAt || '-')}</td>
+        <td class="col-time">${typeof tz === 'object' && tz.th != null ? `TH: ${esc(tz.th)}<br>JP: ${esc(tz.jp)}<br>SG: ${esc(tz.sg)}<br>US: ${esc(tz.us)}` : esc(log.receivedAt || '-')}</td>
         <td class="col-narrow">${esc(log.routeKey || '')}</td>
         <td class="col-narrow">${esc(log.merchantId || '')}</td>
         <td class="col-status"><span class="${relayClass}">${esc(relayLabel)}</span></td>
-        <td class="col-json"><pre style="margin:0;white-space:pre-wrap;font-size:12px;">${esc(jsonCallback) || '-'}</pre></td>
-        <td class="col-json"><pre style="margin:0;white-space:pre-wrap;font-size:12px;">${esc(jsonResult) || '-'}</pre></td>
+        <td class="col-json"><pre>${esc(jsonCallback) || '-'}</pre></td>
+        <td class="col-json"><pre>${esc(jsonResult) || '-'}</pre></td>
         <td class="col-action">${resendBtn}</td>
       </tr>`;
     })
@@ -2478,17 +2934,20 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: top; }
-    th { background: #e5f0ff; text-align: center; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: top; text-align:center; }
+    th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
-    .col-time, .col-narrow { width: 7%; min-width: 65px; }
-    .col-status { width: 6%; min-width: 58px; }
-    .col-json { width: 32%; }
-    .col-action { width: 6%; min-width: 60px; }
+    .col-time, .col-narrow { width: 9%; min-width: 75px; }
+    .col-status { width: 8%; min-width: 70px; }
+    .col-json { width: 27%; }
+    .col-action { width: 8%; min-width: 70px; }
     .status-ok { color: #059669; font-weight: 600; }
     .status-fail { color: #dc2626; font-weight: 600; }
+    .status-none { color:#b91c1c; font-weight:700; }
+    .label-none { color:#b91c1c; font-weight:700; }
     .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
     .btn-resend:hover { background: #1d4ed8; }
+    .col-json pre { margin:0; white-space:pre-wrap; font-size:12px; text-align:left; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
     .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
     .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
@@ -2509,7 +2968,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       <h1>${t(locale, 'pg_logs_title')} (${NOTI_LOGS.length})</h1>
       <p style="font-size:13px;color:#555;">${t(locale, 'pg_logs_desc')}</p>
@@ -2565,7 +3024,9 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
     req.ip ||
     '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
 
   const rows = Array.from(INTERNAL_TARGETS.values())
     .map(
@@ -2624,7 +3085,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       <h1>${t(locale, 'internal_targets_title')}</h1>
       <p style="font-size:13px;color:#555;">${t(locale, 'internal_targets_desc')}</p>
@@ -2675,7 +3136,9 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
     req.ip ||
     '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const full = loadInternalNotiSettingsFull();
   const amountRuleOptions = AMOUNT_RULE_KEYS.map((o) => ({ value: o.value, label: t(locale, o.key) }));
 
@@ -2788,7 +3251,7 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'internal_noti_title')}</h1>
         <p style="font-size:13px;color:#555;">${t(locale, 'internal_noti_desc')}</p>
@@ -2819,6 +3282,228 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
 </html>`);
 });
 
+// ---------- 개발 노티 설정 페이지 ----------
+app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_internal_noti_settings'), (req, res) => {
+  const locale = getLocale(req);
+  const clientIp =
+    (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
+    req.ip ||
+    '';
+  const adminUser = req.session.adminUser || '';
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const full = loadDevInternalNotiSettingsFull();
+  const amountRuleOptions = AMOUNT_RULE_KEYS.map((o) => ({ value: o.value, label: t(locale, o.key) }));
+
+  const confirmMsg = (t(locale, 'internal_noti_confirm_save') || '저장하시겠습니까?').replace(/'/g, "\\'");
+  const rows = CURRENCY_CODES
+    .map((code) => {
+      const currentRule = full.amountRules[code] || '=';
+      const currentLabel =
+        amountRuleOptions.find((o) => o.value === currentRule)?.label || t(locale, 'internal_noti_rule_eq');
+      const routeNoVal = (full.routeNoMode && full.routeNoMode[code]) || 'current';
+      const customerIdVal = (full.customerIdMode && full.customerIdMode[code]) || 'current';
+      const originalChecked = full.original && full.original[code];
+      return `
+    <tr>
+      <td>${CURRENCY_LABELS[code]} (${code})</td>
+      <td>
+        <form class="cell-form" method="post" action="/admin/dev-internal-noti-settings" onsubmit="return confirm('${confirmMsg}');">
+          <input type="hidden" name="currency" value="${code}" />
+          <input type="hidden" name="routeNo" value="${routeNoVal}" />
+          <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
+          <select name="rule" class="cell-select">${amountRuleOptions
+            .map(
+              (opt) =>
+                `<option value="${opt.value}" ${currentRule === opt.value ? 'selected' : ''}>${opt.label}</option>`,
+            )
+            .join('')}</select>
+          <button type="submit" class="btn-save-row">저장</button>
+        </form>
+      </td>
+      <td><span class="current-state">${currentLabel}</span></td>
+      <td>
+        <form class="cell-form" method="post" action="/admin/dev-internal-noti-settings" onsubmit="return confirm('${confirmMsg}');">
+          <input type="hidden" name="currency" value="${code}" />
+          <input type="hidden" name="rule" value="${currentRule}" />
+          <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
+          <select name="routeNo" class="cell-select" title="현재 RouteNo(전산용) / 삭제">
+            <option value="current" ${routeNoVal === 'current' ? 'selected' : ''}>현재</option>
+            <option value="delete" ${routeNoVal === 'delete' ? 'selected' : ''}>삭제</option>
+          </select>
+          <button type="submit" class="btn-save-row">저장</button>
+        </form>
+      </td>
+      <td>
+        <form class="cell-form" method="post" action="/admin/dev-internal-noti-settings" onsubmit="return confirm('${confirmMsg}');">
+          <input type="hidden" name="currency" value="${code}" />
+          <input type="hidden" name="rule" value="${currentRule}" />
+          <input type="hidden" name="routeNo" value="${routeNoVal}" />
+          <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
+          <select name="customerId" class="cell-select" title="가맹점 전산용 CustomerId / 삭제">
+            <option value="current" ${customerIdVal === 'current' ? 'selected' : ''}>가맹점값</option>
+            <option value="delete" ${customerIdVal === 'delete' ? 'selected' : ''}>삭제</option>
+          </select>
+          <button type="submit" class="btn-save-row">저장</button>
+        </form>
+      </td>
+      <td>
+        <form class="cell-form cell-form-inline" method="post" action="/admin/dev-internal-noti-settings" onsubmit="return confirm('${confirmMsg}');">
+          <input type="hidden" name="currency" value="${code}" />
+          <input type="hidden" name="rule" value="${currentRule}" />
+          <input type="hidden" name="routeNo" value="${routeNoVal}" />
+          <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <label class="cell-label"><input type="checkbox" name="original" ${originalChecked ? 'checked' : ''} value="on" /> 오리지널</label>
+          <button type="submit" class="btn-save-row">저장</button>
+        </form>
+      </td>
+    </tr>`;
+    })
+    .join('');
+
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${t(locale, 'nav_dev_internal_noti_settings') || '개발 환경설정'}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+    h1 { margin-bottom: 8px; }
+    h2 { margin-top: 24px; }
+    table { border-collapse: collapse; width: 100%; table-layout: fixed; background:#fff; }
+    th, td { border: 1px solid #e5e7eb; padding: 6px 8px; font-size: 13px; text-align: center; }
+    th { background: #e5f0ff; color:#1f2937; }
+    tr:nth-child(even) { background:#f9fafb; }
+    th:nth-child(1), td:nth-child(1) { width: 72px; }
+    th:nth-child(2), td:nth-child(2) { width: 150px; }
+    th:nth-child(3), td:nth-child(3) { width: 90px; white-space: nowrap; }
+    th:nth-child(4), td:nth-child(4) { width: 100px; }
+    th:nth-child(5), td:nth-child(5) { width: 95px; }
+    th:nth-child(6), td:nth-child(6) { width: 120px; }
+    .cell-form { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 0; }
+    .cell-form-inline { flex-wrap: nowrap; }
+    .cell-select { width: 100%; max-width: 82px; min-width: 52px; padding: 4px 6px; font-size: 12px; border-radius: 4px; border: 1px solid #d1d5db; box-sizing: border-box; }
+    .cell-label { display: inline-flex; align-items: center; gap: 4px; margin: 0; white-space: nowrap; font-size: 12px; }
+    .current-state { display: inline-block; padding: 4px 8px; border-radius: 4px; background:#dc2626; color:#fff; font-size: 12px; font-weight: 500; white-space: nowrap; }
+    button { margin-top: 12px; padding: 9px 16px; background:#60a5fa; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; }
+    button:hover { background:#3b82f6; }
+    .btn-save-row { padding: 4px 8px; font-size: 11px; background:#2563eb; color:#fff; border:none; border-radius: 4px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
+    .btn-save-row:hover { background:#1d4ed8; }
+    .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
+    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a, .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .main { flex:1; padding:16px 24px; box-sizing:border-box; }
+    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; margin-bottom:16px; flex-wrap:wrap; }
+    .topbar span { margin-right:12px; }
+    .card { background:#fff; padding:18px 22px; border-radius:10px; box-shadow:0 10px 25px rgba(15,23,42,0.06); margin-bottom:8px; border:1px solid #e5e7eb; }
+    .hint { font-size:12px; color:#6b7280; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
+      <div class="card">
+        <h1>${t(locale, 'nav_dev_internal_noti_settings') || '개발 환경설정'}</h1>
+        <p style="font-size:13px;color:#555;">${t(locale, 'internal_noti_desc')}</p>
+        <ul style="font-size:13px;color:#374151;margin:8px 0;">
+          <li><strong>X 100</strong>: ${t(locale, 'internal_noti_rule_x')} · <strong>/ 100</strong>: ${t(locale, 'internal_noti_rule_div')} · <strong>=</strong>: ${t(locale, 'internal_noti_rule_eq')}</li>
+          <li><strong>RouteNo 삭제</strong>: 해당 구문과 값을 전산 전송에서 제외. 기본은 현재 전산용 루트번호(가맹점 설정).</li>
+          <li><strong>CustomerId 삭제</strong>: 해당 구문과 값을 전산 전송에서 제외. 기본은 가맹점 설정의 전산용 CustomerId.</li>
+          <li><strong>오리지널</strong>: PG 노티를 가공 없이 그대로 개발 전산으로 전달 (PG 노티 로그와 동일).</li>
+        </ul>
+        <table>
+            <thead>
+              <tr>
+                <th>통화</th>
+                <th>가공규칙</th>
+                <th>현상태</th>
+                <th>RouteNo</th>
+                <th>CustomerId</th>
+                <th>오리지널</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        <p class="hint">${t(locale, 'internal_noti_hint')}</p>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
+});
+
+app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_internal_noti_settings'), (req, res) => {
+  const currency = (req.body.currency || '').trim();
+
+  if (currency && CURRENCY_CODES.includes(currency)) {
+    const full = loadDevInternalNotiSettingsFull();
+    let r = (req.body.rule || '=').trim() || '=';
+    if (r !== 'X100' && r !== '/100') r = '=';
+    full.amountRules[currency] = r;
+    const rn = (req.body.routeNo || 'current').trim();
+    full.routeNoMode[currency] = rn === 'delete' ? 'delete' : 'current';
+    const cid = (req.body.customerId || 'current').trim();
+    full.customerIdMode[currency] = cid === 'delete' ? 'delete' : 'current';
+    full.original[currency] = req.body.original === 'on';
+    saveDevInternalNotiSettings(full);
+    if (typeof appendConfigChangeLog === 'function') {
+      appendConfigChangeLog({
+        action: 'dev_internal_noti_settings',
+        detail: `개발 노티 설정 변경 (통화 ${currency} 개별 저장)`,
+        actor: req.session.adminUser || 'unknown',
+        clientIp:
+          (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
+          req.ip ||
+          '',
+        payload: { currency, rule: req.body.rule, routeNo: req.body.routeNo, customerId: req.body.customerId, original: req.body.original },
+      });
+    }
+  } else {
+    const amountRules = {};
+    const routeNoMode = {};
+    const customerIdMode = {};
+    const original = {};
+    CURRENCY_CODES.forEach((code) => {
+      let r = (req.body['rule_' + code] || '=').trim() || '=';
+      if (r !== 'X100' && r !== '/100') r = '=';
+      amountRules[code] = r;
+      const rn = (req.body['routeNo_' + code] || 'current').trim();
+      routeNoMode[code] = rn === 'delete' ? 'delete' : 'current';
+      const cid = (req.body['customerId_' + code] || 'current').trim();
+      customerIdMode[code] = cid === 'delete' ? 'delete' : 'current';
+      original[code] = req.body['original_' + code] === 'on';
+    });
+    saveDevInternalNotiSettings({
+      amountRules,
+      routeNoMode,
+      customerIdMode,
+      original,
+    });
+    if (typeof appendConfigChangeLog === 'function') {
+      appendConfigChangeLog({
+        action: 'dev_internal_noti_settings',
+        detail: '개발 노티 설정 변경 (금액/RouteNo/CustomerId/오리지널)',
+        actor: req.session.adminUser || 'unknown',
+        clientIp:
+          (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
+          req.ip ||
+          '',
+        payload: { amountRules, routeNoMode, customerIdMode, original },
+      });
+    }
+  }
+  return res.redirect('/admin/dev-internal-noti-settings');
+});
 app.post('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti_settings'), (req, res) => {
   const currency = (req.body.currency || '').trim();
 
@@ -2917,7 +3602,9 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
     req.ip ||
     '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
 
   const editId = (req.query.id || '').toString();
   const editingConfig = editId && TEST_CONFIGS.get(editId) ? TEST_CONFIGS.get(editId) : null;
@@ -3008,7 +3695,7 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'test_config_title')}</h1>
         <p style="font-size:13px;color:#555;">${t(locale, 'test_config_desc')}</p>
@@ -3186,7 +3873,9 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
     req.ip ||
     '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
 
   const locale = getLocale(req);
   const selectedId = (req.query.configId || '').toString();
@@ -3233,7 +3922,7 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'test_run_title')}</h1>
         <p style="font-size:13px;color:#555;">${t(locale, 'test_config_desc')}</p>
@@ -3415,7 +4104,9 @@ app.post('/admin/test-pay/submit', requireAuth, requirePage('test_run'), async (
     req.ip ||
     '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
 
   const {
     configId,
@@ -3625,7 +4316,7 @@ app.post('/admin/test-pay/submit', requireAuth, requirePage('test_run'), async (
     h2 { margin-top: 20px; margin-bottom: 8px; font-size:16px; }
     pre { background:#020617; color:#e5e7eb; padding:12px; border-radius:8px; font-size:12px; white-space:pre-wrap; word-break:break-all; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:280px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
     .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
     .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
     .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
@@ -3723,7 +4414,9 @@ app.get('/admin/test-logs', requireAuth, requirePage('test_history'), (req, res)
     req.ip ||
     '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   const recentLogs = [...TEST_LOGS].reverse().slice(0, 2);
@@ -3785,7 +4478,7 @@ app.get('/admin/test-logs', requireAuth, requirePage('test_history'), (req, res)
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'test_history_title')}</h1>
         <p style="font-size:13px;color:#555;">${t(locale, 'test_history_desc')}</p>
@@ -3874,7 +4567,9 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
     req.ip ||
     '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const reversedInternal = [...INTERNAL_LOGS].slice().reverse();
   const rows = reversedInternal
@@ -3894,13 +4589,13 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       const canResend = log.internalTargetUrl && log.payload;
       const resendBtn = canResend
         ? `<form method="post" action="/admin/internal/resend" style="display:inline;" onsubmit="return confirm('해당 노티를 전산으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-resend">재전송</button></form>`
-        : '-';
+        : '<span class="label-none">노티없음</span>';
       return `<tr>
-        <td class="col-time" style="white-space:nowrap;font-size:11px;width:10%;">${timeHtml}</td>
-        <td class="col-status" style="width:6%;"><span class="${internalClass}">${esc(internalLabel)}</span></td>
-        <td class="col-header" style="width:24%;"><pre style="margin:0;white-space:pre-wrap;font-size:12px;">${esc(jsonHeader)}</pre></td>
-        <td class="col-json" style="width:48%;"><pre style="margin:0;white-space:pre-wrap;font-size:12px;">${esc(jsonValue)}</pre></td>
-        <td class="col-action" style="width:6%;">${resendBtn}</td>
+        <td class="col-time">${timeHtml}</td>
+        <td class="col-status"><span class="${internalClass}">${esc(internalLabel)}</span></td>
+        <td class="col-header"><pre>${esc(jsonHeader)}</pre></td>
+        <td class="col-json"><pre>${esc(jsonValue)}</pre></td>
+        <td class="col-action">${resendBtn}</td>
       </tr>`;
     })
     .join('');
@@ -3914,8 +4609,8 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: top; }
-    th { background: #e5f0ff; text-align: center; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: top; text-align:center; }
+    th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
     .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
@@ -3929,9 +4624,10 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
     .card { background:#fff; padding:16px 20px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); margin-bottom:8px; border:1px solid #e5e7eb; }
-    pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; }
+    pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; white-space:pre-wrap; font-size:12px; text-align:left; margin:0; }
     .status-ok { color: #059669; font-weight: 600; }
     .status-fail { color: #dc2626; font-weight: 600; }
+    .label-none { color:#b91c1c; font-weight:700; }
     .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
     .btn-resend:hover { background: #1d4ed8; }
   </style>
@@ -3940,7 +4636,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       <h1>${t(locale, 'internal_logs_title')} (${INTERNAL_LOGS.length})</h1>
       <p style="font-size:13px;color:#555;">${t(locale, 'internal_logs_desc')}</p>
@@ -3985,11 +4681,141 @@ app.post('/admin/internal/resend', requireAuth, requirePage('internal_logs'), as
   }
 });
 
+// 개발 노티 로그 페이지
+app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (req, res) => {
+  const locale = getLocale(req);
+  const clientIp =
+    (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
+    req.ip ||
+    '';
+  const adminUser = req.session.adminUser || '';
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const reversedDev = [...DEV_INTERNAL_LOGS].slice().reverse();
+  const rows = reversedDev
+    .map((log, i) => {
+      const realIndex = DEV_INTERNAL_LOGS.length - 1 - i;
+      const tz = formatTimeMultiTZ(log.storedAt);
+      const timeHtml =
+        typeof tz === 'object' && tz.th != null
+          ? `TH: ${esc(tz.th)}<br>JP: ${esc(tz.jp)}<br>SG: ${esc(tz.sg)}<br>US: ${esc(tz.us)}`
+          : esc(log.storedAt || '-');
+      const payload = log.payload || {};
+      const jsonHeader = Object.keys(payload).join(', ');
+      const jsonValue = JSON.stringify(payload, null, 2);
+      const internalStatus = log.internalDeliveryStatus || '-';
+      const internalLabel =
+        internalStatus === 'ok'
+          ? '성공'
+          : internalStatus === 'fail'
+          ? '실패'
+          : internalStatus === 'skip'
+          ? '미전송'
+          : internalStatus;
+      const internalClass = internalStatus === 'ok' ? 'status-ok' : internalStatus === 'fail' ? 'status-fail' : '';
+      const canResend = log.internalTargetUrl && log.payload;
+      const resendBtn = canResend
+        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('해당 노티를 개발 전산으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-resend">재전송</button></form>`
+        : '<span class="label-none">노티없음</span>';
+      return `<tr>
+        <td class="col-time">${timeHtml}</td>
+        <td class="col-status"><span class="${internalClass}">${esc(internalLabel)}</span></td>
+        <td class="col-header"><pre>${esc(jsonHeader)}</pre></td>
+        <td class="col-json"><pre>${esc(jsonValue)}</pre></td>
+        <td class="col-action">${resendBtn}</td>
+      </tr>`;
+    })
+    .join('');
+
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${t(locale, 'nav_dev_internal_noti_log') || '개발 노티 로그'}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+    h1 { margin-bottom: 8px; }
+    table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: top; text-align:center; }
+    th { background: #e5f0ff; }
+    tr:nth-child(even) { background:#f9fafb; }
+    .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
+    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
+    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
+    .topbar span { margin-right:12px; }
+    .card { background:#fff; padding:16px 20px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); margin-bottom:8px; border:1px solid #e5e7eb; }
+    pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; white-space:pre-wrap; font-size:12px; text-align:left; margin:0; }
+    .status-ok { color: #059669; font-weight: 600; }
+    .status-fail { color: #dc2626; font-weight: 600; }
+    .label-none { color:#b91c1c; font-weight:700; }
+    .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .btn-resend:hover { background: #1d4ed8; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
+      <div class="card">
+      <h1>${t(locale, 'nav_dev_internal_noti_log') || '개발 노티 로그'} (${DEV_INTERNAL_LOGS.length})</h1>
+      <p style="font-size:13px;color:#555;">${t(locale, 'internal_logs_desc')}</p>
+      <table>
+        <colgroup><col style="width:10%;" /><col style="width:6%;" /><col style="width:24%;" /><col style="width:48%;" /><col style="width:6%;" /></colgroup>
+        <thead>
+          <tr>
+            <th>${t(locale, 'internal_logs_time')}</th>
+            <th>전산 수신</th>
+            <th>${t(locale, 'internal_logs_header')}</th>
+            <th>${t(locale, 'internal_logs_value')}</th>
+            <th>재전송</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows || `<tr><td colspan="5" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
+        </tbody>
+      </table>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
+});
+
+// 개발 노티 재전송
+app.post('/admin/dev-internal/resend', requireAuth, requirePage('dev_internal_logs'), async (req, res) => {
+  const index = parseInt(req.body.index, 10);
+  if (Number.isNaN(index) || index < 0 || index >= DEV_INTERNAL_LOGS.length) {
+    return res.redirect('/admin/dev-internal?err=invalid');
+  }
+  const log = DEV_INTERNAL_LOGS[index];
+  const url = log.internalTargetUrl;
+  if (!url || !log.payload) {
+    return res.redirect('/admin/dev-internal?err=no_target');
+  }
+  try {
+    const result = await sendToInternal(url, log.payload);
+    return res.redirect('/admin/dev-internal?resend=' + (result.success ? 'ok' : 'fail'));
+  } catch (err) {
+    return res.redirect('/admin/dev-internal?resend=fail');
+  }
+});
+
 // 트래픽 분석 (일자별 / 월간별 / 시간별)
 function aggregateTraffic() {
   const byDay = {};
   const byMonth = {};
   const byHour = {};
+   const byDowHour = Array.from({ length: 7 }, () => Array(24).fill(0));
   for (let i = 0; i < TRAFFIC_HITS.length; i++) {
     const hit = TRAFFIC_HITS[i];
     const d = new Date(hit.at);
@@ -3997,9 +4823,11 @@ function aggregateTraffic() {
     const dayKey = d.toISOString().slice(0, 10);
     const monthKey = d.toISOString().slice(0, 7);
     const hourKey = d.getUTCHours();
+    const dow = d.getUTCDay();
     byDay[dayKey] = (byDay[dayKey] || 0) + 1;
     byMonth[monthKey] = (byMonth[monthKey] || 0) + 1;
     byHour[hourKey] = (byHour[hourKey] || 0) + 1;
+    byDowHour[dow][hourKey] = (byDowHour[dow][hourKey] || 0) + 1;
   }
   const dayEntries = Object.entries(byDay).sort((a, b) => b[0].localeCompare(a[0])).slice(0, 31);
   const monthEntries = Object.entries(byMonth).sort((a, b) => b[0].localeCompare(a[0])).slice(0, 12);
@@ -4007,15 +4835,23 @@ function aggregateTraffic() {
   const maxDay = Math.max(1, ...dayEntries.map((e) => e[1]));
   const maxMonth = Math.max(1, ...monthEntries.map((e) => e[1]));
   const maxHour = Math.max(1, ...hourEntries.map((e) => e[1]));
-  return { dayEntries, monthEntries, hourEntries, maxDay, maxMonth, maxHour };
+  let maxHeat = 0;
+  for (let d = 0; d < 7; d++) {
+    for (let h = 0; h < 24; h++) {
+      if (byDowHour[d][h] > maxHeat) maxHeat = byDowHour[d][h];
+    }
+  }
+  return { dayEntries, monthEntries, hourEntries, maxDay, maxMonth, maxHour, byDowHour, maxHeat };
 }
 
 app.get('/admin/traffic', requireAuth, requirePage('traffic_analysis'), (req, res) => {
   const locale = getLocale(req);
   const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
   const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
-  const { dayEntries, monthEntries, hourEntries, maxDay, maxMonth, maxHour } = aggregateTraffic();
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const { dayEntries, monthEntries, hourEntries, maxDay, maxMonth, maxHour, byDowHour, maxHeat } = aggregateTraffic();
   const total = TRAFFIC_HITS.length;
   const dayRows = dayEntries.map(([day, count]) => {
     const pct = maxDay ? Math.round((count / maxDay) * 100) : 0;
@@ -4037,7 +4873,7 @@ app.get('/admin/traffic', requireAuth, requirePage('traffic_analysis'), (req, re
 <html lang="${locale}">
 <head>
   <meta charset="UTF-8" />
-  <title>트래픽분석</title>
+  <title>${t(locale, 'nav_traffic_analysis')}</title>
   <style>
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; color:#111827; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
@@ -4073,19 +4909,42 @@ app.get('/admin/traffic', requireAuth, requirePage('traffic_analysis'), (req, re
     .hour-cell-count { font-size:12px; font-weight:600; color:#1e293b; margin-top:4px; }
     .traffic-tables { display:grid; grid-template-columns:1fr 1fr; gap:24px; }
     @media (max-width: 1200px) { .traffic-tables { grid-template-columns:1fr; } }
+    .charts-row { display:grid; grid-template-columns:1fr 1fr; gap:24px; margin:12px 0 4px; }
+    @media (max-width: 1200px) { .charts-row { grid-template-columns:1fr; } }
+    .chart-block canvas { width:100%; max-height:260px; }
+    .heatmap-grid { display:grid; grid-template-columns:repeat(25, minmax(32px, 1fr)); gap:4px; margin-top:8px; font-size:11px; }
+    .heatmap-cell { padding:4px 2px; text-align:center; border-radius:4px; border:1px solid #e5e7eb; box-sizing:border-box; }
+    .heatmap-cell.header { background:#e5f0ff; font-weight:600; color:#1f2937; }
+    .heatmap-cell.label { background:#f9fafb; font-weight:600; color:#4b5563; }
   </style>
 </head>
 <body>
   <div class="layout">
     ${getAdminSidebar(locale, adminUser, req.session.member)}
     <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card traffic-card">
-        <h1>트래픽분석</h1>
+        <h1>${t(locale, 'nav_traffic_analysis')}</h1>
         <p class="stat">총 요청 수 (최근 ${TRAFFIC_HITS_MAX}건 기준): <strong>${total}</strong></p>
-        <h2>시간별 (UTC 0~23시)</h2>
+        <div class="chart-block">
+          <h2>시간별 추이 (라인/영역)</h2>
+          <canvas id="chart-hour-line"></canvas>
+        </div>
+        <div class="charts-row">
+          <div class="chart-block">
+            <h2>일자별</h2>
+            <canvas id="chart-day-line"></canvas>
+          </div>
+          <div class="chart-block">
+            <h2>월간</h2>
+            <canvas id="chart-month-bar"></canvas>
+          </div>
+        </div>
+        <h2>시간별 (UTC 0~23시) 상세</h2>
         <div class="hour-grid">${hourGridCells}</div>
         <table style="margin-top:16px;"><thead><tr><th class="hour-label">시간</th><th class="hour-count">건수</th><th class="hour-bar">비율</th></tr></thead><tbody>${hourRows}</tbody></table>
+        <h2 style="margin-top:20px;">요일·시간 히트맵</h2>
+        <div id="traffic-heatmap" class="heatmap-grid"></div>
       </div>
       <div class="card traffic-card traffic-tables">
         <div>
@@ -4099,6 +4958,186 @@ app.get('/admin/traffic', requireAuth, requirePage('traffic_analysis'), (req, re
       </div>
     </main>
   </div>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    (function () {
+      if (typeof Chart === 'undefined') return;
+      var dayEntries = ${JSON.stringify(dayEntries)};
+      var monthEntries = ${JSON.stringify(monthEntries)};
+      var hourEntries = ${JSON.stringify(hourEntries)};
+      var heatmap = ${JSON.stringify(byDowHour)};
+      var heatMax = ${maxHeat};
+      var locale = ${JSON.stringify(locale)};
+
+      function createHourLineAreaChart() {
+        var ctx = document.getElementById('chart-hour-line');
+        if (!ctx) return;
+        var labels = hourEntries.map(function (e) { return e[0] + '시'; });
+        var data = hourEntries.map(function (e) { return e[1]; });
+        new Chart(ctx.getContext('2d'), {
+          type: 'line',
+          data: {
+            labels: labels,
+            datasets: [
+              {
+                label: '시간별 트래픽 (라인)',
+                data: data,
+                borderColor: 'rgba(37, 99, 235, 1)',
+                backgroundColor: 'rgba(37, 99, 235, 0.0)',
+                tension: 0.25,
+                fill: false,
+                pointRadius: 2,
+              },
+              {
+                label: '시간별 트래픽 (영역)',
+                data: data,
+                borderColor: 'rgba(129, 140, 248, 1)',
+                backgroundColor: 'rgba(129, 140, 248, 0.25)',
+                tension: 0.25,
+                fill: true,
+                pointRadius: 0,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: true, labels: { boxWidth: 14 } },
+            },
+            scales: {
+              x: { title: { display: true, text: '시간(UTC)' } },
+              y: { beginAtZero: true, title: { display: true, text: '요청 수' } },
+            },
+          },
+        });
+      }
+
+      function createDayLineChart() {
+        var ctx = document.getElementById('chart-day-line');
+        if (!ctx) return;
+        var entries = dayEntries.slice().reverse();
+        var labels = entries.map(function (e) { return e[0]; });
+        var data = entries.map(function (e) { return e[1]; });
+        new Chart(ctx.getContext('2d'), {
+          type: 'line',
+          data: {
+            labels: labels,
+            datasets: [
+              {
+                label: '일자별 트래픽',
+                data: data,
+                borderColor: 'rgba(34, 197, 94, 1)',
+                backgroundColor: 'rgba(34, 197, 94, 0.15)',
+                tension: 0.2,
+                fill: true,
+                pointRadius: 2,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: true },
+            },
+            scales: {
+              x: { title: { display: true, text: '일자' } },
+              y: { beginAtZero: true, title: { display: true, text: '요청 수' } },
+            },
+          },
+        });
+      }
+
+      function createMonthBarChart() {
+        var ctx = document.getElementById('chart-month-bar');
+        if (!ctx) return;
+        var entries = monthEntries.slice().reverse();
+        var labels = entries.map(function (e) { return e[0]; });
+        var data = entries.map(function (e) { return e[1]; });
+        new Chart(ctx.getContext('2d'), {
+          type: 'bar',
+          data: {
+            labels: labels,
+            datasets: [
+              {
+                label: '월간 트래픽',
+                data: data,
+                backgroundColor: 'rgba(59, 130, 246, 0.7)',
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: true },
+            },
+            scales: {
+              x: { title: { display: true, text: '월(YYYY-MM)' } },
+              y: { beginAtZero: true, title: { display: true, text: '요청 수' } },
+            },
+          },
+        });
+      }
+
+      function colorForHeat(value, max) {
+        if (!max || !value) return 'rgb(249, 250, 251)';
+        var ratio = value / max;
+        if (ratio < 0) ratio = 0;
+        if (ratio > 1) ratio = 1;
+        var baseR = 249, baseG = 250, baseB = 251;
+        var targetR = 239, targetG = 68, targetB = 68;
+        var r = Math.round(baseR + (targetR - baseR) * ratio);
+        var g = Math.round(baseG + (targetG - baseG) * ratio);
+        var b = Math.round(baseB + (targetB - baseB) * ratio);
+        return 'rgb(' + r + ',' + g + ',' + b + ')';
+      }
+
+      function buildHeatmap() {
+        var container = document.getElementById('traffic-heatmap');
+        if (!container || !heatmap || !heatmap.length) return;
+        var weekdayNamesMap = {
+          ko: ['일', '월', '화', '수', '목', '금', '토'],
+          ja: ['日', '月', '火', '水', '木', '金', '土'],
+          en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+          th: ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'],
+          zh: ['日', '一', '二', '三', '四', '五', '六'],
+        };
+        var names = weekdayNamesMap[locale] || weekdayNamesMap.ko;
+        var dowOrder = [1, 2, 3, 4, 5, 6, 0]; // 월~일 순서
+
+        function makeCell(text, extraClass, bgColor) {
+          var div = document.createElement('div');
+          div.className = 'heatmap-cell' + (extraClass ? ' ' + extraClass : '');
+          if (text) div.textContent = text;
+          if (bgColor) div.style.backgroundColor = bgColor;
+          return div;
+        }
+
+        container.innerHTML = '';
+        container.appendChild(makeCell('', 'header', null));
+        for (var h = 0; h < 24; h++) {
+          container.appendChild(makeCell(h + '시', 'header', null));
+        }
+
+        for (var i = 0; i < dowOrder.length; i++) {
+          var dow = dowOrder[i];
+          container.appendChild(makeCell(names[dow], 'label', null));
+          for (var h = 0; h < 24; h++) {
+            var v = (heatmap[dow] && heatmap[dow][h]) ? heatmap[dow][h] : 0;
+            var color = colorForHeat(v, heatMax);
+            container.appendChild(makeCell(v ? String(v) : '', '', color));
+          }
+        }
+      }
+
+      createHourLineAreaChart();
+      createDayLineChart();
+      createMonthBarChart();
+      buildHeatmap();
+    })();
+  </script>
 </body>
 </html>`);
 });
