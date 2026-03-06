@@ -38,6 +38,24 @@ app.use(
   }),
 );
 
+// 정적 파일 (favicon.ico 등) — static 폴더
+const staticDir = path.join(__dirname, 'static');
+if (!fs.existsSync(staticDir)) fs.mkdirSync(staticDir, { recursive: true });
+app.use('/static', express.static(staticDir));
+
+// 브라우저 기본 파비콘 경로(/favicon.ico) 지원
+// - 환경설정(site-settings.json)의 favicon 값이 있으면 그 URL로 리다이렉트
+// - 없으면 static/favicon.ico 파일이 있으면 그 파일 제공
+app.get('/favicon.ico', (req, res) => {
+  const site = loadSiteSettings();
+  const faviconUrl = (site && site.favicon) ? String(site.favicon).trim() : '';
+  res.setHeader('Cache-Control', 'no-cache');
+  if (faviconUrl) return res.redirect(faviconUrl);
+  const localPath = path.join(staticDir, 'favicon.ico');
+  if (fs.existsSync(localPath)) return res.sendFile(localPath);
+  return res.status(204).end();
+});
+
 // 트래픽 수집 (모든 요청)
 app.use((req, res, next) => {
   const pathname = (req.path || req.url || '').split('?')[0];
@@ -861,7 +879,10 @@ app.get('/admin/set-locale', (req, res) => {
 
 function getAdminSidebar(locale, adminUser, member) {
   const site = loadSiteSettings();
-  const langLinks = SUPPORTED_LOCALES.map((l) => `<a href="/admin/set-locale?lang=${l}" style="color:#93c5fd;text-decoration:none;margin:0 2px;">${l.toUpperCase()}</a>`).join(' ');
+  const langLinks = SUPPORTED_LOCALES.map((l) => {
+    const label = l === 'zh' ? 'CH' : l.toUpperCase();
+    return `<a href="/admin/set-locale?lang=${l}" style="color:#93c5fd;text-decoration:none;margin:0 2px;">${label}</a>`;
+  }).join(' ');
   const role = member && member.role ? member.role : null;
   const canSeeMembers = role === ROLES.SUPER_ADMIN || role === ROLES.ADMIN;
   const perms = member && member.permissions ? member.permissions : PAGE_KEYS;
@@ -909,7 +930,10 @@ function getAdminSidebar(locale, adminUser, member) {
 }
 function getAdminTopbar(locale, clientIp, now, adminUser, currentPath) {
   const back = currentPath || '/admin/merchants';
-  const langLinks = SUPPORTED_LOCALES.map((l) => `<a href="/admin/set-locale?lang=${l}&back=${encodeURIComponent(back)}" style="color:#0369a1;text-decoration:none;margin:0 4px;">${l.toUpperCase()}</a>`).join(' ');
+  const langLinks = SUPPORTED_LOCALES.map((l) => {
+    const label = l === 'zh' ? 'CH' : l.toUpperCase();
+    return `<a href="/admin/set-locale?lang=${l}&back=${encodeURIComponent(back)}" style="color:#0369a1;text-decoration:none;margin:0 4px;">${label}</a>`;
+  }).join(' ');
   const logoutLink = '<a href="/admin/logout" style="color:#0369a1;text-decoration:none;margin-left:8px;">로그아웃</a>';
   return `<div class="topbar">
     <span>${t(locale, 'topbar_ip')}: ${clientIp || '-'}</span>
@@ -923,7 +947,10 @@ function getAdminTopbar(locale, clientIp, now, adminUser, currentPath) {
 // 로그인 페이지 (다국어 + Google OTP 안내)
 app.get('/admin/login', (req, res) => {
   const locale = getLocale(req);
-  const langLinks = SUPPORTED_LOCALES.map((l) => `<a href="/admin/set-locale?lang=${l}&back=/admin/login" style="color:#93c5fd;margin:0 4px;">${l.toUpperCase()}</a>`).join(' ');
+  const langLinks = SUPPORTED_LOCALES.map((l) => {
+    const label = l === 'zh' ? 'CH' : l.toUpperCase();
+    return `<a href="/admin/set-locale?lang=${l}&back=/admin/login" style="color:#93c5fd;margin:0 4px;">${label}</a>`;
+  }).join(' ');
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -1408,7 +1435,7 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
   const cur = req.session.member;
   const isSuper = cur && cur.role === ROLES.SUPER_ADMIN;
   const list = isSuper ? MEMBERS : MEMBERS.filter((x) => x.role === ROLES.OPERATOR);
-  const addFormRoleBlock = isSuper ? `<label>역할 <select name="role"><option value="${ROLES.OPERATOR}">${t(locale, 'role_operator')}</option><option value="${ROLES.ADMIN}">${t(locale, 'role_admin')}</option></select></label>` : '<input type="hidden" name="role" value="OPERATOR" />';
+  const addFormRoleBlock = isSuper ? `<label>역할 <select name="role" id="m-role"><option value="${ROLES.OPERATOR}">${t(locale, 'role_operator')}</option><option value="${ROLES.ADMIN}">${t(locale, 'role_admin')}</option></select></label>` : '<input type="hidden" name="role" id="m-role" value="OPERATOR" />';
   const addFormPermBlock = PAGE_KEYS.map((k, i) => `<label class="perm-check" title="${PAGE_KEY_LABELS[k] || k}"><input type="checkbox" name="perm_${k}" /> ${i + 1}</label>`).join('');
   const permHeaderCells = PAGE_KEYS.map((_, i) => `<th class="perm-col">${i + 1}</th>`).join('');
   const confirmDel = (t(locale, 'members_confirm_delete') || '삭제하시겠습니까?').replace(/'/g, "\\'");
@@ -1416,21 +1443,33 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
   const confirmOtp = 'OTP를 초기화합니다. 해당 계정은 재등록 후 사용 가능합니다. 진행할까요?'.replace(/'/g, "\\'");
   const rows = list
     .map((mem) => {
-      const canEdit = isSuper || (mem.role === ROLES.OPERATOR);
-      const canDelete = isSuper || (mem.role === ROLES.OPERATOR) && mem.id !== cur.id;
+      const canEditInfo = isSuper || cur.role === ROLES.ADMIN;
+      const canEditPerm = isSuper || (cur.role === ROLES.ADMIN && cur.canAssignPermission && mem.role === ROLES.OPERATOR);
+      const canDelete = (isSuper || mem.role === ROLES.OPERATOR) && mem.id !== cur.id;
       const canReset = (isSuper || (mem.role === ROLES.OPERATOR && cur.role === ROLES.ADMIN)) && mem.id !== cur.id;
       const opPerms = mem.role === ROLES.OPERATOR ? (OPERATOR_PERMISSIONS[mem.userId] || []) : [];
-      const permCells = mem.role === ROLES.OPERATOR && canEdit
-        ? PAGE_KEYS.map((k) => `<td class="perm-cell"><input type="checkbox" name="perm_${k}" ${opPerms.includes(k) ? 'checked' : ''} form="perm-form-${mem.id}" /></td>`).join('')
-        : PAGE_KEYS.map(() => '<td class="perm-cell">-</td>').join('');
+      const permCells =
+        mem.role === ROLES.OPERATOR
+          ? PAGE_KEYS.map((k) => {
+              const checked = opPerms.includes(k);
+              if (canEditPerm) {
+                return `<td class="perm-cell"><input type="checkbox" name="perm_${k}" ${checked ? 'checked' : ''} form="perm-form-${mem.id}" /></td>`;
+              }
+              return `<td class="perm-cell">${checked ? '●' : '-'}</td>`;
+            }).join('')
+          : PAGE_KEYS.map(() => '<td class="perm-cell">●</td>').join('');
       const confirmPerm = (t(locale, 'members_confirm_update_permissions') || '페이지 접근 권한을 수정하시겠습니까?').replace(/'/g, "\\'");
-      const permForm = mem.role === ROLES.OPERATOR && canEdit
-        ? `<form id="perm-form-${mem.id}" method="post" action="/admin/members/update-permissions" style="display:inline;" onsubmit="return confirm('${confirmPerm}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-update-perm">수정</button></form>`
+      const permForm = mem.role === ROLES.OPERATOR && canEditPerm
+        ? `<form id="perm-form-${mem.id}" method="post" action="/admin/members/update-permissions" style="display:inline;" onsubmit="return confirm('${confirmPerm}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-update-perm">권한</button></form>`
         : '';
       const resetPwBtn = canReset ? `<form method="post" action="/admin/members/reset-password" style="display:inline;" onsubmit="return confirm('${confirmPw}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-reset-pw">비번</button></form>` : '-';
       const resetOtpBtn = canReset ? `<form method="post" action="/admin/members/reset-otp" style="display:inline;" onsubmit="return confirm('${confirmOtp}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-reset-otp">OTP</button></form>` : '-';
       const initCell = canReset ? `<td class="init-cell">${resetPwBtn} ${resetOtpBtn}</td>` : '<td class="init-cell">-</td>';
-      const editLink = canEdit ? `<a href="/admin/members/edit/${mem.id}" class="btn-edit">${t(locale, 'edit_member')}</a>` : '-';
+      const memberDataAttr = canEditInfo ? (() => {
+        const o = { id: mem.id, name: mem.name || '', country: mem.country || '', userId: mem.userId || '', email: mem.email || '', birthDate: mem.birthDate || '', role: mem.role || '', perms: mem.role === ROLES.OPERATOR ? (OPERATOR_PERMISSIONS[mem.userId] || []) : [], otpRequired: !!mem.otpRequired, canAssignPermission: !!mem.canAssignPermission };
+        return JSON.stringify(o).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      })() : '';
+      const editInfoBtn = canEditInfo ? `<button type="button" class="btn-edit-info" data-member="${memberDataAttr}" title="상단 폼에 불러와 수정">정보</button>` : '-';
       const delBtn = canDelete ? `<form method="post" action="/admin/members/delete" style="display:inline;" onsubmit="return confirm('${confirmDel}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-del">${t(locale, 'delete_member')}</button></form>` : '-';
       return `<tr>
         <td>${(mem.name || '').replace(/</g, '&lt;')}</td>
@@ -1441,7 +1480,7 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
         <td>${getRoleLabel(mem.role, locale)}</td>
         ${permCells}
         ${initCell}
-        <td class="manage-cell">${permForm} ${editLink} ${delBtn}</td>
+        <td class="manage-cell">${permForm} ${editInfoBtn} ${delBtn}</td>
       </tr>`;
     })
     .join('');
@@ -1481,6 +1520,8 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
     .btn-update-perm:hover { background:#1d4ed8; }
     .btn-edit { display:inline-block; padding:4px 10px; font-size:12px; background:#eab308; color:#111827; border:none; border-radius:4px; cursor:pointer; text-decoration:none; margin-right:4px; }
     .btn-edit:hover { background:#ca8a04; color:#fff; }
+    .btn-edit-info { padding:4px 10px; font-size:12px; background:#eab308; color:#111827; border:none; border-radius:4px; cursor:pointer; margin-right:4px; }
+    .btn-edit-info:hover { background:#ca8a04; color:#fff; }
     .btn-del { padding:4px 8px; font-size:12px; background:#dc2626; color:#fff; border:none; border-radius:4px; cursor:pointer; }
     .btn-reset-pw { padding:4px 8px; font-size:12px; background:#6b7280; color:#fff; border:none; border-radius:4px; cursor:pointer; }
     .btn-reset-otp { padding:4px 8px; font-size:12px; background:#7c3aed; color:#fff; border:none; border-radius:4px; cursor:pointer; }
@@ -1504,17 +1545,19 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
         <h1>${t(locale, 'account_manage_title')}</h1>
         <p style="font-size:13px;color:#555;">${t(locale, 'account_list_desc')}</p>
         ${(isSuper || cur.role === ROLES.ADMIN) ? `
-        <h2>${t(locale, 'add_member')}</h2>
+        <h2 id="form-title" data-initial-title="${(t(locale, 'add_member') || '회원 추가').replace(/"/g, '&quot;')}">${t(locale, 'add_member')}</h2>
         <p class="perm-legend"><strong>페이지 접근 번호:</strong> ${PAGE_NUM_LEGEND}</p>
-        <form method="post" action="/admin/members/add" class="add-form-grid" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
-          <label>${t(locale, 'member_name')} <input type="text" name="name" required /></label>
-          <label>${t(locale, 'member_country')} <input type="text" name="country" /></label>
-          <label>${t(locale, 'member_user_id')} <input type="text" name="userId" required /></label>
-          <label>${t(locale, 'member_email')} <input type="email" name="email" /></label>
-          <label>${t(locale, 'member_birth_date')} <input type="text" name="birthDate" placeholder="YYYY-MM-DD" /></label>
+        <form id="member-form" method="post" action="/admin/members/save" class="add-form-grid" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
+          <input type="hidden" name="editId" id="editId" value="" />
+          <label>${t(locale, 'member_name')} <input type="text" name="name" id="m-name" required /></label>
+          <label>${t(locale, 'member_country')} <input type="text" name="country" id="m-country" /></label>
+          <label>${t(locale, 'member_user_id')} <input type="text" name="userId" id="m-userId" required /></label>
+          <label>${t(locale, 'member_email')} <input type="email" name="email" id="m-email" /></label>
+          <label>${t(locale, 'member_birth_date')} <input type="text" name="birthDate" id="m-birthDate" placeholder="YYYY-MM-DD" /></label>
           ${addFormRoleBlock}
-          <label style="grid-column:1/-1;">${t(locale, 'page_permissions')} (OPERATOR만 해당) <div>${addFormPermBlock}</div></label>
-          <label style="grid-column:1/-1;"><button type="submit" class="btn-add">${t(locale, 'members_save')}</button></label>
+          ${isSuper ? '<label><input type="checkbox" name="otpRequired" id="m-otpRequired" /> OTP 로그인 필수</label><label><input type="checkbox" name="canAssignPermission" id="m-canAssignPermission" /> 운영자 권한 부여 가능(ADMIN용)</label>' : ''}
+          <label style="grid-column:1/-1;">${t(locale, 'page_permissions')} (OPERATOR만 해당) <div id="add-form-perms">${addFormPermBlock}</div></label>
+          <label style="grid-column:1/-1;"><button type="submit" class="btn-add">${t(locale, 'members_save')}</button> <button type="button" id="btn-cancel-edit" style="display:none;padding:10px 18px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px;margin-left:8px;">취소(새로 등록)</button></label>
         </form>
         ` : ''}
       </div>
@@ -1528,6 +1571,61 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
       </div>
     </main>
   </div>
+  <script>
+    (function(){
+      var form = document.getElementById('member-form');
+      var editId = document.getElementById('editId');
+      var btnCancel = document.getElementById('btn-cancel-edit');
+      var formTitle = document.getElementById('form-title');
+      if (!form) return;
+      var permKeys = ['merchants','pg_logs','internal_logs','traffic_analysis','internal_targets','internal_noti_settings','test_config','test_run','test_history','account','settings','account_reset'];
+      function parseDataAttr(s) {
+        if (!s) return null;
+        try { return JSON.parse(s.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')); } catch(e) { return null; }
+      }
+      function fillForm(m) {
+        var nameEl = document.getElementById('m-name');
+        var countryEl = document.getElementById('m-country');
+        var userIdEl = document.getElementById('m-userId');
+        var emailEl = document.getElementById('m-email');
+        var birthEl = document.getElementById('m-birthDate');
+        var roleEl = document.getElementById('m-role');
+        if (nameEl) nameEl.value = m.name || '';
+        if (countryEl) countryEl.value = m.country || '';
+        if (userIdEl) userIdEl.value = m.userId || '';
+        if (emailEl) emailEl.value = m.email || '';
+        if (birthEl) birthEl.value = m.birthDate || '';
+        if (roleEl) { roleEl.value = m.role || ''; if (roleEl.tagName === 'SELECT') roleEl.selectedIndex = m.role === 'ADMIN' ? 1 : 0; }
+        var otpEl = document.getElementById('m-otpRequired');
+        var assignEl = document.getElementById('m-canAssignPermission');
+        if (otpEl) otpEl.checked = !!m.otpRequired;
+        if (assignEl) assignEl.checked = !!m.canAssignPermission;
+        if (editId) editId.value = m.id || '';
+        var perms = m.perms || [];
+        permKeys.forEach(function(k){
+          var cb = form.querySelector('[name="perm_'+k+'"]');
+          if (cb) cb.checked = perms.indexOf(k) !== -1;
+        });
+        if (btnCancel) btnCancel.style.display = 'inline-block';
+        if (formTitle) formTitle.textContent = '계정 수정: ' + (m.userId || '');
+        form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      function clearEditMode() {
+        if (editId) editId.value = '';
+        if (btnCancel) btnCancel.style.display = 'none';
+        if (formTitle) formTitle.textContent = formTitle.getAttribute('data-initial-title') || '회원 추가';
+        form.reset();
+        permKeys.forEach(function(k){ var cb = form.querySelector('[name="perm_'+k+'"]'); if (cb) cb.checked = false; });
+      }
+      document.querySelectorAll('.btn-edit-info').forEach(function(btn){
+        btn.addEventListener('click', function(){
+          var m = parseDataAttr(this.getAttribute('data-member'));
+          if (m) fillForm(m);
+        });
+      });
+      if (btnCancel) btnCancel.addEventListener('click', clearEditMode);
+    })();
+  </script>
 </body>
 </html>`);
 });
@@ -1575,79 +1673,72 @@ app.post('/admin/members/add', requireMemberManage[0], requireMemberManage[1], (
   return res.redirect('/admin/members');
 });
 
-app.get('/admin/members/edit/:id', requireMemberManage[0], requireMemberManage[1], (req, res) => {
+app.post('/admin/members/save', requireMemberManage[0], requireMemberManage[1], (req, res) => {
   const locale = getLocale(req);
-  const id = req.params.id;
-  MEMBERS = loadMembers();
-  const mem = getMemberById(id);
-  if (!mem) return res.status(404).send('Not found');
+  const body = req.body || {};
+  const editId = (body.editId || '').trim();
   const cur = req.session.member;
-  const isSuper = cur.role === ROLES.SUPER_ADMIN;
-  const canEditPermission = isSuper || (mem.role === ROLES.OPERATOR && cur.canAssignPermission);
-  if (!isSuper && mem.role !== ROLES.OPERATOR) return res.status(403).send('Forbidden');
-  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
-  const adminUser = req.session.adminUser || '';
-  const now = new Date().toLocaleString('ko-KR', { hour12: false });
-  OPERATOR_PERMISSIONS = loadOperatorPermissions();
-  const opPerms = OPERATOR_PERMISSIONS[mem.userId] || [];
-  const permCheckboxes = canEditPermission && mem.role === ROLES.OPERATOR
-    ? PAGE_KEYS.map((k, i) => `<label class="perm-check" title="${PAGE_KEY_LABELS[k] || k}"><input type="checkbox" name="perm_${k}" ${opPerms.includes(k) ? 'checked' : ''} /> ${i + 1}</label>`).join('')
-    : '';
-  const canAssignBlock = isSuper && mem.role === ROLES.ADMIN ? `<label><input type="checkbox" name="canAssignPermission" ${mem.canAssignPermission ? 'checked' : ''} /> ${t(locale, 'can_assign_permission')}</label>` : '';
-  const otpRequiredBlock = isSuper ? `<label><input type="checkbox" name="otpRequired" ${mem.otpRequired ? 'checked' : ''} /> OTP 로그인 필수</label>` : '';
-  res.send(`<!DOCTYPE html>
-<html lang="${locale}">
-<head>
-  <meta charset="UTF-8" />
-  <title>${t(locale, 'edit_member')}</title>
-  <style>
-    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; color:#111827; }
-    .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; }
-    .nav a { display:block; padding:8px 10px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
-    .main { flex:1; padding:16px 24px; box-sizing:border-box; }
-    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; border:1px solid #bae6fd; margin-bottom:16px; }
-    .card { background:#fff; padding:18px 22px; border-radius:10px; box-shadow:0 10px 25px rgba(15,23,42,0.06); border:1px solid #e5e7eb; }
-    .perm-legend { font-size:12px; color:#6b7280; background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:8px 12px; margin-bottom:12px; }
-    label { display:block; margin-top:10px; font-size:14px; }
-    .perm-check { display:inline-flex; align-items:center; gap:4px; margin-right:10px; margin-top:8px; }
-    .perm-check input { width:auto; max-width:none; }
-    input[type="text"], input[type="email"] { width:100%; max-width:320px; padding:8px 10px; border-radius:6px; border:1px solid #d1d5db; box-sizing:border-box; }
-    button { padding:10px 18px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer; margin-top:12px; font-size:14px; }
-    button:hover { background:#1d4ed8; }
-    .btn-reset { padding:8px 14px; background:#dc2626; color:#fff; border:none; border-radius:6px; cursor:pointer; margin-top:16px; }
-  </style>
-</head>
-<body>
-  <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
-    <main class="main">
-      ${getAdminTopbar(locale, clientIp, now, adminUser, req.originalUrl)}
-      <div class="card">
-        <h1>${t(locale, 'edit_member')} - ${(mem.userId || '').replace(/</g, '&lt;')}</h1>
-        <p><a href="/admin/members">← ${t(locale, 'account_manage_title')}로</a></p>
-        <form method="post" action="/admin/members/edit/${mem.id}" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
-          <label>${t(locale, 'member_name')} <input type="text" name="name" value="${(mem.name || '').replace(/"/g, '&quot;')}" /></label>
-          <label>${t(locale, 'member_country')} <input type="text" name="country" value="${(mem.country || '').replace(/"/g, '&quot;')}" /></label>
-          <label>${t(locale, 'member_user_id')} <input type="text" name="userId" value="${(mem.userId || '').replace(/"/g, '&quot;')}" required /></label>
-          <label>${t(locale, 'member_email')} <input type="email" name="email" value="${(mem.email || '').replace(/"/g, '&quot;')}" /></label>
-          <label>${t(locale, 'member_birth_date')} <input type="text" name="birthDate" value="${(mem.birthDate || '').replace(/"/g, '&quot;')}" placeholder="YYYY-MM-DD" /></label>
-          ${otpRequiredBlock}
-          ${canAssignBlock}
-          ${permCheckboxes ? `<p class="perm-legend"><strong>페이지 접근:</strong> ${PAGE_NUM_LEGEND}</p><div><strong>${t(locale, 'page_permissions')}</strong> <div>${permCheckboxes}</div></div>` : ''}
-          <button type="submit">${t(locale, 'members_save')}</button>
-        </form>
-        ${(isSuper || (mem.role === ROLES.OPERATOR && cur.role === ROLES.ADMIN)) ? `<form method="post" action="/admin/members/reset-password" style="margin-top:16px;" onsubmit="return confirm('비밀번호를 초기(아이디+1!)로 초기화합니다.');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-reset">비밀번호 초기화</button></form>` : ''}
-      </div>
-    </main>
-  </div>
-</body>
-</html>`);
+  const isSuper = cur && cur.role === ROLES.SUPER_ADMIN;
+  if (editId) {
+    MEMBERS = loadMembers();
+    const mem = getMemberById(editId);
+    if (!mem) return res.status(404).send('Not found');
+    if (!isSuper && mem.role !== ROLES.OPERATOR) return res.status(403).send('Forbidden');
+    const { name, country, userId, email, birthDate, canAssignPermission } = body;
+    mem.name = (name || '').trim();
+    mem.country = (country || '').trim();
+    mem.userId = (userId || '').trim();
+    mem.email = (email || '').trim();
+    mem.birthDate = (birthDate || '').trim();
+    if (isSuper && mem.role === ROLES.ADMIN && body.hasOwnProperty('canAssignPermission')) mem.canAssignPermission = canAssignPermission === 'on';
+    if (isSuper && body.hasOwnProperty('otpRequired')) mem.otpRequired = body.otpRequired === 'on';
+    const idx = MEMBERS.findIndex((x) => x.id === mem.id);
+    if (idx >= 0) MEMBERS[idx] = mem;
+    saveMembers(MEMBERS);
+    const perms = [];
+    PAGE_KEYS.forEach((k) => { if (body['perm_' + k] === 'on') perms.push(k); });
+    if (mem.role === ROLES.OPERATOR) {
+      OPERATOR_PERMISSIONS = loadOperatorPermissions();
+      OPERATOR_PERMISSIONS[mem.userId] = perms;
+      saveOperatorPermissions(OPERATOR_PERMISSIONS);
+    }
+    return res.redirect('/admin/members');
+  }
+  const { name, country, userId, email, birthDate, role } = body;
+  const assignRole = (role === ROLES.ADMIN && isSuper) ? ROLES.ADMIN : ROLES.OPERATOR;
+  if (!userId || !userId.trim()) return res.status(400).send('userId required');
+  if (getMemberByUserId(userId.trim())) return res.status(400).send('Already exists: ' + userId.trim());
+  const initialPassword = userId.trim() + INITIAL_PASSWORD_SUFFIX;
+  const member = {
+    id: 'member-' + Date.now(),
+    role: assignRole,
+    name: (name || '').trim(),
+    country: (country || '').trim(),
+    userId: userId.trim(),
+    email: (email || '').trim(),
+    birthDate: (birthDate || '').trim(),
+    passwordHash: bcrypt.hashSync(initialPassword, 10),
+    otpSecret: '',
+    otpRequired: false,
+    canAssignPermission: false,
+    mustChangePassword: true,
+    createdAt: new Date().toISOString(),
+  };
+  MEMBERS = loadMembers();
+  MEMBERS.push(member);
+  saveMembers(MEMBERS);
+  const perms = [];
+  PAGE_KEYS.forEach((k) => { if (body['perm_' + k] === 'on') perms.push(k); });
+  if (assignRole === ROLES.OPERATOR && perms.length) {
+    OPERATOR_PERMISSIONS = loadOperatorPermissions();
+    OPERATOR_PERMISSIONS[member.userId] = perms;
+    saveOperatorPermissions(OPERATOR_PERMISSIONS);
+  }
+  return res.redirect('/admin/members');
+});
+
+app.get('/admin/members/edit/:id', requireMemberManage[0], requireMemberManage[1], (req, res) => {
+  return res.redirect('/admin/members');
 });
 
 app.post('/admin/members/reset-password', requireMemberManage[0], requireMemberManage[1], (req, res) => {
@@ -1664,7 +1755,7 @@ app.post('/admin/members/reset-password', requireMemberManage[0], requireMemberM
   const idx = MEMBERS.findIndex((x) => x.id === mem.id);
   if (idx >= 0) MEMBERS[idx] = mem;
   saveMembers(MEMBERS);
-  return res.redirect('/admin/members/edit/' + id);
+  return res.redirect('/admin/members');
 });
 
 app.post('/admin/members/reset-otp', requireMemberManage[0], requireMemberManage[1], (req, res) => {
@@ -1691,7 +1782,8 @@ app.post('/admin/members/update-permissions', requireMemberManage[0], requireMem
   if (!mem) return res.status(404).send('Not found');
   const cur = req.session.member;
   const isSuper = cur.role === ROLES.SUPER_ADMIN;
-  if (!isSuper && mem.role !== ROLES.OPERATOR) return res.status(403).send('Forbidden');
+  const canAssign = isSuper || (cur.role === ROLES.ADMIN && cur.canAssignPermission === true);
+  if (!canAssign || mem.role !== ROLES.OPERATOR) return res.status(403).send('Forbidden');
   if (mem.role !== ROLES.OPERATOR) return res.redirect('/admin/members');
   const perms = [];
   PAGE_KEYS.forEach((k) => {
