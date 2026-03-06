@@ -1,0 +1,26 @@
+{
+  "name": "pg-notification-relay",
+  "version": "1.0.0",
+  "description": "PG 결제 노티 수신 → 가맹점 릴레이 + 전산 저장용 가공 전송",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "webhook",
+    "payment",
+    "notification",
+    "relay"
+  ],
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.13.6",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.2.1",
+    "express-session": "^1.18.1",
+    "qrcode": "^1.5.4",
+    "speakeasy": "^2.0.0"
+  }
+}
