@@ -26,8 +26,34 @@ function setLocaleCookie(res, lang) {
     res.cookie('lang', lang, { maxAge: 365 * 24 * 60 * 60 * 1000, httpOnly: false });
   }
 }
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// PG 노티(/noti/*)는 원문 그대로 가맹점에 전달하기 위해 raw body 선점
+app.use((req, res, next) => {
+  const isNotiPost = (req.path.startsWith('/noti/') || req.path === '/noti') && req.method === 'POST';
+  if (!isNotiPost) return next();
+  const rawParser = express.raw({ type: () => true });
+  rawParser(req, res, (err) => {
+    if (err) return next(err);
+    const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body || ''));
+    req.rawBodyBuffer = buf;
+    const ct = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (ct.includes('application/json')) {
+      try { req.body = JSON.parse(buf.toString('utf8')); } catch { req.body = {}; }
+    } else if (ct.includes('application/x-www-form-urlencoded')) {
+      req.body = Object.fromEntries(new URLSearchParams(buf.toString('utf8')));
+    } else {
+      req.body = {};
+    }
+    next();
+  });
+});
+app.use((req, res, next) => {
+  if ((req.path.startsWith('/noti/') || req.path === '/noti') && req.method === 'POST') return next();
+  express.json()(req, res, next);
+});
+app.use((req, res, next) => {
+  if ((req.path.startsWith('/noti/') || req.path === '/noti') && req.method === 'POST') return next();
+  express.urlencoded({ extended: true })(req, res, next);
+});
 app.use(cookieParser());
 app.use(
   session({
@@ -83,6 +109,9 @@ const PAGE_KEYS = [
   'pg_logs',
   'internal_logs',
   'dev_internal_logs',
+  'pg_result',
+  'internal_result',
+  'dev_result',
   'traffic_analysis',
   'internal_targets',
   'internal_noti_settings',
@@ -93,6 +122,7 @@ const PAGE_KEYS = [
   'account',
   'settings',
   'account_reset',
+  'cancel_refund',
 ];
 const INITIAL_PASSWORD_SUFFIX = '1!';
 const INTERNAL_TARGETS_CONFIG_PATH = path.join(CONFIG_DIR, 'internal-targets.json');
@@ -100,6 +130,7 @@ const INTERNAL_NOTI_SETTINGS_PATH = path.join(CONFIG_DIR, 'internal-noti-setting
 const DEV_INTERNAL_NOTI_SETTINGS_PATH = path.join(CONFIG_DIR, 'dev-internal-noti-settings.json');
 const SITE_SETTINGS_PATH = path.join(CONFIG_DIR, 'site-settings.json');
 const TEST_CONFIGS_CONFIG_PATH = path.join(CONFIG_DIR, 'test-configs.json');
+const CHILLPAY_TRANSACTION_CONFIG_PATH = path.join(CONFIG_DIR, 'chillpay-transaction.json');
 
 const DEFAULT_SIDEBAR_TITLE = 'PG 노티 관리자';
 const DEFAULT_SIDEBAR_SUB = 'Webhooks & Internal Notices';
@@ -129,6 +160,74 @@ function saveSiteSettings(o) {
     favicon: (o && o.favicon != null) ? String(o.favicon).trim() : cur.favicon,
   };
   fs.writeFileSync(SITE_SETTINGS_PATH, JSON.stringify(toSave, null, 2));
+  return toSave;
+}
+
+// ========== ChillPay Transaction API (무효/환불) + 취소 가능 시간 ==========
+// 기본: 한국·일본 시간 당일 22:30까지 자동화 Void, 22:31~01:30 수동, 01:30 이후 환불(자동화 가능)
+const DEFAULT_VOID_CUTOFF_HOUR = 23;
+const DEFAULT_VOID_CUTOFF_MINUTE = 30;
+const DEFAULT_REFUND_START_HOUR = 1;
+const DEFAULT_REFUND_START_MINUTE = 30;
+const DEFAULT_CHILLPAY_TIMEZONE = 'Asia/Tokyo';
+
+function loadChillPayTransactionConfig() {
+  try {
+    const raw = fs.readFileSync(CHILLPAY_TRANSACTION_CONFIG_PATH, 'utf8');
+    const o = JSON.parse(raw);
+    return {
+      sandbox: (o && o.sandbox) ? { mid: String(o.sandbox.mid || '').trim(), apiKey: String(o.sandbox.apiKey || '').trim(), md5: String(o.sandbox.md5 || '').trim() } : { mid: '', apiKey: '', md5: '' },
+      production: (o && o.production) ? { mid: String(o.production.mid || '').trim(), apiKey: String(o.production.apiKey || '').trim(), md5: String(o.production.md5 || '').trim() } : { mid: '', apiKey: '', md5: '' },
+      voidCutoffHour: Number.isFinite(o && o.voidCutoffHour) ? o.voidCutoffHour : DEFAULT_VOID_CUTOFF_HOUR,
+      voidCutoffMinute: Number.isFinite(o && o.voidCutoffMinute) ? o.voidCutoffMinute : DEFAULT_VOID_CUTOFF_MINUTE,
+      refundStartHour: Number.isFinite(o && o.refundStartHour) ? o.refundStartHour : DEFAULT_REFUND_START_HOUR,
+      refundStartMinute: Number.isFinite(o && o.refundStartMinute) ? o.refundStartMinute : DEFAULT_REFUND_START_MINUTE,
+      timezone: (o && o.timezone && String(o.timezone).trim()) ? String(o.timezone).trim() : DEFAULT_CHILLPAY_TIMEZONE,
+      useSandbox: !!(o && o.useSandbox === true),
+      emailFrom: (o && o.emailFrom != null) ? String(o.emailFrom).trim() : '',
+      companyName: (o && o.companyName != null) ? String(o.companyName).trim() : '',
+      contactName: (o && o.contactName != null) ? String(o.contactName).trim() : '',
+      emailTo: (o && o.emailTo != null) ? String(o.emailTo).trim() : 'help@chillpay.co.th',
+      emailBodyTemplate: (o && o.emailBodyTemplate != null) ? String(o.emailBodyTemplate).trim() : '아래 거래에 대해 취소를 요청합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n',
+    };
+  } catch (e) {
+    return {
+      sandbox: { mid: '', apiKey: '', md5: '' },
+      production: { mid: '', apiKey: '', md5: '' },
+      voidCutoffHour: DEFAULT_VOID_CUTOFF_HOUR,
+      voidCutoffMinute: DEFAULT_VOID_CUTOFF_MINUTE,
+      refundStartHour: DEFAULT_REFUND_START_HOUR,
+      refundStartMinute: DEFAULT_REFUND_START_MINUTE,
+      timezone: DEFAULT_CHILLPAY_TIMEZONE,
+      useSandbox: APP_ENV === 'test',
+      emailFrom: '',
+      companyName: '',
+      contactName: '',
+      emailTo: 'help@chillpay.co.th',
+      emailBodyTemplate: '아래 거래에 대해 취소를 요청합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n',
+    };
+  }
+}
+
+function saveChillPayTransactionConfig(o) {
+  ensureConfigDir();
+  const cur = loadChillPayTransactionConfig();
+  const toSave = {
+    sandbox: o && o.sandbox ? { mid: String(o.sandbox.mid || '').trim(), apiKey: String(o.sandbox.apiKey || '').trim(), md5: String(o.sandbox.md5 || '').trim() } : cur.sandbox,
+    production: o && o.production ? { mid: String(o.production.mid || '').trim(), apiKey: String(o.production.apiKey || '').trim(), md5: String(o.production.md5 || '').trim() } : cur.production,
+    voidCutoffHour: o && Number.isFinite(o.voidCutoffHour) ? o.voidCutoffHour : cur.voidCutoffHour,
+    voidCutoffMinute: o && Number.isFinite(o.voidCutoffMinute) ? o.voidCutoffMinute : cur.voidCutoffMinute,
+    refundStartHour: o && Number.isFinite(o.refundStartHour) ? o.refundStartHour : cur.refundStartHour,
+    refundStartMinute: o && Number.isFinite(o.refundStartMinute) ? o.refundStartMinute : cur.refundStartMinute,
+    timezone: (o && o.timezone != null && String(o.timezone).trim()) ? String(o.timezone).trim() : cur.timezone,
+    useSandbox: o && typeof o.useSandbox === 'boolean' ? o.useSandbox : cur.useSandbox,
+    emailFrom: (o && o.emailFrom != null) ? String(o.emailFrom).trim() : cur.emailFrom,
+    companyName: (o && o.companyName != null) ? String(o.companyName).trim() : cur.companyName,
+    contactName: (o && o.contactName != null) ? String(o.contactName).trim() : cur.contactName,
+    emailTo: (o && o.emailTo != null) ? String(o.emailTo).trim() : cur.emailTo,
+    emailBodyTemplate: (o && o.emailBodyTemplate != null) ? String(o.emailBodyTemplate).trim() : cur.emailBodyTemplate,
+  };
+  fs.writeFileSync(CHILLPAY_TRANSACTION_CONFIG_PATH, JSON.stringify(toSave, null, 2));
   return toSave;
 }
 
@@ -297,13 +396,23 @@ function requireRole(roles) {
 function requirePage(pageKey) {
   return (req, res, next) => {
     if (!req.session || !req.session.member) return res.redirect('/admin/login');
-    // OTP 필수 계정인데 OTP 미설정 상태라면, 계정 설정에서 먼저 OTP 설정하도록 강제
     if (req.session.mustSetupOtp && pageKey !== 'account') {
       return res.redirect('/admin/account?forceOtp=1');
     }
     const m = req.session.member;
     if (m.role === ROLES.SUPER_ADMIN || m.role === ROLES.ADMIN) return next();
     if (m.role === ROLES.OPERATOR && m.permissions && m.permissions.includes(pageKey)) return next();
+    return res.status(403).send('해당 페이지 접근 권한이 없습니다.');
+  };
+}
+
+function requirePageAny(keys) {
+  return (req, res, next) => {
+    if (!req.session || !req.session.member) return res.redirect('/admin/login');
+    if (req.session.mustSetupOtp) return res.redirect('/admin/account?forceOtp=1');
+    const m = req.session.member;
+    if (m.role === ROLES.SUPER_ADMIN || m.role === ROLES.ADMIN) return next();
+    if (m.role === ROLES.OPERATOR && m.permissions && keys.some((k) => m.permissions && m.permissions.includes(k))) return next();
     return res.status(403).send('해당 페이지 접근 권한이 없습니다.');
   };
 }
@@ -509,7 +618,7 @@ function applyDevAmountRule(amountNum, currencyCode) {
 }
 
 // ========== 테스트 결제 환경 설정 (test payment configs) ==========
-// id -> { id, name, environment, merchantCode, routeNo, apiKey, md5Key, currency, paymentApiUrl, returnUrl }
+// id -> { id, name, environment, merchantCode, routeNo, apiKey, md5Key, currency, paymentApiUrl, returnUrl, useTestResultPage }
 function loadTestConfigs() {
   const loaded = loadJsonConfig(TEST_CONFIGS_CONFIG_PATH, null);
   if (loaded && typeof loaded === 'object') {
@@ -556,6 +665,7 @@ function loadMerchants() {
         enableRelay: true,
         enableInternal: true,
         enableDevInternal: false,
+        relayFormat: 'raw',
       },
     ],
   ]);
@@ -584,10 +694,13 @@ const TRAFFIC_HITS_MAX = 10000;
 // ===== 노티/테스트 로그 파일 경로 =====
 const DATA_DIR = path.join(__dirname, 'data');
 const PG_NOTI_LOG_PATH = path.join(DATA_DIR, 'pg-noti.log');
+const CHILLPAY_VOID_NOTI_SENT_PATH = path.join(DATA_DIR, 'chillpay-void-noti-sent.json');
+const CHILLPAY_REFUND_NOTI_SENT_PATH = path.join(DATA_DIR, 'chillpay-refund-noti-sent.json');
 const INTERNAL_LOG_PATH = path.join(DATA_DIR, 'internal-noti.log');
 const DEV_INTERNAL_LOG_PATH = path.join(DATA_DIR, 'dev-internal-noti.log');
 const TEST_LOG_PATH = path.join(DATA_DIR, 'test-payments.log');
 const CONFIG_LOG_PATH = path.join(DATA_DIR, 'config-change.log');
+const VOID_REFUND_NOTI_LOG_PATH = path.join(DATA_DIR, 'void-refund-noti.log');
 
 // ===== 공통: JSON Lines 로그 로더 (최근 7일 메모리 유지, 30일 초과 파일 정리) =====
 function loadJsonLogFile(filePath, isoKey) {
@@ -801,6 +914,19 @@ function formatTimeMultiTZ(isoString) {
   return { th, jp, sg, us };
 }
 
+// 결과 요약용: 날짜·시각 분리, 태국·일본만 (수신일, 수신시각 TH/JP)
+function formatDateAndTimeTHJP(isoString) {
+  if (!isoString) return { date: '-', timeTh: '-', timeJp: '-' };
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return { date: '-', timeTh: '-', timeJp: '-' };
+  const dateOpts = { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Bangkok' };
+  const timeOpts = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+  const date = d.toLocaleDateString('en-CA', dateOpts);
+  const timeTh = d.toLocaleTimeString('en-CA', { ...timeOpts, timeZone: 'Asia/Bangkok' });
+  const timeJp = d.toLocaleTimeString('en-CA', { ...timeOpts, timeZone: 'Asia/Tokyo' });
+  return { date, timeTh, timeJp };
+}
+
 // DirectCredit용 CheckSum 생성 (매뉴얼 Table 1.3 + 제공 스크립트와 동일한 로직)
 function generateDirectCreditCheckSum(payload, secretKey) {
   const parseVal = (val) => (val === null || val === undefined ? '' : String(val));
@@ -830,6 +956,493 @@ function generateDirectCreditCheckSum(payload, secretKey) {
 
 // 전산(온더라인) 노티 수신 URL (환경변수로 설정, 없으면 전송 스킵)
 const INTERNAL_NOTI_URL = process.env.INTERNAL_NOTI_URL || '';
+
+// ========== ChillPay Transaction API (Request Void / Request Refund) ==========
+const CHILLPAY_TRANSACTION_SANDBOX_BASE = 'https://sandbox-api-transaction.chillpay.co';
+const CHILLPAY_TRANSACTION_PROD_BASE = 'https://api-transaction.chillpay.co';
+
+function chillPayTransactionChecksum(concatStr, md5Key) {
+  const s = (concatStr || '') + (md5Key ? String(md5Key).trim() : '');
+  return crypto.createHash('md5').update(s, 'utf8').digest('hex').toLowerCase();
+}
+
+async function chillPayRequestVoid(transactionId, useSandbox) {
+  const cfg = loadChillPayTransactionConfig();
+  const cred = useSandbox ? cfg.sandbox : cfg.production;
+  const base = useSandbox ? CHILLPAY_TRANSACTION_SANDBOX_BASE : CHILLPAY_TRANSACTION_PROD_BASE;
+  if (!cred.mid || !cred.apiKey || !cred.md5) {
+    return { success: false, error: 'ChillPay Transaction API 미설정 (mid/apiKey/md5)' };
+  }
+  const tid = String(transactionId).trim();
+  if (!tid) return { success: false, error: 'TransactionId 없음' };
+  const checksum = chillPayTransactionChecksum(tid, cred.md5);
+  try {
+    const res = await axios.post(
+      base + '/api/v1/void/request',
+      { TransactionId: Number(transactionId) || transactionId, Checksum: checksum },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'CHILLPAY-MerchantCode': cred.mid,
+          'CHILLPAY-ApiKey': cred.apiKey,
+        },
+        timeout: 15000,
+      },
+    );
+    const data = res.data;
+    if (data && (data.status === 200 || data.status === '200')) return { success: true, data: data.data || data };
+    return { success: false, error: (data && data.message) || res.statusText || 'Void 요청 실패' };
+  } catch (err) {
+    const msg = err.response && err.response.data ? (err.response.data.message || JSON.stringify(err.response.data)) : err.message;
+    return { success: false, error: msg };
+  }
+}
+
+async function chillPayRequestRefund(transactionId, useSandbox) {
+  const cfg = loadChillPayTransactionConfig();
+  const cred = useSandbox ? cfg.sandbox : cfg.production;
+  const base = useSandbox ? CHILLPAY_TRANSACTION_SANDBOX_BASE : CHILLPAY_TRANSACTION_PROD_BASE;
+  if (!cred.mid || !cred.apiKey || !cred.md5) {
+    return { success: false, error: 'ChillPay Transaction API 미설정 (mid/apiKey/md5)' };
+  }
+  const tid = String(transactionId).trim();
+  if (!tid) return { success: false, error: 'TransactionId 없음' };
+  const checksum = chillPayTransactionChecksum(tid, cred.md5);
+  try {
+    const res = await axios.post(
+      base + '/api/v1/refund/request',
+      { TransactionId: Number(transactionId) || transactionId, Checksum: checksum },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'CHILLPAY-MerchantCode': cred.mid,
+          'CHILLPAY-ApiKey': cred.apiKey,
+        },
+        timeout: 15000,
+      },
+    );
+    const data = res.data;
+    if (data && (data.status === 200 || data.status === '200')) return { success: true, data: data.data || data };
+    return { success: false, error: (data && data.message) || res.statusText || 'Refund 요청 실패' };
+  } catch (err) {
+    const msg = err.response && err.response.data ? (err.response.data.message || JSON.stringify(err.response.data)) : err.message;
+    return { success: false, error: msg };
+  }
+}
+
+// Search Void Transaction: ChillPay에서 이미 무효 처리된 건 목록 조회 (수동 무효 포함)
+// 문서: OrderBy + OrderDir + PageSize + PageNumber + SearchKeyword + MerchantCode + OrderNo + Status + TransactionDateFrom + TransactionDateTo + MD5 → Checksum
+async function chillPaySearchVoid(useSandbox, params) {
+  const cfg = loadChillPayTransactionConfig();
+  const cred = useSandbox ? cfg.sandbox : cfg.production;
+  const base = useSandbox ? CHILLPAY_TRANSACTION_SANDBOX_BASE : CHILLPAY_TRANSACTION_PROD_BASE;
+  if (!cred.mid || !cred.apiKey || !cred.md5) {
+    return { success: false, error: 'ChillPay Transaction API 미설정 (mid/apiKey/md5)', data: [] };
+  }
+  const orderBy = String(params.orderBy ?? '').trim();
+  const orderDir = String(params.orderDir ?? '').trim();
+  const pageSize = String(params.pageSize ?? '100').trim();
+  const pageNumber = String(params.pageNumber ?? '1').trim();
+  const searchKeyword = String(params.searchKeyword ?? '').trim();
+  const merchantCode = String(cred.mid).trim();
+  const orderNo = String(params.orderNo ?? '').trim();
+  const status = String(params.status ?? '').trim();
+  const transactionDateFrom = String(params.transactionDateFrom ?? '').trim();
+  const transactionDateTo = String(params.transactionDateTo ?? '').trim();
+  const concatStr = orderBy + orderDir + pageSize + pageNumber + searchKeyword + merchantCode + orderNo + status + transactionDateFrom + transactionDateTo;
+  const checksum = chillPayTransactionChecksum(concatStr, cred.md5);
+  try {
+    const res = await axios.post(
+      base + '/api/v1/void/search',
+      {
+        OrderBy: orderBy || undefined,
+        OrderDir: orderDir || undefined,
+        PageSize: pageSize ? parseInt(pageSize, 10) || 100 : 100,
+        PageNumber: pageNumber ? parseInt(pageNumber, 10) || 1 : 1,
+        SearchKeyword: searchKeyword || undefined,
+        MerchantCode: merchantCode,
+        OrderNo: orderNo || undefined,
+        Status: status || undefined,
+        TransactionDateFrom: transactionDateFrom || undefined,
+        TransactionDateTo: transactionDateTo || undefined,
+        Checksum: checksum,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'CHILLPAY-MerchantCode': cred.mid,
+          'CHILLPAY-ApiKey': cred.apiKey,
+        },
+        timeout: 20000,
+      },
+    );
+    const data = res.data;
+    if (data && (data.status === 200 || data.status === '200')) {
+      const list = (data.data && Array.isArray(data.data)) ? data.data : [];
+      return { success: true, data: list };
+    }
+    return { success: false, error: (data && data.message) || res.statusText || 'Search Void 실패', data: [] };
+  } catch (err) {
+    const msg = err.response && err.response.data ? (err.response.data.message || JSON.stringify(err.response.data)) : err.message;
+    return { success: false, error: msg, data: [] };
+  }
+}
+
+// Search Refund Transaction: ChillPay에서 이미 환불 처리된 건 목록 조회 (수동 환불 포함). 체크섬 순서는 Search Void와 동일하게 가정.
+async function chillPaySearchRefund(useSandbox, params) {
+  const cfg = loadChillPayTransactionConfig();
+  const cred = useSandbox ? cfg.sandbox : cfg.production;
+  const base = useSandbox ? CHILLPAY_TRANSACTION_SANDBOX_BASE : CHILLPAY_TRANSACTION_PROD_BASE;
+  if (!cred.mid || !cred.apiKey || !cred.md5) {
+    return { success: false, error: 'ChillPay Transaction API 미설정 (mid/apiKey/md5)', data: [] };
+  }
+  const orderBy = String(params.orderBy ?? '').trim();
+  const orderDir = String(params.orderDir ?? '').trim();
+  const pageSize = String(params.pageSize ?? '100').trim();
+  const pageNumber = String(params.pageNumber ?? '1').trim();
+  const searchKeyword = String(params.searchKeyword ?? '').trim();
+  const merchantCode = String(cred.mid).trim();
+  const orderNo = String(params.orderNo ?? '').trim();
+  const status = String(params.status ?? '').trim();
+  const transactionDateFrom = String(params.transactionDateFrom ?? '').trim();
+  const transactionDateTo = String(params.transactionDateTo ?? '').trim();
+  const concatStr = orderBy + orderDir + pageSize + pageNumber + searchKeyword + merchantCode + orderNo + status + transactionDateFrom + transactionDateTo;
+  const checksum = chillPayTransactionChecksum(concatStr, cred.md5);
+  try {
+    const res = await axios.post(
+      base + '/api/v1/refund/search',
+      {
+        OrderBy: orderBy || undefined,
+        OrderDir: orderDir || undefined,
+        PageSize: pageSize ? parseInt(pageSize, 10) || 100 : 100,
+        PageNumber: pageNumber ? parseInt(pageNumber, 10) || 1 : 1,
+        SearchKeyword: searchKeyword || undefined,
+        MerchantCode: merchantCode,
+        OrderNo: orderNo || undefined,
+        Status: status || undefined,
+        TransactionDateFrom: transactionDateFrom || undefined,
+        TransactionDateTo: transactionDateTo || undefined,
+        Checksum: checksum,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'CHILLPAY-MerchantCode': cred.mid,
+          'CHILLPAY-ApiKey': cred.apiKey,
+        },
+        timeout: 20000,
+      },
+    );
+    const data = res.data;
+    if (data && (data.status === 200 || data.status === '200')) {
+      const list = (data.data && Array.isArray(data.data)) ? data.data : [];
+      return { success: true, data: list };
+    }
+    return { success: false, error: (data && data.message) || res.statusText || 'Search Refund 실패', data: [] };
+  } catch (err) {
+    const msg = err.response && err.response.data ? (err.response.data.message || JSON.stringify(err.response.data)) : err.message;
+    return { success: false, error: msg, data: [] };
+  }
+}
+
+// 무효 노티 전송 이력 (ChillPay 수동 무효 등 동기화 시 중복 전송 방지)
+const VOID_NOTI_SENT_MAX = 10000;
+function loadChillPayVoidNotiSent() {
+  try {
+    if (!fs.existsSync(CHILLPAY_VOID_NOTI_SENT_PATH)) return [];
+    const raw = fs.readFileSync(CHILLPAY_VOID_NOTI_SENT_PATH, 'utf8');
+    const arr = JSON.parse(raw || '[]');
+    return Array.isArray(arr) ? arr.filter((id) => typeof id === 'string' && id.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+function saveChillPayVoidNotiSent(ids) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const list = Array.isArray(ids) ? ids.slice(-VOID_NOTI_SENT_MAX) : [];
+    fs.writeFileSync(CHILLPAY_VOID_NOTI_SENT_PATH, JSON.stringify(list, null, 0));
+  } catch (_) {}
+}
+function markVoidNotiSent(transactionId) {
+  const tid = String(transactionId || '').trim();
+  if (!tid) return;
+  const list = loadChillPayVoidNotiSent();
+  if (list.includes(tid)) return;
+  list.push(tid);
+  saveChillPayVoidNotiSent(list);
+}
+function hasVoidNotiSent(transactionId) {
+  const tid = String(transactionId || '').trim();
+  if (!tid) return false;
+  return loadChillPayVoidNotiSent().includes(tid);
+}
+
+// 환불 노티 전송 이력 (ChillPay 수동 환불 등 동기화 시 중복 전송 방지)
+const REFUND_NOTI_SENT_MAX = 10000;
+function loadChillPayRefundNotiSent() {
+  try {
+    if (!fs.existsSync(CHILLPAY_REFUND_NOTI_SENT_PATH)) return [];
+    const raw = fs.readFileSync(CHILLPAY_REFUND_NOTI_SENT_PATH, 'utf8');
+    const arr = JSON.parse(raw || '[]');
+    return Array.isArray(arr) ? arr.filter((id) => typeof id === 'string' && id.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+function saveChillPayRefundNotiSent(ids) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const list = Array.isArray(ids) ? ids.slice(-REFUND_NOTI_SENT_MAX) : [];
+    fs.writeFileSync(CHILLPAY_REFUND_NOTI_SENT_PATH, JSON.stringify(list, null, 0));
+  } catch (_) {}
+}
+function markRefundNotiSent(transactionId) {
+  const tid = String(transactionId || '').trim();
+  if (!tid) return;
+  const list = loadChillPayRefundNotiSent();
+  if (list.includes(tid)) return;
+  list.push(tid);
+  saveChillPayRefundNotiSent(list);
+}
+function hasRefundNotiSent(transactionId) {
+  const tid = String(transactionId || '').trim();
+  if (!tid) return false;
+  return loadChillPayRefundNotiSent().includes(tid);
+}
+
+// 무효/환불 노티 발송 이력 (거래노티 페이지용). 발송 시마다 append, 조회 시 최근 30일만 로드
+function appendVoidRefundNotiLog(entry) {
+  const sentAtIso = new Date().toISOString();
+  const log = { sentAtIso, ...entry };
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFile(VOID_REFUND_NOTI_LOG_PATH, JSON.stringify(log) + '\n', () => {});
+  } catch (_) {}
+}
+function loadVoidRefundNotiLog(days) {
+  const limit = Math.min(Math.max(Number(days) || 30, 1), 90);
+  const cutoff = Date.now() - limit * 24 * 60 * 60 * 1000;
+  try {
+    if (!fs.existsSync(VOID_REFUND_NOTI_LOG_PATH)) return [];
+    const raw = fs.readFileSync(VOID_REFUND_NOTI_LOG_PATH, 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    const entries = [];
+    for (let i = lines.length - 1; i >= 0 && entries.length < 2000; i--) {
+      try {
+        const obj = JSON.parse(lines[i]);
+        const t = Date.parse(obj.sentAtIso || obj.sentAt || '');
+        if (!Number.isNaN(t) && t >= cutoff) entries.push(obj);
+      } catch (_) {}
+    }
+    return entries.sort((a, b) => (Date.parse(b.sentAtIso || '') || 0) - (Date.parse(a.sentAtIso || '') || 0));
+  } catch {
+    return [];
+  }
+}
+
+// ChillPay에서 이미 무효 처리된 건 조회 후, 우리 로그와 매칭해 미전송 건만 무효 노티 전송 (수동 무효 동기화)
+async function syncChillPayVoidNoti() {
+  const cfg = loadChillPayTransactionConfig();
+  const cred = cfg.useSandbox ? cfg.sandbox : cfg.production;
+  if (!cred.mid || !cred.apiKey || !cred.md5) {
+    return { success: false, error: 'ChillPay Transaction API 미설정', sent: 0, total: 0 };
+  }
+  const now = new Date();
+  const toDate = new Date(now.getTime());
+  const fromDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const transactionDateFrom = fromDate.toISOString().slice(0, 10);
+  const transactionDateTo = toDate.toISOString().slice(0, 10);
+  const searchResult = await chillPaySearchVoid(cfg.useSandbox, {
+    transactionDateFrom,
+    transactionDateTo,
+    pageSize: '100',
+    pageNumber: '1',
+  });
+  if (!searchResult.success) {
+    return { success: false, error: searchResult.error || 'Search Void 실패', sent: 0, total: 0 };
+  }
+  const list = searchResult.data || [];
+  let sent = 0;
+  for (const item of list) {
+    const txId = item.transactionId != null ? String(item.transactionId) : (item.TransactionId != null ? String(item.TransactionId) : '');
+    if (!txId || hasVoidNotiSent(txId)) continue;
+    const log = NOTI_LOGS.find((l) => {
+      const body = l.body && typeof l.body === 'object' ? l.body : (typeof l.body === 'string' ? (() => { try { return JSON.parse(l.body); } catch { return {}; } })() : {});
+      const logTxId = body.TransactionId != null ? String(body.TransactionId) : (body.transactionId != null ? String(body.transactionId) : '');
+      if (logTxId !== txId) return false;
+      const isSuccess = body.PaymentStatus === 1 || body.PaymentStatus === '1' || body.paymentStatus === 'Success' || body.status === 1;
+      return isSuccess && l.merchantId && MERCHANTS.get(l.merchantId);
+    });
+    if (!log) continue;
+    try {
+      await sendVoidOrRefundNoti(log, 'void');
+      markVoidNotiSent(txId);
+      sent += 1;
+    } catch (_) {}
+  }
+  return { success: true, sent, total: list.length };
+}
+
+// ChillPay에서 이미 환불 처리된 건 조회 후, 우리 로그와 매칭해 미전송 건만 환불 노티 전송 (수동 환불 동기화)
+async function syncChillPayRefundNoti() {
+  const cfg = loadChillPayTransactionConfig();
+  const cred = cfg.useSandbox ? cfg.sandbox : cfg.production;
+  if (!cred.mid || !cred.apiKey || !cred.md5) {
+    return { success: false, error: 'ChillPay Transaction API 미설정', sent: 0, total: 0 };
+  }
+  const now = new Date();
+  const toDate = new Date(now.getTime());
+  const fromDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const transactionDateFrom = fromDate.toISOString().slice(0, 10);
+  const transactionDateTo = toDate.toISOString().slice(0, 10);
+  const searchResult = await chillPaySearchRefund(cfg.useSandbox, {
+    transactionDateFrom,
+    transactionDateTo,
+    pageSize: '100',
+    pageNumber: '1',
+  });
+  if (!searchResult.success) {
+    return { success: false, error: searchResult.error || 'Search Refund 실패', sent: 0, total: 0 };
+  }
+  const list = searchResult.data || [];
+  let sent = 0;
+  for (const item of list) {
+    const txId = item.transactionId != null ? String(item.transactionId) : (item.TransactionId != null ? String(item.TransactionId) : '');
+    if (!txId || hasRefundNotiSent(txId)) continue;
+    const log = NOTI_LOGS.find((l) => {
+      const body = l.body && typeof l.body === 'object' ? l.body : (typeof l.body === 'string' ? (() => { try { return JSON.parse(l.body); } catch { return {}; } })() : {});
+      const logTxId = body.TransactionId != null ? String(body.TransactionId) : (body.transactionId != null ? String(body.transactionId) : '');
+      if (logTxId !== txId) return false;
+      const isSuccess = body.PaymentStatus === 1 || body.PaymentStatus === '1' || body.paymentStatus === 'Success' || body.status === 1;
+      return isSuccess && l.merchantId && MERCHANTS.get(l.merchantId);
+    });
+    if (!log) continue;
+    try {
+      await sendVoidOrRefundNoti(log, 'refund');
+      markRefundNotiSent(txId);
+      sent += 1;
+    } catch (_) {}
+  }
+  return { success: true, sent, total: list.length };
+}
+
+// 결제 시각 기준 자동화 구간: 'void_auto' | 'void_manual' | 'refund'
+// 기준: 당일 22:30까지 void_auto, 22:31~다음날 01:29 void_manual, 01:30 이후 refund (한국·일본 시간).
+function getVoidRefundWindow(paymentDateOrIso) {
+  const cfg = loadChillPayTransactionConfig();
+  const tz = cfg.timezone || 'Asia/Tokyo';
+  let date = null;
+  const str = (paymentDateOrIso && String(paymentDateOrIso).trim()) || '';
+  if (!str) return 'void_manual';
+  if (/^\d{4}-\d{2}-\d{2}T/.test(str)) {
+    date = new Date(str);
+  } else if (/^\d{2}\/\d{2}\/\d{4}\s+\d{1,2}:\d{2}/.test(str)) {
+    const [dpart, tpart] = str.split(/\s+/);
+    const [dd, mm, yyyy] = dpart.split('/');
+    const [h, min] = (tpart || '0:0').split(':');
+    date = new Date(Number(yyyy), Number(mm) - 1, Number(dd), Number(h) || 0, Number(min) || 0, 0, 0);
+  } else {
+    date = new Date(str);
+  }
+  if (Number.isNaN(date.getTime())) return 'void_manual';
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(date);
+  const get = (name) => (parts.find((p) => p.type === name) || {}).value || '0';
+  const hour = parseInt(get('hour'), 10) || 0;
+  const minute = parseInt(get('minute'), 10) || 0;
+  const payMins = hour * 60 + minute;
+  const cutoffMins = cfg.voidCutoffHour * 60 + cfg.voidCutoffMinute;
+  const refundStartMins = cfg.refundStartHour * 60 + cfg.refundStartMinute;
+  if (payMins >= refundStartMins && payMins < 120) return 'refund';
+  if (payMins >= 120 && payMins <= cutoffMins) return 'void_auto';
+  return 'void_manual';
+}
+
+// 현재 시각이 수동 무효 이메일 가능 시간대(설정 기준 void_manual 구간)인지 여부
+function isCurrentTimeInVoidManualWindow() {
+  return getVoidRefundWindow(new Date().toISOString()) === 'void_manual';
+}
+
+// 취소/무효/환불 목록·이메일용 Route 번호만 표시 (callback/16 → 16, 가맹점 routeNo 우선)
+function getRouteNoDisplay(merchant, routeKey) {
+  if (merchant && (merchant.routeNo != null && String(merchant.routeNo).trim() !== '')) return String(merchant.routeNo).trim();
+  const s = String(routeKey || '');
+  const m = s.match(/\d+/);
+  return m ? m[0] : (s || '');
+}
+
+// 수동 무효용 이메일 본문 생성 (템플릿 치환). 반환: { subject, body } (body는 encodeURIComponent용). 본문에 Route No. 16 형식으로 노출
+function buildVoidEmailContent(log) {
+  const cfg = loadChillPayTransactionConfig();
+  const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+  const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+  const mid = cfg.useSandbox ? (cfg.sandbox && cfg.sandbox.mid) : (cfg.production && cfg.production.mid);
+  const transNo = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : '');
+  const orderNo = body.OrderNo != null ? body.OrderNo : (body.orderNo != null ? body.orderNo : '');
+  const amount = body.Amount != null ? body.Amount : (body.amount != null ? body.amount : '');
+  const routeNo = getRouteNoDisplay(merchant, log.routeKey);
+  const paymentDate = body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt || '';
+  const defaultTemplate = '아래 거래에 대해 취소를 요청합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n';
+  const template = (cfg.emailBodyTemplate || '').trim() || defaultTemplate;
+  const bodyText = template
+    .replace(/\{\{transNo\}\}/g, String(transNo))
+    .replace(/\{\{orderNo\}\}/g, String(orderNo))
+    .replace(/\{\{amount\}\}/g, String(amount))
+    .replace(/\{\{routeNo\}\}/g, String(routeNo))
+    .replace(/\{\{paymentDate\}\}/g, String(paymentDate))
+    .replace(/\{\{mid\}\}/g, String(mid || ''));
+  return { subject: '취소 요청: ' + (transNo || orderNo || ''), body: bodyText };
+}
+
+// 무효 또는 환불 노티 전송 (가맹점 callback/result + 전산). log = NOTI_LOGS 항목, type = 'void' | 'refund'
+async function sendVoidOrRefundNoti(log, type) {
+  const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+  if (!merchant || !log.body) return { success: false, error: '가맹점 또는 노티 본문 없음' };
+  const paymentStatus = type === 'refund' ? '9' : '2';
+  const payload = typeof log.body === 'object' ? { ...log.body, PaymentStatus: paymentStatus } : { ...JSON.parse(log.body || '{}'), PaymentStatus: paymentStatus };
+  const urls = [];
+  if (merchant.callbackUrl) urls.push({ url: merchant.callbackUrl, kind: 'callback' });
+  if (merchant.resultUrl && merchant.resultUrl !== merchant.callbackUrl) urls.push({ url: merchant.resultUrl, kind: 'result' });
+  let relayOk = true;
+  for (const { url } of urls) {
+    try {
+      const res = await relayToMerchant(url, payload, { contentType: 'application/json' });
+      if (res.status < 200 || res.status >= 300) relayOk = false;
+    } catch (e) {
+      relayOk = false;
+    }
+  }
+  let internalOk = false;
+  const internalPayload = transformForInternal(payload, merchant);
+  let internalUrl = merchant.internalTargetId ? findInternalTargetUrl(merchant.internalTargetId, 'callback') : null;
+  if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
+  if (internalUrl) {
+    try {
+      const internalRes = await sendToInternal(internalUrl, internalPayload);
+      internalOk = internalRes.success;
+    } catch (_) {}
+    appendInternalLog({
+      storedAt: new Date().toISOString(),
+      merchantId: log.merchantId,
+      routeNo: merchant.routeNo || '',
+      internalTargetId: merchant.internalTargetId || '',
+      payload: internalPayload,
+      internalTargetUrl: internalUrl,
+      internalDeliveryStatus: internalOk ? 'ok' : 'fail',
+    });
+  }
+  const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+  appendVoidRefundNotiLog({
+    type: type,
+    transactionId: body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : ''),
+    orderNo: body.OrderNo != null ? body.OrderNo : (body.orderNo != null ? body.orderNo : ''),
+    merchantId: log.merchantId || '',
+    routeNo: merchant ? (merchant.routeNo || '') : '',
+    relayStatus: relayOk ? 'ok' : 'fail',
+    internalStatus: internalUrl ? (internalOk ? 'ok' : 'fail') : 'skip',
+  });
+  return { success: relayOk, internalOk };
+}
 
 /**
  * PDF 4 규격: PG 오리지널 노티 → 전산 저장용 가공
@@ -920,10 +1533,33 @@ function transformForDevInternal(original, merchant) {
 
 /**
  * 가맹점으로 원본 그대로 릴레이
+ * - options.rawBody 가 있으면 수신한 원문 그대로 전송 (가공 없음)
+ * - 없으면 body 객체를 contentType에 맞게 직렬화해 전송
  */
-async function relayToMerchant(callbackUrl, body) {
-  const res = await axios.post(callbackUrl, body, {
-    headers: { 'Content-Type': 'application/json' },
+async function relayToMerchant(callbackUrl, body, options = {}) {
+  const contentType = (options.contentType || '').toString().trim() || 'application/json';
+  const rawBody = options.rawBody;
+  let data;
+  let headers = { 'Content-Type': contentType };
+  if (rawBody !== undefined && rawBody !== null) {
+    data = typeof rawBody === 'string' ? rawBody : (Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody)));
+  } else if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
+    const ct = contentType.toLowerCase();
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(body)) {
+        params.append(k, v === null || v === undefined ? '' : String(v));
+      }
+      data = params.toString();
+    } else {
+      data = body;
+      if (!headers['Content-Type'].toLowerCase().includes('application/json')) headers['Content-Type'] = 'application/json';
+    }
+  } else {
+    data = body;
+  }
+  const res = await axios.post(callbackUrl, data, {
+    headers,
     timeout: RELAY_TIMEOUT_MS,
     validateStatus: () => true,
   });
@@ -972,12 +1608,67 @@ function findMerchantByRouteKey(routeKey) {
   return null;
 }
 
+// 테스트 결제 환경 중 useTestResultPage 인 config 의 Result 노티용 routeKey: result/test_<configId>
+function findTestResultByRouteKey(routeKey) {
+  if (typeof routeKey !== 'string' || !routeKey.startsWith('result/test_')) return null;
+  const configId = routeKey.slice('result/test_'.length);
+  const cfg = configId ? TEST_CONFIGS.get(configId) : null;
+  if (!cfg || !cfg.useTestResultPage) return null;
+  return { configId, config: cfg };
+}
+
 async function handleNotiRequest(routeKey, req, res) {
   const body = req.body;
+  const rawBodyStr = req.rawBodyBuffer ? req.rawBodyBuffer.toString('utf8') : '';
+  const incomingContentType = (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
+  const refererOrOrigin = (req.get && req.get('Referer')) || (req.get && req.get('Origin')) || (req.headers && (req.headers['referer'] || req.headers['origin'])) || '';
+  const host = (req.get && req.get('Host')) || (req.headers && req.headers['host']) || '';
+  const apiKeyHeader = (req.get && req.get('ApiKey')) || (req.get && req.get('CHILLPAY-ApiKey')) || (req.headers && (req.headers['apikey'] || req.headers['chillpay-apikey'])) || '';
+  const SANDBOX_APIKEY = 'fsL7o8du7F75fINcZ4yXxu8U9xHs33ieTWWJvXYdBkAVccuWX5w2CjUYc4o50L2N';
+  const env =
+    (String(refererOrOrigin) + ' ' + String(host)).toLowerCase().includes('sandbox') || String(apiKeyHeader).trim() === SANDBOX_APIKEY
+      ? 'sandbox'
+      : 'live';
 
-  console.log('[수신] routeKey=', routeKey, 'body=', JSON.stringify(body));
+  console.log('[수신] routeKey=', routeKey, 'Content-Type=', incomingContentType, 'body=', JSON.stringify(body));
 
-  const match = findMerchantByRouteKey(routeKey);
+  let match = findMerchantByRouteKey(routeKey);
+  let testResultMatch = null;
+  if (!match) {
+    testResultMatch = findTestResultByRouteKey(routeKey);
+    if (testResultMatch) {
+      // 테스트 결제 Result 노티: 우리 테스트 결과 페이지로 릴레이 (가맹점 연동과 동일 방식)
+      const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
+      const targetUrl = baseUrl + '/admin/test-pay/return';
+      let relaySuccess = false;
+      let relayFailReason = '';
+      try {
+        console.log('[포워딩 중] 테스트 결과 페이지로 릴레이:', targetUrl);
+        const relayRes = await relayToMerchant(targetUrl, body, { contentType: incomingContentType, rawBody: rawBodyStr || undefined });
+        relaySuccess = relayRes.status >= 200 && relayRes.status < 300;
+        if (relaySuccess) console.log('[포워딩 성공] 테스트 결과 페이지 status=', relayRes.status);
+        else relayFailReason = `HTTP ${relayRes.status}`;
+      } catch (err) {
+        relayFailReason = err.code || err.message || String(err);
+        console.error('[테스트 결과 페이지 릴레이 실패]', err.message);
+      }
+      const formatUsed = (incomingContentType || '').toLowerCase().includes('application/json') ? 'json' : 'raw';
+      appendPgNotiLog({
+        routeKey,
+        merchantId: 'test_' + testResultMatch.configId,
+        kind: 'result',
+        body,
+        rawBody: rawBodyStr || undefined,
+        targetUrl,
+        contentType: incomingContentType,
+        env,
+        relayStatus: relaySuccess ? 'ok' : 'fail',
+        relayFailReason: relaySuccess ? '' : relayFailReason,
+        relayFormatUsed: relaySuccess ? formatUsed : undefined,
+      });
+      return res.status(200).json({ ok: true, relay: relaySuccess });
+    }
+  }
   if (!match) {
     console.error('[에러] 등록되지 않은 routeKey:', routeKey);
     return res.status(404).json({ error: 'Route not found', routeKey });
@@ -989,42 +1680,72 @@ async function handleNotiRequest(routeKey, req, res) {
   const enableDevInternal = merchant.enableDevInternal === true;
 
   let relaySuccess = false;
+  let relayFailReason = '';
+  const relayFormat = (merchant.relayFormat === 'json' || merchant.relayFormat === 'form') ? merchant.relayFormat : 'raw';
+  let relayOpts;
+  if (relayFormat === 'json') {
+    relayOpts = { contentType: 'application/json', rawBody: undefined };
+  } else if (relayFormat === 'form') {
+    relayOpts = { contentType: 'application/x-www-form-urlencoded', rawBody: undefined };
+  } else {
+    relayOpts = { contentType: incomingContentType, rawBody: rawBodyStr || undefined };
+  }
   if (enableRelay && targetUrl) {
     try {
-      console.log('[포워딩 중] 가맹점으로 릴레이:', merchantId, kind, targetUrl);
-      let relayRes = await relayToMerchant(targetUrl, body);
+      console.log('[포워딩 중] 가맹점으로 릴레이:', merchantId, kind, targetUrl, 'relayFormat=', relayFormat, 'Content-Type=', relayOpts.contentType);
+      let relayRes = await relayToMerchant(targetUrl, body, relayOpts);
       relaySuccess = relayRes.status >= 200 && relayRes.status < 300;
       if (relaySuccess) {
         console.log('[포워딩 성공] status=', relayRes.status);
       } else {
+        relayFailReason = `HTTP ${relayRes.status}` + (relayRes.data && typeof relayRes.data === 'string' ? ': ' + relayRes.data.slice(0, 200) : '');
         console.warn('[포워딩 실패] status=', relayRes.status, ' 1회 재시도 예정');
         await new Promise((r) => setTimeout(r, 2000));
-        relayRes = await relayToMerchant(targetUrl, body);
+        relayRes = await relayToMerchant(targetUrl, body, relayOpts);
         relaySuccess = relayRes.status >= 200 && relayRes.status < 300;
-        if (relaySuccess) console.log('[포워딩 재시도 성공] status=', relayRes.status);
-        else console.warn('[포워딩 재시도 실패] status=', relayRes.status);
+        if (relaySuccess) {
+          console.log('[포워딩 재시도 성공] status=', relayRes.status);
+          relayFailReason = '';
+        } else {
+          if (!relayFailReason) relayFailReason = `HTTP ${relayRes.status}`;
+          console.warn('[포워딩 재시도 실패] status=', relayRes.status);
+        }
       }
     } catch (err) {
+      relayFailReason = err.code || err.message || String(err);
       console.error('[포워딩 실패]', err.message, ' 1회 재시도 예정');
       try {
         await new Promise((r) => setTimeout(r, 2000));
-        const retryRes = await relayToMerchant(targetUrl, body);
+        const retryRes = await relayToMerchant(targetUrl, body, relayOpts);
         relaySuccess = retryRes.status >= 200 && retryRes.status < 300;
-        if (relaySuccess) console.log('[포워딩 재시도 성공]');
-      } catch (_) {}
+        if (relaySuccess) {
+          console.log('[포워딩 재시도 성공]');
+          relayFailReason = '';
+        }
+      } catch (err2) {
+        if (!relayFailReason) relayFailReason = err2.code || err2.message || String(err2);
+      }
     }
   } else {
+    if (enableRelay && !targetUrl) relayFailReason = '가맹점 URL 없음';
     console.log('[포워딩 스킵] enableRelay=false 또는 targetUrl 없음');
   }
 
   // 로그 적재 (가맹점 수신 여부 포함, 최근 100건)
+  // relayFormatUsed: 'raw' | 'json' | 'form' (성공 시에만 기록, 표시 색: 파란/녹/노랑)
+  const formatUsed = enableRelay && relaySuccess ? relayFormat : undefined;
   appendPgNotiLog({
     routeKey,
     merchantId,
     kind,
     body,
+    rawBody: rawBodyStr || undefined,
     targetUrl: enableRelay ? targetUrl || '' : '',
+    contentType: incomingContentType,
+    env,
     relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
+    relayFailReason: relaySuccess ? '' : (relayFailReason || ''),
+    relayFormatUsed: formatUsed,
   });
 
   let internalDeliverySuccess = false;
@@ -1190,8 +1911,13 @@ app.get('/admin/set-locale', (req, res) => {
   res.redirect(back);
 });
 
-function getAdminSidebar(locale, adminUser, member) {
+function getAdminSidebar(locale, adminUser, member, currentPath) {
   const site = loadSiteSettings();
+  const pathMatch = (path) => currentPath && (currentPath === path || currentPath.startsWith(path + '?'));
+  const link = (path, label) => {
+    const cls = pathMatch(path) ? ' class="active"' : '';
+    return `<a href="${path}"${cls}>${label}</a>`;
+  };
   const langLinks = SUPPORTED_LOCALES.map((l) => {
     const label = l === 'zh' ? 'CH' : l.toUpperCase();
     return `<a href="/admin/set-locale?lang=${l}" style="color:#93c5fd;text-decoration:none;margin:0 2px;">${label}</a>`;
@@ -1202,33 +1928,45 @@ function getAdminSidebar(locale, adminUser, member) {
   const can = (key) => canSeeMembers || perms.includes(key);
   const nav = [];
   if (can('merchants')) {
-    nav.push(`<div class="nav-section-title">${t(locale, 'nav_merchant')}</div><a href="/admin/merchants">${t(locale, 'nav_merchant_settings')}</a>`);
+    nav.push(`<div class="nav-section-title">${t(locale, 'nav_merchant')}</div>${link('/admin/merchants', t(locale, 'nav_merchant_settings'))}`);
   }
-  if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('traffic_analysis')) {
+  if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('traffic_analysis')) {
     nav.push(`<div class="nav-section-title">${t(locale, 'nav_logs')}</div>`);
-    if (can('pg_logs')) nav.push(`<a href="/admin/logs">${t(locale, 'nav_pg_noti_log')}</a>`);
-    if (can('internal_logs')) nav.push(`<a href="/admin/internal">${t(locale, 'nav_internal_noti_log')}</a>`);
-    if (can('dev_internal_logs')) nav.push(`<a href="/admin/dev-internal">${t(locale, 'nav_dev_internal_noti_log') || '개발 노티로그'}</a>`);
-    if (can('traffic_analysis')) nav.push(`<a href="/admin/traffic">${t(locale, 'nav_traffic_analysis') || '트래픽분석'}</a>`);
+    if (can('pg_result')) nav.push(link('/admin/logs-result', t(locale, 'nav_pg_result') || '피지 결과'));
+    if (can('internal_result')) nav.push(link('/admin/internal-result', t(locale, 'nav_internal_result') || '전산 결과'));
+    if (can('dev_result')) nav.push(link('/admin/dev-internal-result', t(locale, 'nav_dev_result') || '개발 결과'));
+    if (can('pg_logs')) nav.push(link('/admin/logs', t(locale, 'nav_pg_noti_log')));
+    if (can('internal_logs')) nav.push(link('/admin/internal', t(locale, 'nav_internal_noti_log')));
+    if (can('dev_internal_logs')) nav.push(link('/admin/dev-internal', t(locale, 'nav_dev_internal_noti_log') || '개발 노티로그'));
+    if (can('traffic_analysis')) nav.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis') || '트래픽분석'));
   }
   if (can('internal_targets') || can('internal_noti_settings') || can('dev_internal_noti_settings')) {
     nav.push(`<div class="nav-section-title">${t(locale, 'nav_internal')}</div>`);
-    if (can('internal_targets')) nav.push(`<a href="/admin/internal-targets">${t(locale, 'nav_internal_targets')}</a>`);
-    if (can('internal_noti_settings')) nav.push(`<a href="/admin/internal-noti-settings">${t(locale, 'nav_internal_noti_settings')}</a>`);
-    if (can('dev_internal_noti_settings')) nav.push(`<a href="/admin/dev-internal-noti-settings">${t(locale, 'nav_dev_internal_noti_settings')}</a>`);
+    if (can('internal_targets')) nav.push(link('/admin/internal-targets', t(locale, 'nav_internal_targets')));
+    if (can('internal_noti_settings')) nav.push(link('/admin/internal-noti-settings', t(locale, 'nav_internal_noti_settings')));
+    if (can('dev_internal_noti_settings')) nav.push(link('/admin/dev-internal-noti-settings', t(locale, 'nav_dev_internal_noti_settings')));
+  }
+  if (can('cancel_refund')) {
+    nav.push(`<div class="nav-section-title">${t(locale, 'nav_cancel_refund')}</div>`);
+    nav.push(link('/admin/cancel-refund/cancel', t(locale, 'nav_cancel_refund_cancel')));
+    nav.push(link('/admin/cancel-refund/void', t(locale, 'nav_cancel_refund_void')));
+    nav.push(link('/admin/cancel-refund/force-void', t(locale, 'nav_cancel_refund_force_void')));
+    nav.push(link('/admin/cancel-refund/refund', t(locale, 'nav_cancel_refund_refund')));
+    nav.push(link('/admin/cancel-refund/noti', t(locale, 'nav_cancel_refund_noti')));
   }
   if (can('test_config') || can('test_run') || can('test_history')) {
     nav.push(`<div class="nav-section-title">${t(locale, 'nav_test')}</div>`);
-    if (can('test_config')) nav.push(`<a href="/admin/test-configs">${t(locale, 'nav_test_config')}</a>`);
-    if (can('test_run')) nav.push(`<a href="/admin/test-pay">${t(locale, 'nav_test_run')}</a>`);
-    if (can('test_history')) nav.push(`<a href="/admin/test-logs">${t(locale, 'nav_test_history')}</a>`);
+    if (can('test_config')) nav.push(link('/admin/test-configs', t(locale, 'nav_test_config')));
+    if (can('test_run')) nav.push(link('/admin/test-pay', t(locale, 'nav_test_run')));
+    if (can('test_history')) nav.push(link('/admin/test-logs', t(locale, 'nav_test_history')));
   }
   if (canSeeMembers || can('settings') || can('account') || can('account_reset')) {
     nav.push(`<div class="nav-section-title">${t(locale, 'nav_system')}</div>`);
-    if (canSeeMembers) nav.push(`<a href="/admin/members">${t(locale, 'nav_account_manage')}</a>`);
-    if (can('account_reset')) nav.push(`<a href="/admin/account-reset">${t(locale, 'nav_account_reset')}</a>`);
-    if (can('settings')) nav.push(`<a href="/admin/settings">${t(locale, 'nav_settings')}</a>`);
-    if (can('account')) nav.push(`<a href="/admin/account">${t(locale, 'nav_account')}</a>`);
+    nav.push(link('/admin/transactions', t(locale, 'nav_transaction_list')));
+    if (canSeeMembers) nav.push(link('/admin/members', t(locale, 'nav_account_manage')));
+    if (can('account_reset')) nav.push(link('/admin/account-reset', t(locale, 'nav_account_reset')));
+    if (can('settings')) nav.push(link('/admin/settings', t(locale, 'nav_settings')));
+    if (can('account')) nav.push(link('/admin/account', t(locale, 'nav_account')));
   }
   const titleText = (site.sidebarTitle || '').replace(/</g, '&lt;').replace(/"/g, '&quot;') || DEFAULT_SIDEBAR_TITLE;
   const subText = (site.sidebarSub || '').replace(/</g, '&lt;').replace(/"/g, '&quot;') || DEFAULT_SIDEBAR_SUB;
@@ -1584,14 +2322,14 @@ app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) 
     button { margin-top: 12px; padding: 9px 16px; background:#60a5fa; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; }
     button:hover { background:#3b82f6; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
     .nav a,
-    .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -1603,7 +2341,7 @@ app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) 
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -1746,13 +2484,13 @@ app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
   <style>
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; color:#111827; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
-    .nav a, .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; margin-bottom:0; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -1762,11 +2500,49 @@ app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
     button { margin-top:16px; padding:10px 18px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; }
     button:hover { background:#1d4ed8; }
     .hint { font-size:12px; color:#6b7280; margin-top:6px; }
+    .card-chillpay { margin-top: 24px; }
+    .card-chillpay h2 { margin-bottom: 8px; font-size: 1.25rem; }
+    .chillpay-desc { margin-bottom: 20px; color: #4b5563; }
+    .chillpay-section { margin-bottom: 28px; padding-bottom: 24px; border-bottom: 1px solid #e5e7eb; }
+    .chillpay-section:last-of-type { border-bottom: none; }
+    .chillpay-section h3 { margin: 0 0 8px 0; font-size: 1rem; color: #374151; }
+    .chillpay-hint { font-size: 12px; color: #6b7280; margin: 0 0 12px 0; }
+    .chillpay-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 0; }
+    .chillpay-row-md5 { margin-top: 12px; }
+    .chillpay-cell { display: flex; flex-direction: column; margin-top: 0; }
+    .chillpay-cell input { max-width: none; }
+    .chillpay-cell-mid { flex: 0 0 auto; width: 10em; min-width: 8em; }
+    .chillpay-cell-mid input { width: 100%; }
+    .chillpay-cell-api { flex: 1; min-width: 120px; }
+    .chillpay-cell-md5 { flex: 1; min-width: 100px; width: 100%; }
+    .chillpay-time-th { color: #2563eb; font-weight: 600; }
+    .chillpay-label { font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 4px; }
+    .chillpay-time-grid { display: flex; flex-wrap: wrap; gap: 24px 32px; margin-bottom: 0; }
+    .chillpay-time-grid .chillpay-time-row { flex: 1; min-width: 260px; margin-bottom: 0; }
+    .chillpay-time-row { margin-bottom: 14px; }
+    .chillpay-time-field { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
+    .chillpay-time-field .chillpay-label { display: block; width: 100%; margin-bottom: 4px; }
+    .chillpay-time-inputs input { width: 56px; padding: 6px 8px; margin: 0 2px; box-sizing: border-box; }
+    .chillpay-time-desc { font-size: 11px; color: #6b7280; }
+    .chillpay-sandbox-check { margin-bottom: 16px; }
+    .chillpay-checkbox-wrap { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
+    .chillpay-checkbox-desc { font-size: 12px; color: #6b7280; margin: 10px 0 0 0; padding: 10px 12px; background: #f3f4f6; border-radius: 6px; line-height: 1.5; }
+    .chillpay-email-fixed-note { margin-bottom: 14px; }
+    .chillpay-email-sender-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; margin-bottom: 14px; }
+    .chillpay-email-sender-cell { flex: 0 0 auto; width: 220px; }
+    .chillpay-email-sender-cell .chillpay-label { margin-bottom: 6px; font-size: 13px; }
+    .chillpay-email-sender-cell input { width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 6px; border: 1px solid #d1d5db; font-size: 14px; }
+    .chillpay-email-input-same { width: 220px; max-width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 6px; border: 1px solid #d1d5db; font-size: 14px; }
+    .chillpay-email-to-row { margin-bottom: 14px; }
+    .chillpay-email-to-row .chillpay-label { margin-bottom: 6px; font-size: 13px; }
+    .chillpay-email-body-row { margin-top: 4px; }
+    .chillpay-email-body-row .chillpay-label { margin-bottom: 6px; font-size: 13px; }
+    .chillpay-submit { margin-top: 8px; }
   </style>
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -1780,10 +2556,124 @@ app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
           <button type="submit">저장</button>
         </form>
       </div>
+      <div class="card card-chillpay">
+        <h2>ChillPay 무효/환불 (Transaction API) 및 취소 가능 시간</h2>
+        <p class="hint chillpay-desc">무효·환불 API 호출에 사용할 키와, 자동 무효/수동/환불 구간을 정하는 취소 가능 시간을 설정합니다.</p>
+
+        <form method="post" action="/admin/settings/chillpay" onsubmit="return confirm('ChillPay 설정을 저장하시겠습니까?');">
+          <section class="chillpay-section">
+            <h3>Sandbox (테스트 환경)</h3>
+            <p class="chillpay-hint">1줄: Mid · ApiKey / 2줄: MD5</p>
+            <div class="chillpay-row">
+              <label class="chillpay-cell chillpay-cell-mid"><span class="chillpay-label">Mid</span><input type="text" name="sandboxMid" value="${(loadChillPayTransactionConfig().sandbox.mid || '').replace(/"/g, '&quot;')}" placeholder="MerchantCode" maxlength="20" size="10" /></label>
+              <label class="chillpay-cell chillpay-cell-api"><span class="chillpay-label">ApiKey</span><input type="text" name="sandboxApiKey" value="${(loadChillPayTransactionConfig().sandbox.apiKey || '').replace(/"/g, '&quot;')}" placeholder="ApiKey" /></label>
+            </div>
+            <div class="chillpay-row chillpay-row-md5">
+              <label class="chillpay-cell chillpay-cell-md5"><span class="chillpay-label">MD5</span><input type="text" name="sandboxMd5" value="${(loadChillPayTransactionConfig().sandbox.md5 || '').replace(/"/g, '&quot;')}" placeholder="MD5 Secret Key" /></label>
+            </div>
+          </section>
+
+          <section class="chillpay-section">
+            <h3>Production (운영 환경)</h3>
+            <p class="chillpay-hint">1줄: Mid · ApiKey / 2줄: MD5</p>
+            <div class="chillpay-row">
+              <label class="chillpay-cell chillpay-cell-mid"><span class="chillpay-label">Mid</span><input type="text" name="productionMid" value="${(loadChillPayTransactionConfig().production.mid || '').replace(/"/g, '&quot;')}" placeholder="MerchantCode" maxlength="20" size="10" /></label>
+              <label class="chillpay-cell chillpay-cell-api"><span class="chillpay-label">ApiKey</span><input type="text" name="productionApiKey" value="${(loadChillPayTransactionConfig().production.apiKey || '').replace(/"/g, '&quot;')}" placeholder="ApiKey" /></label>
+            </div>
+            <div class="chillpay-row chillpay-row-md5">
+              <label class="chillpay-cell chillpay-cell-md5"><span class="chillpay-label">MD5</span><input type="text" name="productionMd5" value="${(loadChillPayTransactionConfig().production.md5 || '').replace(/"/g, '&quot;')}" placeholder="MD5 Secret Key" /></label>
+            </div>
+          </section>
+
+          <section class="chillpay-section">
+            <h3>취소 가능 시간 (기준: 일본 시간)</h3>
+            <p class="chillpay-hint">모든 시각은 <strong>일본 시간(JST)</strong> 기준입니다. 동일 시각의 <strong class="chillpay-time-th">태국 시간(ICT)</strong>은 일본보다 2시간 느립니다 (예: 일본 23:30 = <span class="chillpay-time-th">태국 21:30</span>).</p>
+            <div class="chillpay-time-grid">
+              <div class="chillpay-time-row">
+                <label class="chillpay-time-field">
+                  <span class="chillpay-label">자동 무효 마감 (당일)</span>
+                  <span class="chillpay-time-inputs"><input type="number" name="voidCutoffHour" min="0" max="23" value="${loadChillPayTransactionConfig().voidCutoffHour}" /> 시 <input type="number" name="voidCutoffMinute" min="0" max="59" value="${loadChillPayTransactionConfig().voidCutoffMinute}" /> 분</span>
+                  <span class="chillpay-time-desc">일본 기준. 기본 23:30 (<span class="chillpay-time-th">태국 21:30</span>)</span>
+                </label>
+              </div>
+              <div class="chillpay-time-row">
+                <label class="chillpay-time-field">
+                  <span class="chillpay-label">환불 구간 시작 (다음날)</span>
+                  <span class="chillpay-time-inputs"><input type="number" name="refundStartHour" min="0" max="23" value="${loadChillPayTransactionConfig().refundStartHour}" /> 시 <input type="number" name="refundStartMinute" min="0" max="59" value="${loadChillPayTransactionConfig().refundStartMinute}" /> 분</span>
+                  <span class="chillpay-time-desc">일본 기준. 기본 01:30 (<span class="chillpay-time-th">태국 전날 23:30</span>)</span>
+                </label>
+              </div>
+            </div>
+            <input type="hidden" name="timezone" value="Asia/Tokyo" />
+          </section>
+
+          <section class="chillpay-section">
+            <h3>수동 무효 이메일 (ChillPay 취소 요청)</h3>
+            <p class="chillpay-hint chillpay-email-fixed-note">보내는 정보와 받는 분은 한 번 저장하면 고정값으로 사용됩니다. 아래 <strong>내용</strong>만 건마다 자동 치환됩니다.</p>
+            <div class="chillpay-row chillpay-email-sender-row">
+              <label class="chillpay-cell chillpay-email-sender-cell"><span class="chillpay-label">보내는 사람 주소</span><input type="email" name="emailFrom" value="${(loadChillPayTransactionConfig().emailFrom || '').replace(/"/g, '&quot;')}" placeholder="발신 이메일" /></label>
+              <label class="chillpay-cell chillpay-email-sender-cell"><span class="chillpay-label">회사명</span><input type="text" name="companyName" value="${(loadChillPayTransactionConfig().companyName || '').replace(/"/g, '&quot;')}" placeholder="회사명" /></label>
+              <label class="chillpay-cell chillpay-email-sender-cell"><span class="chillpay-label">담당자 성명</span><input type="text" name="contactName" value="${(loadChillPayTransactionConfig().contactName || '').replace(/"/g, '&quot;')}" placeholder="담당자 성명" /></label>
+            </div>
+            <div class="chillpay-email-to-row">
+              <label class="chillpay-cell"><span class="chillpay-label">받는 분 (수신 이메일 주소)</span><input type="email" name="emailTo" class="chillpay-email-input-same" value="${(loadChillPayTransactionConfig().emailTo || 'help@chillpay.co.th').replace(/"/g, '&quot;')}" placeholder="help@chillpay.co.th" /></label>
+            </div>
+            <div class="chillpay-email-body-row">
+              <label class="chillpay-cell" style="width:100%;"><span class="chillpay-label">내용 (본문 템플릿 · {{transNo}}, {{orderNo}}, {{amount}}, {{routeNo}}, {{paymentDate}}, {{mid}} 건마다 자동 치환)</span><textarea name="emailBodyTemplate" rows="5" style="width:100%;max-width:600px;padding:8px;border-radius:6px;border:1px solid #d1d5db;box-sizing:border-box;">${(loadChillPayTransactionConfig().emailBodyTemplate || '아래 거래에 대해 취소를 요청합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n').replace(/</g, '&lt;').replace(/"/g, '&quot;')}</textarea></label>
+            </div>
+          </section>
+
+          <section class="chillpay-section chillpay-sandbox-check">
+            <label class="chillpay-checkbox-wrap">
+              <input type="checkbox" name="useSandbox" ${loadChillPayTransactionConfig().useSandbox ? 'checked' : ''} />
+              <span>API 호출 시 Sandbox 사용 (테스트 시 체크)</span>
+            </label>
+            <p class="chillpay-checkbox-desc">체크하면 무효/환불 요청이 <strong>Sandbox(테스트)</strong> 환경으로 전송됩니다. 실제 결제 건에는 적용되지 않습니다. 해제하면 <strong>Production(운영)</strong> 환경으로 전송되어 실제 무효/환불이 처리됩니다.</p>
+          </section>
+
+          <div class="chillpay-submit"><button type="submit">ChillPay 설정 저장</button></div>
+        </form>
+      </div>
     </main>
   </div>
 </body>
 </html>`);
+});
+
+app.post('/admin/settings/chillpay', requireAuth, requirePage('settings'), (req, res) => {
+  const sandboxMid = (req.body && req.body.sandboxMid != null) ? String(req.body.sandboxMid).trim() : '';
+  const sandboxApiKey = (req.body && req.body.sandboxApiKey != null) ? String(req.body.sandboxApiKey).trim() : '';
+  const sandboxMd5 = (req.body && req.body.sandboxMd5 != null) ? String(req.body.sandboxMd5).trim() : '';
+  const productionMid = (req.body && req.body.productionMid != null) ? String(req.body.productionMid).trim() : '';
+  const productionApiKey = (req.body && req.body.productionApiKey != null) ? String(req.body.productionApiKey).trim() : '';
+  const productionMd5 = (req.body && req.body.productionMd5 != null) ? String(req.body.productionMd5).trim() : '';
+  const timezone = (req.body && req.body.timezone != null) ? String(req.body.timezone).trim() : 'Asia/Tokyo';
+  const voidCutoffHour = parseInt(req.body.voidCutoffHour, 10);
+  const voidCutoffMinute = parseInt(req.body.voidCutoffMinute, 10);
+  const refundStartHour = parseInt(req.body.refundStartHour, 10);
+  const refundStartMinute = parseInt(req.body.refundStartMinute, 10);
+  const useSandbox = req.body.useSandbox === 'on' || req.body.useSandbox === true;
+  const emailFrom = (req.body && req.body.emailFrom != null) ? String(req.body.emailFrom).trim() : '';
+  const companyName = (req.body && req.body.companyName != null) ? String(req.body.companyName).trim() : '';
+  const contactName = (req.body && req.body.contactName != null) ? String(req.body.contactName).trim() : '';
+  const emailTo = (req.body && req.body.emailTo != null) ? String(req.body.emailTo).trim() : 'help@chillpay.co.th';
+  const emailBodyTemplate = (req.body && req.body.emailBodyTemplate != null) ? String(req.body.emailBodyTemplate).trim() : '';
+  saveChillPayTransactionConfig({
+    sandbox: { mid: sandboxMid, apiKey: sandboxApiKey, md5: sandboxMd5 },
+    production: { mid: productionMid, apiKey: productionApiKey, md5: productionMd5 },
+    timezone: timezone || 'Asia/Tokyo',
+    voidCutoffHour: Number.isFinite(voidCutoffHour) ? voidCutoffHour : 23,
+    voidCutoffMinute: Number.isFinite(voidCutoffMinute) ? voidCutoffMinute : 30,
+    refundStartHour: Number.isFinite(refundStartHour) ? refundStartHour : 1,
+    refundStartMinute: Number.isFinite(refundStartMinute) ? refundStartMinute : 30,
+    useSandbox,
+    emailFrom,
+    companyName,
+    contactName,
+    emailTo,
+    emailBodyTemplate,
+  });
+  return res.redirect('/admin/settings');
 });
 
 app.post('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
@@ -1812,6 +2702,9 @@ const PAGE_KEY_LABELS = {
   pg_logs: '피지 노티',
   internal_logs: '전산 노티',
   dev_internal_logs: '개발 노티',
+  pg_result: '피지 결과',
+  internal_result: '전산 결과',
+  dev_result: '개발 결과',
   traffic_analysis: '트래픽분석',
   internal_targets: '노티 추가등록',
   internal_noti_settings: '노티 환경설정',
@@ -1822,6 +2715,7 @@ const PAGE_KEY_LABELS = {
   account: '계정 설정',
   settings: '환경 설정',
   account_reset: '계정초기화',
+  cancel_refund: '취소환불',
 };
 
 function getRoleLabel(role, locale) {
@@ -1831,8 +2725,8 @@ function getRoleLabel(role, locale) {
   return role || '';
 }
 
-// 페이지 번호(1~10) 설명 문구 (상단 안내용)
-const PAGE_NUM_LEGEND = PAGE_KEYS.map((k, i) => `${i + 1}=${PAGE_KEY_LABELS[k] || k}`).join(', ');
+// 페이지 번호(1~18) 설명 문구 (상단 안내용) - 컴팩트 그리드
+const PAGE_NUM_LEGEND = PAGE_KEYS.map((k, i) => `${i + 1}:${(PAGE_KEY_LABELS[k] || k).replace(/\s+/g, '')}`).join(' ');
 
 app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, res) => {
   const locale = getLocale(req);
@@ -1847,8 +2741,12 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
   const isSuper = cur && cur.role === ROLES.SUPER_ADMIN;
   const list = isSuper ? MEMBERS : MEMBERS.filter((x) => x.role === ROLES.OPERATOR);
   const addFormRoleBlock = isSuper ? `<label>역할 <select name="role" id="m-role"><option value="${ROLES.OPERATOR}">${t(locale, 'role_operator')}</option><option value="${ROLES.ADMIN}">${t(locale, 'role_admin')}</option></select></label>` : '<input type="hidden" name="role" id="m-role" value="OPERATOR" />';
-  const addFormPermBlock = PAGE_KEYS.map((k, i) => `<label class="perm-check" title="${PAGE_KEY_LABELS[k] || k}"><input type="checkbox" name="perm_${k}" /> ${i + 1}</label>`).join('');
-  const permHeaderCells = PAGE_KEYS.map((_, i) => `<th class="perm-col">${i + 1}</th>`).join('');
+  const addFormPermSlots = PAGE_KEYS.map((k) => {
+    const name = (PAGE_KEY_LABELS[k] || k).replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    return `<div class="perm-slot"><span class="perm-slot-name" title="${name}">${name}</span><label class="perm-slot-cb"><input type="checkbox" name="perm_${k}" /></label></div>`;
+  }).join('');
+  const addFormPermBlock = `<div class="perm-grid-2x9">${addFormPermSlots}</div>`;
+  const permHeaderCell = '<th class="perm-header-col">페이지 접근 권한 (OPERATOR)</th>';
   const confirmDel = (t(locale, 'members_confirm_delete') || '삭제하시겠습니까?').replace(/'/g, "\\'");
   const confirmPw = '비밀번호를 초기(아이디+1!)로 초기화합니다. 진행할까요?'.replace(/'/g, "\\'");
   const confirmOtp = 'OTP를 초기화합니다. 해당 계정은 재등록 후 사용 가능합니다. 진행할까요?'.replace(/'/g, "\\'");
@@ -1859,16 +2757,20 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
       const canDelete = (isSuper || mem.role === ROLES.OPERATOR) && mem.id !== cur.id;
       const canReset = (isSuper || (mem.role === ROLES.OPERATOR && cur.role === ROLES.ADMIN)) && mem.id !== cur.id;
       const opPerms = mem.role === ROLES.OPERATOR ? (OPERATOR_PERMISSIONS[mem.userId] || []) : [];
-      const permCells =
-        mem.role === ROLES.OPERATOR
-          ? PAGE_KEYS.map((k) => {
-              const checked = opPerms.includes(k);
-              if (canEditPerm) {
-                return `<td class="perm-cell"><input type="checkbox" name="perm_${k}" ${checked ? 'checked' : ''} form="perm-form-${mem.id}" /></td>`;
-              }
-              return `<td class="perm-cell">${checked ? '●' : '-'}</td>`;
-            }).join('')
-          : PAGE_KEYS.map(() => '<td class="perm-cell">●</td>').join('');
+      const permGridCells = PAGE_KEYS.map((k) => {
+        const checked = opPerms.includes(k);
+        const name = (PAGE_KEY_LABELS[k] || k).replace(/</g, '&lt;').replace(/"/g, '&quot;');
+        if (mem.role === ROLES.OPERATOR) {
+          if (canEditPerm) {
+            return `<div class="perm-slot"><span class="perm-slot-name">${name}</span><label class="perm-slot-cb"><input type="checkbox" name="perm_${k}" ${checked ? 'checked' : ''} form="perm-form-${mem.id}" /></label></div>`;
+          }
+          return `<div class="perm-slot"><span class="perm-slot-name">${name}</span><span class="perm-slot-cb">${checked ? '●' : '-'}</span></div>`;
+        }
+        return `<div class="perm-slot perm-slot-full"><span class="perm-slot-name">${name}</span><span class="perm-slot-cb">●</span></div>`;
+      }).join('');
+      const permCell = mem.role === ROLES.OPERATOR
+        ? `<td class="perm-td"><div class="perm-grid-2x9">${permGridCells}</div></td>`
+        : `<td class="perm-td perm-td-full">전체</td>`;
       const confirmPerm = (t(locale, 'members_confirm_update_permissions') || '페이지 접근 권한을 수정하시겠습니까?').replace(/'/g, "\\'");
       const permForm = mem.role === ROLES.OPERATOR && canEditPerm
         ? `<form id="perm-form-${mem.id}" method="post" action="/admin/members/update-permissions" style="display:inline;" onsubmit="return confirm('${confirmPerm}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-update-perm">권한</button></form>`
@@ -1889,7 +2791,7 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
         <td>${(mem.email || '').replace(/</g, '&lt;')}</td>
         <td>${(mem.birthDate || '').replace(/</g, '&lt;')}</td>
         <td>${getRoleLabel(mem.role, locale)}</td>
-        ${permCells}
+        ${permCell}
         ${initCell}
         <td class="manage-cell">${permForm} ${editInfoBtn} ${delBtn}</td>
       </tr>`;
@@ -1903,26 +2805,38 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
   <style>
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; color:#111827; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
-    .nav a, .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; margin-bottom:0; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
     .card { background:#fff; padding:18px 22px; border-radius:10px; box-shadow:0 10px 25px rgba(15,23,42,0.06); border:1px solid #e5e7eb; }
     h1 { margin-bottom:8px; }
     h2 { margin-top:20px; margin-bottom:12px; font-size:16px; }
-    table { border-collapse:collapse; width:100%; background:#fff; border-radius:8px; overflow:hidden; }
-    th, td { border:1px solid #e5e7eb; padding:8px 10px; font-size:14px; text-align:center; }
+    .members-table-wrap { overflow-x:auto; margin-bottom:8px; }
+    table { border-collapse:collapse; width:100%; min-width:800px; background:#fff; border-radius:8px; }
+    th, td { border:1px solid #e5e7eb; padding:6px 8px; font-size:13px; text-align:center; }
     th { background:#e5f0ff; color:#1f2937; }
+    th:nth-child(1), td:nth-child(1) { min-width:70px; }
+    th:nth-child(2), td:nth-child(2) { min-width:50px; }
+    th:nth-child(3), td:nth-child(3) { min-width:80px; }
+    th:nth-child(4), td:nth-child(4) { min-width:100px; }
+    th:nth-child(5), td:nth-child(5) { min-width:80px; }
+    th:nth-child(6), td:nth-child(6) { min-width:52px; }
     tr:nth-child(even) { background:#f9fafb; }
-    .perm-col { min-width:32px; font-weight:600; }
-    .perm-cell { padding:4px; }
-    .perm-cell input { margin:0; cursor:pointer; }
+    .perm-header-col { min-width:320px; font-size:12px; padding:6px 8px; white-space:nowrap; }
+    .perm-td { padding:6px 8px; vertical-align:top; min-width:320px; }
+    .perm-td-full { font-size:12px; color:#6b7280; }
+    .perm-grid-2x9 { display:grid; grid-template-columns:repeat(9, 1fr); gap:6px 10px; }
+    .perm-slot { display:flex; flex-direction:column; align-items:center; padding:4px 2px; border:1px solid #e5e7eb; border-radius:6px; background:#f9fafb; font-size:11px; }
+    .perm-slot-name { margin:2px 0; line-height:1.2; color:#6b7280; text-align:center; word-break:keep-all; }
+    .perm-slot-cb input { margin:0; cursor:pointer; width:14px; height:14px; }
+    .perm-slot-full .perm-slot-cb { font-size:12px; color:#059669; }
     .manage-cell { white-space:nowrap; }
     .manage-cell form { display:inline; margin-right:6px; }
     .init-cell { white-space:nowrap; }
@@ -1937,19 +2851,20 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
     .btn-reset-pw { padding:4px 8px; font-size:12px; background:#6b7280; color:#fff; border:none; border-radius:4px; cursor:pointer; }
     .btn-reset-otp { padding:4px 8px; font-size:12px; background:#7c3aed; color:#fff; border:none; border-radius:4px; cursor:pointer; }
     label { display:block; margin-top:10px; font-size:14px; }
-    .perm-legend { font-size:12px; color:#6b7280; background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:8px 12px; margin-bottom:12px; }
+    .perm-legend { font-size:11px; color:#6b7280; background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:6px 10px; margin-bottom:10px; line-height:1.5; }
+    .perm-legend-inner { display:grid; grid-template-columns:repeat(auto-fill, minmax(100px, 1fr)); gap:2px 10px; }
     .add-form-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:12px 20px; align-items:end; }
     .add-form-grid label { margin-top:0; }
     input[type="text"], input[type="email"], input[type="date"], select { width:100%; max-width:280px; padding:8px 10px; border-radius:6px; border:1px solid #d1d5db; box-sizing:border-box; }
-    .perm-check { display:inline-flex; align-items:center; gap:4px; margin-right:10px; margin-top:8px; }
-    .perm-check input { width:auto; max-width:none; }
+    #add-form-perms .perm-grid-2x9 { margin-top:8px; max-width:100%; }
+    #add-form-perms .perm-slot { min-width:0; }
     button[type="submit"].btn-add { padding:10px 18px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; margin-top:12px; }
     button[type="submit"].btn-add:hover { background:#1d4ed8; }
   </style>
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -1957,16 +2872,15 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
         <p style="font-size:13px;color:#555;">${t(locale, 'account_list_desc')}</p>
         ${(isSuper || cur.role === ROLES.ADMIN) ? `
         <h2 id="form-title" data-initial-title="${(t(locale, 'add_member') || '회원 추가').replace(/"/g, '&quot;')}">${t(locale, 'add_member')}</h2>
-        <p class="perm-legend"><strong>페이지 접근 번호:</strong> ${PAGE_NUM_LEGEND}</p>
         <form id="member-form" method="post" action="/admin/members/save" class="add-form-grid" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
           <input type="hidden" name="editId" id="editId" value="" />
           <label>${t(locale, 'member_name')} <input type="text" name="name" id="m-name" required /></label>
           <label>${t(locale, 'member_country')} <input type="text" name="country" id="m-country" /></label>
           <label>${t(locale, 'member_user_id')} <input type="text" name="userId" id="m-userId" required /></label>
           <label>${t(locale, 'member_email')} <input type="email" name="email" id="m-email" /></label>
-          <label>${t(locale, 'member_birth_date')} <input type="text" name="birthDate" id="m-birthDate" placeholder="YYYY-MM-DD" /></label>
+          <label>${t(locale, 'member_birth_date')} <input type="date" name="birthDate" id="m-birthDate" /></label>
           ${addFormRoleBlock}
-          ${isSuper ? '<label><input type="checkbox" name="otpRequired" id="m-otpRequired" /> OTP 로그인 필수</label><label><input type="checkbox" name="canAssignPermission" id="m-canAssignPermission" /> 운영자 권한 부여 가능(ADMIN용)</label>' : ''}
+          ${isSuper ? '<label><input type="checkbox" name="canAssignPermission" id="m-canAssignPermission" /> 운영자 권한 부여 가능 (ADMIN용)</label><label><input type="checkbox" name="otpRequired" id="m-otpRequired" /> OTP 로그인 필수 지정</label>' : ''}
           <label style="grid-column:1/-1;">${t(locale, 'page_permissions')} (OPERATOR만 해당) <div id="add-form-perms">${addFormPermBlock}</div></label>
           <label style="grid-column:1/-1;"><button type="submit" class="btn-add">${t(locale, 'members_save')}</button> <button type="button" id="btn-cancel-edit" style="display:none;padding:10px 18px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px;margin-left:8px;">취소(새로 등록)</button></label>
         </form>
@@ -1974,11 +2888,10 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
       </div>
       <div class="card">
         <h2>${t(locale, 'registered_accounts')}</h2>
-        <p class="perm-legend"><strong>페이지 접근:</strong> ${PAGE_NUM_LEGEND}</p>
-        <table>
-          <thead><tr><th>${t(locale, 'member_name')}</th><th>${t(locale, 'member_country')}</th><th>${t(locale, 'member_user_id')}</th><th>${t(locale, 'member_email')}</th><th>${t(locale, 'member_birth_date')}</th><th>역할</th>${permHeaderCells}<th>초기화</th><th>관리</th></tr></thead>
+        <div class="members-table-wrap"><table>
+          <thead><tr><th>${t(locale, 'member_name')}</th><th>${t(locale, 'member_country')}</th><th>${t(locale, 'member_user_id')}</th><th>${t(locale, 'member_email')}</th><th>${t(locale, 'member_birth_date')}</th><th>역할</th>${permHeaderCell}<th>초기화</th><th>관리</th></tr></thead>
           <tbody>${rows}</tbody>
-        </table>
+        </table></div>
       </div>
     </main>
   </div>
@@ -1989,7 +2902,7 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
       var btnCancel = document.getElementById('btn-cancel-edit');
       var formTitle = document.getElementById('form-title');
       if (!form) return;
-      var permKeys = ['merchants','pg_logs','internal_logs','traffic_analysis','internal_targets','internal_noti_settings','test_config','test_run','test_history','account','settings','account_reset'];
+      var permKeys = ['merchants','pg_logs','internal_logs','dev_internal_logs','pg_result','internal_result','dev_result','traffic_analysis','internal_targets','internal_noti_settings','dev_internal_noti_settings','test_config','test_run','test_history','account','settings','account_reset','cancel_refund'];
       function parseDataAttr(s) {
         if (!s) return null;
         try { return JSON.parse(s.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')); } catch(e) { return null; }
@@ -2030,6 +2943,7 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
       }
       document.querySelectorAll('.btn-edit-info').forEach(function(btn){
         btn.addEventListener('click', function(){
+          if (!confirm('수정 하시겠습니까?')) return;
           var m = parseDataAttr(this.getAttribute('data-member'));
           if (m) fillForm(m);
         });
@@ -2293,13 +3207,13 @@ app.get('/admin/account-reset', requireAuth, requirePage('account_reset'), (req,
   <style>
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; color:#111827; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
-    .nav a { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; margin-bottom:16px; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -2316,7 +3230,7 @@ app.get('/admin/account-reset', requireAuth, requirePage('account_reset'), (req,
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -2379,7 +3293,7 @@ app.get('/admin/forgot', (req, res) => {
       <form method="post" action="/admin/forgot">
         <label>이메일 <input type="email" name="email" required /></label>
         <label>성명 <input type="text" name="name" required /></label>
-        <label>생년월일 <input type="text" name="birthDate" placeholder="YYYY-MM-DD" /></label>
+        <label>생년월일 <input type="date" name="birthDate" /></label>
         <button type="submit">요청</button>
       </form>
       <p style="margin-top:16px;"><a href="/admin/login">로그인</a></p>
@@ -2435,7 +3349,10 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
     return `<option value="${value}">${n} (/noti/result/${n})</option>`;
   }).join('');
 
-  const rows = Array.from(MERCHANTS.entries())
+  const sortType = (req.query.sort || 'recent').toString();
+  const sortedEntries = getSortedMerchantEntries(sortType);
+
+  const rows = Array.from(sortedEntries)
     .map(([id, m]) => {
       const cbKey = m.routeCallbackKey || '';
       const rsKey = m.routeResultKey || '';
@@ -2485,6 +3402,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
               data-enable-relay="${relay}"
               data-enable-internal="${internal}"
               data-enable-dev-internal="${devInternal}"
+              data-relay-format="${m.relayFormat || 'raw'}"
               style="padding:4px 8px;font-size:12px;background:#facc15;color:#111827;border:none;border-radius:4px;cursor:pointer;"
             >${t(locale, 'merchants_edit')}</button>
             <form method="post" action="/admin/merchants/delete" onsubmit="return confirm('${confirmDel}');" style="margin:0;">
@@ -2516,14 +3434,14 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
     button { margin-top: 12px; padding: 9px 16px; background:#60a5fa; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; }
     button:hover { background:#3b82f6; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
     .nav a,
-    .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -2536,7 +3454,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="content">
@@ -2601,6 +3519,15 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           전달 노티 사용 (가맹점으로 포워딩)
         </label>
         <label>
+          노티 방식 (가맹점 수신 형식)
+          <select name="relayFormat">
+            <option value="raw">일반 (피지 원문 그대로)</option>
+            <option value="json">JSON</option>
+            <option value="form">FORM (application/x-www-form-urlencoded)</option>
+          </select>
+          <span style="font-size:12px;color:#6b7280;display:block;margin-top:4px;">선택하지 않으면 일반 형태로 자동 구성됩니다.</span>
+        </label>
+        <label>
           <input type="checkbox" name="enableInternal" checked />
           전산 노티 사용 (내부 전산 시스템으로 전송)
         </label>
@@ -2613,6 +3540,15 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
     </div>
     <div class="card merchants-table-wrap">
       <h2>${t(locale, 'merchants_list')}</h2>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:12px;">
+        <span style="font-size:13px;color:#374151;">정렬:</span>
+        <a href="/admin/merchants?sort=recent" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'recent' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'recent' ? '#fff' : '#374151'};" title="최근 등록순">최신등록 (최근)</a>
+        <a href="/admin/merchants?sort=past" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'past' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'past' ? '#fff' : '#374151'};" title="과거 등록순">최신등록 (과거)</a>
+        <a href="/admin/merchants?sort=route_asc" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'route_asc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'route_asc' ? '#fff' : '#374151'};" title="Route 번호 오름차순">Route 번호 (작은수)</a>
+        <a href="/admin/merchants?sort=route_desc" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'route_desc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'route_desc' ? '#fff' : '#374151'};" title="Route 번호 내림차순">Route 번호 (큰수)</a>
+        <a href="/admin/merchants?sort=target" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'target' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'target' ? '#fff' : '#374151'};" title="동일 등록대상끼리 묶어서 표시">등록대상</a>
+        <a href="/admin/merchants/export?sort=${sortType}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:#166534;color:#fff;margin-left:8px;" download>Excel 내보내기</a>
+      </div>
       <table>
         <thead>
           <tr>
@@ -2748,6 +3684,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         if (devInternalCheckbox) {
           devInternalCheckbox.checked = (button.dataset.enableDevInternal || 'N') === 'Y';
         }
+        var relayFormatSelect = form.querySelector('select[name="relayFormat"]');
+        if (relayFormatSelect) relayFormatSelect.value = button.dataset.relayFormat || 'raw';
 
         if (cbSelect) cbSelect.value = button.dataset.routeCallbackKey || '';
         if (rsSelect) rsSelect.value = button.dataset.routeResultKey || '';
@@ -2758,6 +3696,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       if (editButtons && editButtons.length > 0) {
         Array.prototype.forEach.call(editButtons, function (btn) {
           btn.addEventListener('click', function () {
+            if (!confirm('수정 하시겠습니까?')) return;
             applyEdit(btn);
           });
         });
@@ -2769,6 +3708,90 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   </script>
 </body>
 </html>`);
+});
+
+// 가맹점 목록 Excel(CSV) 내보내기 (현재 정렬 기준)
+function getSortedMerchantEntries(sortType) {
+  let entries = [...MERCHANTS.entries()];
+  if (sortType === 'recent') entries.reverse();
+  else if (sortType === 'route_asc') {
+    entries.sort((a, b) => {
+      const na = Number(a[1].routeNo) || 0;
+      const nb = Number(b[1].routeNo) || 0;
+      return na - nb || String(a[0]).localeCompare(b[0]);
+    });
+  } else if (sortType === 'route_desc') {
+    entries.sort((a, b) => {
+      const na = Number(a[1].routeNo) || 0;
+      const nb = Number(b[1].routeNo) || 0;
+      return nb - na || String(a[0]).localeCompare(b[0]);
+    });
+  } else if (sortType === 'target') {
+    // 등록대상(internalTargetId) 기준으로 묶어서 리스트: 동일 등록대상끼리 인접
+    entries.sort((a, b) => {
+      const ta = String(a[1].internalTargetId || '').trim();
+      const tb = String(b[1].internalTargetId || '').trim();
+      const cmp = ta.localeCompare(tb, undefined, { sensitivity: 'base' });
+      return cmp !== 0 ? cmp : String(a[0]).localeCompare(b[0]);
+    });
+  }
+  return entries;
+}
+
+app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, res) => {
+  const sortType = (req.query.sort || 'recent').toString();
+  const sortedEntries = getSortedMerchantEntries(sortType);
+  const notiBase = 'https://noti.icopay.net/noti/';
+  const escapeCsv = (v) => {
+    const s = String(v == null ? '' : v);
+    if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  };
+  const header = [
+    '가맹점 ID',
+    'PG Callback URL',
+    'PG Result URL',
+    'Callback URL',
+    'Result URL',
+    'Route No',
+    'Internal CustomerId',
+    '등록대상',
+    '릴레이',
+    '전산',
+    '개발',
+  ];
+  const lines = ['\uFEFF' + header.map(escapeCsv).join(',')];
+  for (const [id, m] of sortedEntries) {
+    const cbKey = m.routeCallbackKey || '';
+    const rsKey = m.routeResultKey || '';
+    const cbPath = cbKey.includes('/') ? cbKey : `callback/${cbKey}`;
+    const rsPath = rsKey.includes('/') ? rsKey : `result/${rsKey}`;
+    const cbDisplay = cbKey ? notiBase + cbPath : '';
+    const rsDisplay = rsKey ? notiBase + rsPath : '';
+    const relay = m.enableRelay === false ? 'N' : 'Y';
+    const internal = m.enableInternal === false ? 'N' : 'Y';
+    const devInternal = m.enableDevInternal === true ? 'Y' : 'N';
+    lines.push(
+      [
+        id,
+        cbDisplay,
+        rsDisplay,
+        m.callbackUrl || '',
+        m.resultUrl || '',
+        m.routeNo || '',
+        m.internalCustomerId || '',
+        m.internalTargetId || '',
+        relay,
+        internal,
+        devInternal,
+      ].map(escapeCsv).join(','),
+    );
+  }
+  const csv = lines.join('\r\n');
+  const filename = `merchants_${sortType}_${new Date().toISOString().slice(0, 10)}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
 });
 
 // 가맹점 등록/수정 처리
@@ -2786,6 +3809,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     enableRelay,
     enableInternal,
     enableDevInternal,
+    relayFormat,
   } = req.body;
 
   const merchantId = (rawMerchantId || '').trim();
@@ -2808,6 +3832,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     MERCHANTS.delete(origId);
   }
 
+  const fmt = (relayFormat === 'json' || relayFormat === 'form') ? relayFormat : 'raw';
   MERCHANTS.set(merchantId, {
     merchantId,
     routeCallbackKey: routeCallbackKey || '',
@@ -2820,6 +3845,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     enableRelay: enableRelay === 'on',
     enableInternal: enableInternal === 'on',
     enableDevInternal: enableDevInternal === 'on',
+    relayFormat: fmt,
   });
 
   console.log('[관리자] 가맹점 저장:', merchantId, MERCHANTS.get(merchantId));
@@ -2870,6 +3896,26 @@ app.post('/admin/merchants/delete', requireAuth, requirePage('merchants'), (req,
 // PG 노티 로그 페이지 (수신시간 4타임존, 1건 1줄, Json/callback·json/result)
 app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
   const locale = getLocale(req);
+  const q = req.query || {};
+  const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
+  const resendMsg =
+    q.resend === 'ok'
+      ? '<div class="alert alert-ok">재전송이 완료되었습니다.</div>'
+      : q.resend === 'fail' && q.reason
+      ? '<div class="alert alert-fail">재전송 실패: ' + escQ(q.reason) + '</div>'
+      : q.void === 'ok'
+      ? '<div class="alert alert-ok">무효 요청이 완료되었습니다.' + (q.noti === 'partial' ? ' (노티 일부 실패)' : '') + '</div>'
+      : q.void === 'fail' && q.reason
+      ? '<div class="alert alert-fail">무효 요청 실패: ' + escQ(q.reason) + '</div>'
+      : q.refund === 'ok'
+      ? '<div class="alert alert-ok">환불 요청이 완료되었습니다.' + (q.noti === 'partial' ? ' (노티 일부 실패)' : '') + '</div>'
+      : q.refund === 'fail' && q.reason
+      ? '<div class="alert alert-fail">환불 요청 실패: ' + escQ(q.reason) + '</div>'
+      : q.err === 'invalid'
+      ? '<div class="alert alert-fail">잘못된 요청입니다.</div>'
+      : q.err === 'no_target' || q.err === 'no_body'
+      ? '<div class="alert alert-fail">' + (q.reason ? escQ(q.reason) : (q.err === 'no_target' ? '가맹점 URL 없음' : '노티 본문 없음')) + '</div>'
+      : '';
   const clientIp =
     (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
     req.ip ||
@@ -2883,12 +3929,13 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
   const rows = reversed
     .map((log, i) => {
       const realIndex = NOTI_LOGS.length - 1 - i;
-      const tz = formatTimeMultiTZ(log.receivedAtIso || log.receivedAt);
+      const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
       const jsonCallback = log.kind === 'callback' ? JSON.stringify(log.body, null, 2) : '';
       const jsonResult = log.kind === 'result' ? JSON.stringify(log.body, null, 2) : '';
       const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const relayStatus = log.relayStatus || '-';
       const relayHasTarget = !!log.targetUrl;
+      const relayFailReason = (log.relayFailReason || '').trim();
       const relayLabel =
         relayStatus === 'ok'
           ? '성공'
@@ -2899,28 +3946,46 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
           : relayStatus === 'skip'
           ? '미전송'
           : relayStatus;
+      // 성공 시: JSON=녹색, FORM=노란색, 일반(raw)=파란색 (relayFormatUsed 또는 구 relaySentAsJson 호환)
+      const formatUsed = log.relayFormatUsed || (log.relaySentAsJson === true ? 'json' : 'raw');
       const relayClass =
         relayStatus === 'ok'
-          ? 'status-ok'
+          ? (formatUsed === 'json' ? 'status-ok' : formatUsed === 'form' ? 'status-ok-form' : 'status-ok-normal')
           : relayStatus === 'fail'
           ? 'status-fail'
           : relayStatus === 'skip' && !relayHasTarget
           ? 'status-none'
           : '';
-      const canResend = (relayStatus === 'fail' || relayStatus === 'ok') && relayHasTarget && log.body;
+      const canResend = (relayStatus === 'fail' || relayStatus === 'ok') && relayHasTarget && (log.body || log.rawBody);
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('해당 노티를 가맹점으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-resend">재전송</button></form>`
+        ? `<div class="resend-wrap"><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('일반(원문) 형식으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-resend">일반</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('JSON 형식으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('FORM 형식으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form">FORM</button></form></div>`
         : !relayHasTarget
         ? '<span class="label-none">노티없음</span>'
         : '-';
+      const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+      const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
+      const isSuccess = body.PaymentStatus === 1 || body.PaymentStatus === '1' || body.paymentStatus === 'Success' || body.status === 1;
+      const payDate = body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
+      const windowType = txId && isSuccess && log.merchantId && MERCHANTS.get(log.merchantId) ? getVoidRefundWindow(payDate) : null;
+      const cfg = loadChillPayTransactionConfig();
+      const useSandbox = cfg.useSandbox;
+      const voidRefundBtns = windowType === 'void_auto'
+        ? `<form method="post" action="/admin/logs/void-request" style="display:inline;" onsubmit="return confirm('ChillPay에 무효 요청 후 가맹점/전산에 무효 노티를 보냅니다. 진행할까요?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-void">무효 요청</button></form>`
+        : windowType === 'refund'
+        ? `<form method="post" action="/admin/logs/refund-request" style="display:inline;" onsubmit="return confirm('ChillPay에 환불 요청 후 가맹점/전산에 환불 노티를 보냅니다. 진행할까요?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-refund">환불 요청</button></form>`
+        : windowType === 'void_manual'
+        ? '<span class="label-manual">수동만</span>'
+        : '';
       return `<tr>
-        <td class="col-time">${typeof tz === 'object' && tz.th != null ? `TH: ${esc(tz.th)}<br>JP: ${esc(tz.jp)}<br>SG: ${esc(tz.sg)}<br>US: ${esc(tz.us)}` : esc(log.receivedAt || '-')}</td>
+        <td class="col-date">${esc(dt.date)}</td>
+        <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
         <td class="col-narrow">${esc(log.routeKey || '')}</td>
         <td class="col-narrow">${esc(log.merchantId || '')}</td>
-        <td class="col-status"><span class="${relayClass}">${esc(relayLabel)}</span></td>
+        <td class="col-status"><span class="${relayClass}">${esc(relayLabel)}</span>${relayStatus === 'fail' && relayFailReason ? `<br /><span class="relay-fail-reason" title="${esc(relayFailReason)}">${esc(relayFailReason)}</span>` : ''}</td>
         <td class="col-json"><pre>${esc(jsonCallback) || '-'}</pre></td>
         <td class="col-json"><pre>${esc(jsonResult) || '-'}</pre></td>
         <td class="col-action">${resendBtn}</td>
+        <td class="col-void-refund">${voidRefundBtns}</td>
       </tr>`;
     })
     .join('');
@@ -2934,29 +3999,49 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: top; text-align:center; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
+    .col-date { width: 8%; min-width: 70px; }
     .col-time, .col-narrow { width: 9%; min-width: 75px; }
     .col-status { width: 8%; min-width: 70px; }
-    .col-json { width: 27%; }
+    .col-json { width: 26%; text-align: left; }
     .col-action { width: 8%; min-width: 70px; }
+    .col-action .resend-wrap { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; margin: 6px 0; min-height: 48px; }
+    .col-action form { margin: 4px 0; }
+    .time-jp { color: #2563eb; }
     .status-ok { color: #059669; font-weight: 600; }
+    .status-ok-normal { color: #2563eb; font-weight: 600; }
+    .status-ok-form { color: #ca8a04; font-weight: 600; }
     .status-fail { color: #dc2626; font-weight: 600; }
+    .relay-fail-reason { font-size: 11px; color: #b91c1c; word-break: break-all; display: block; margin-top: 2px; text-align: center; }
     .status-none { color:#b91c1c; font-weight:700; }
     .label-none { color:#b91c1c; font-weight:700; }
     .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
     .btn-resend:hover { background: #1d4ed8; }
-    .col-json pre { margin:0; white-space:pre-wrap; font-size:12px; text-align:left; }
+    .btn-resend-json { padding: 4px 10px; font-size: 12px; background: #059669; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .btn-resend-json:hover { background: #047857; }
+    .btn-resend-form { padding: 4px 10px; font-size: 12px; background: #ca8a04; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .btn-resend-form:hover { background: #a16207; }
+    .col-void-refund { width: 9%; min-width: 90px; }
+    .btn-void { padding: 4px 10px; font-size: 12px; background: #7c3aed; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .btn-void:hover { background: #6d28d9; }
+    .btn-refund { padding: 4px 10px; font-size: 12px; background: #0d9488; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .btn-refund:hover { background: #0f766e; }
+    .label-manual { font-size: 11px; color: #6b7280; }
+    .alert { padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
+    .alert-ok { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+    .alert-fail { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .col-json pre { margin:0; white-space:pre-wrap; font-size:12px; text-align: left; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
     .nav a,
-    .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -2966,27 +4051,30 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
+      ${resendMsg}
       <h1>${t(locale, 'pg_logs_title')} (${NOTI_LOGS.length})</h1>
-      <p style="font-size:13px;color:#555;">${t(locale, 'pg_logs_desc')}</p>
+      <p style="font-size:13px;color:#555;">PG에서 우리 서버로 들어온 노티 전문을 그대로 확인할 수 있습니다. ㅣ 재전송: 일반 · JSON · FORM (한 줄). 성공 <span style="color:#2563eb;font-weight:600;">파란색</span>=일반, <span style="color:#059669;font-weight:600;">녹색</span>=JSON, <span style="color:#ca8a04;font-weight:600;">노란색</span>=FORM</p>
       <table>
-        <colgroup><col class="col-time" /><col class="col-narrow" /><col class="col-narrow" /><col class="col-status" /><col class="col-json" /><col class="col-json" /><col class="col-action" /></colgroup>
+        <colgroup><col class="col-date" /><col class="col-time" /><col class="col-narrow" /><col class="col-narrow" /><col class="col-status" /><col class="col-json" /><col class="col-json" /><col class="col-action" /><col class="col-void-refund" /></colgroup>
         <thead>
           <tr>
-            <th>${t(locale, 'pg_logs_time')}</th>
+            <th>수신일</th>
+            <th>수신시각</th>
             <th>${t(locale, 'pg_logs_route_key')}</th>
             <th>${t(locale, 'pg_logs_merchant_id')}</th>
             <th>가맹점 수신</th>
             <th>${t(locale, 'pg_logs_json_callback')}</th>
             <th>${t(locale, 'pg_logs_json_result')}</th>
             <th>재전송</th>
+            <th>무효/환불</th>
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="7" style="text-align:center;color:#777;">${t(locale, 'pg_logs_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="9" style="text-align:center;color:#777;">${t(locale, 'pg_logs_empty')}</td></tr>`}
         </tbody>
       </table>
       </div>
@@ -2997,23 +4085,725 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
 });
 
 // PG 노티 재전송 (가맹점으로 수동 재전송)
-app.post('/admin/logs/resend', requireAuth, requirePage('pg_logs'), async (req, res) => {
+// - 재전송: 원문(rawBody)이 있으면 ChillPay 수신 원문 그대로 전송(Content-Type 유지). 없으면 body를 원래 contentType으로 전송.
+// - 재전송(JSON): 항상 application/json으로 body 객체를 JSON 직렬화해 전송. 가맹점이 JSON만 수신할 때 사용.
+app.post('/admin/logs/void-request', requireAuth, requirePageAny(['pg_logs', 'pg_result']), async (req, res) => {
   const index = parseInt(req.body.index, 10);
   if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
-    return res.redirect('/admin/logs?err=invalid');
+    return res.redirect('/admin/logs?void=fail&reason=' + encodeURIComponent('잘못된 인덱스'));
   }
   const log = NOTI_LOGS[index];
-  const targetUrl = log.targetUrl || (findMerchantByRouteKey(log.routeKey) && findMerchantByRouteKey(log.routeKey).targetUrl);
-  if (!targetUrl || !log.body) {
-    return res.redirect('/admin/logs?err=no_target');
+  const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+  const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
+  if (!txId) return res.redirect('/admin/logs?void=fail&reason=' + encodeURIComponent('TransactionId 없음'));
+  const cfg = loadChillPayTransactionConfig();
+  const result = await chillPayRequestVoid(txId, cfg.useSandbox);
+  if (!result.success) return res.redirect('/admin/logs?void=fail&reason=' + encodeURIComponent(result.error || '무효 요청 실패'));
+  const sendResult = await sendVoidOrRefundNoti(log, 'void');
+  markVoidNotiSent(txId);
+  return res.redirect('/admin/logs?void=ok' + (sendResult.success ? '' : '&noti=partial'));
+});
+
+app.post('/admin/logs/refund-request', requireAuth, requirePageAny(['pg_logs', 'pg_result']), async (req, res) => {
+  const index = parseInt(req.body.index, 10);
+  if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
+    return res.redirect('/admin/logs?refund=fail&reason=' + encodeURIComponent('잘못된 인덱스'));
   }
+  const log = NOTI_LOGS[index];
+  const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+  const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
+  if (!txId) return res.redirect('/admin/logs?refund=fail&reason=' + encodeURIComponent('TransactionId 없음'));
+  const cfg = loadChillPayTransactionConfig();
+  const result = await chillPayRequestRefund(txId, cfg.useSandbox);
+  if (!result.success) return res.redirect('/admin/logs?refund=fail&reason=' + encodeURIComponent(result.error || '환불 요청 실패'));
+  const sendResult = await sendVoidOrRefundNoti(log, 'refund');
+  markRefundNotiSent(txId);
+  return res.redirect('/admin/logs?refund=ok' + (sendResult.success ? '' : '&noti=partial'));
+});
+
+// ----- 취소환불 전용 메뉴 (거래내역 / 무효거래 / 환불거래 / 거래노티) -----
+const cancelRefundLayoutCss = `
+  body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+  h1 { margin-bottom: 8px; }
+  table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
+  th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: middle; text-align: center; }
+  th { background: #e5f0ff; }
+  tr:nth-child(even) { background:#f9fafb; }
+  .tx-status-fail { color: #dc2626; font-weight: 600; }
+  .tx-status-success { color: #2563eb; font-weight: 600; }
+  .tx-status-cancel { color: #059669; font-weight: 600; }
+  .tx-status-void-manual { color: #7c3aed; font-weight: 600; }
+  .tx-status-refund-manual { color: #84cc16; font-weight: 600; }
+  .col-date { width: 10%; min-width: 70px; }
+  .col-time, .col-narrow { width: 9%; min-width: 75px; }
+  .col-action { width: 12%; min-width: 90px; }
+  .time-jp { color: #2563eb; }
+  .btn-void { padding: 6px 12px; font-size: 12px; background: #7c3aed; color: #fff; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }
+  .btn-void:hover { background: #6d28d9; }
+  .btn-refund { padding: 6px 12px; font-size: 12px; background: #0d9488; color: #fff; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }
+  .btn-refund:hover { background: #0f766e; }
+  .btn-email { padding: 6px 12px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }
+  .btn-email:hover { background: #1d4ed8; }
+  .btn-email-disabled { padding: 6px 12px; font-size: 12px; background: #e5e7eb; color: #9ca3af; border-radius: 4px; cursor: not-allowed; display: inline-block; }
+  .col-status { font-weight: 600; }
+  .status-ok { color: #059669; }
+  .status-fail { color: #dc2626; }
+  .status-skip { color: #6b7280; }
+  .label-manual { font-size: 11px; color: #6b7280; }
+  .alert { padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
+  .alert-ok { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+  .alert-fail { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+  .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
+  .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+  .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+  .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+  .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+  .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+  .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+  .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
+  .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
+  .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
+  .card { background:#fff; padding:16px 20px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); margin-bottom:8px; border:1px solid #e5e7eb; }
+`;
+
+function renderCancelRefundPage(locale, adminUser, title, mainContent, alertHtml, currentUrl, member) {
+  const clientIp = '';
+  const nowKr = '';
+  const nowTh = '';
+  const raw = mainContent && String(mainContent).trim() ? mainContent : '';
+  const isFullMarkup = raw.indexOf('<table') === 0 || raw.indexOf('<form') === 0 || raw.includes('</table>');
+  const noDataLabel = t(locale, 'cr_no_data');
+  const mainInner = raw || '<table><tbody><tr><td colspan="6" style="text-align:center;color:#777;">' + noDataLabel + '</td></tr></tbody></table>';
+  const wrapped = isFullMarkup ? mainInner : '<table>' + mainInner + '</table>';
+  return `<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${title}</title>
+  <style>${cancelRefundLayoutCss}</style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, member || null, currentUrl || '')}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, '')}
+      <div class="card">
+        ${alertHtml || ''}
+        <h1>${title}</h1>
+        ${wrapped}
+      </div>
+    </main>
+  </div>
+</body>
+</html>`;
+}
+
+// ----- 시스템 > 거래내역 (지정 컬럼만 표시) -----
+function parseNotiBody(log) {
+  const raw = log.body;
+  if (raw && typeof raw === 'object') return raw;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw); } catch { return {}; }
+  }
+  return {};
+}
+// 테스트 결제 환경 설정과 동일한 Currency 코드 → 표시용 (JPY, USD, KRW, THB)
+function formatCurrencyForDisplay(val) {
+  if (val == null || val === '') return null;
+  const s = String(val).trim();
+  if (s === '392' || s === 'JPY') return 'JPY';
+  if (s === '840' || s === 'USD') return 'USD';
+  if (s === '764' || s === 'THB') return 'THB';
+  if (s === '410' || s === 'KRW' || s === 'KOR') return 'KRW';
+  return s;
+}
+const TRANSACTION_LIST_COLUMNS = [
+  { type: 'fixed', id: 'received_date' },
+  { type: 'fixed', id: 'received_time' },
+  { type: 'fixed', id: 'route_no' },
+  { type: 'fixed', id: 'merchant' },
+  { type: 'body', keys: ['TransactionId', 'transactionId'] },
+  { type: 'body', keys: ['OrderNo', 'orderNo'] },
+  { type: 'body', keys: ['Amount', 'amount'] },
+  { type: 'body', keys: ['status'] },
+  { type: 'body', keys: ['PaymentDate', 'paymentDate'] },
+  { type: 'body', keys: ['Currency', 'currency'], display: 'currency' },
+  { type: 'body', keys: ['CustomerId', 'customerId'] },
+  { type: 'body', keys: ['PaymentDescription', 'paymentDescription', 'Description', 'description'] },
+  { type: 'fixed', id: 'status' },
+  { type: 'fixed', id: 'noti' },
+];
+app.get('/admin/transactions', requireAuth, (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const reversed = [...NOTI_LOGS].slice().reverse();
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const formatVal = (v) => {
+    if (v == null || v === '') return '-';
+    if (typeof v === 'object' || Array.isArray(v)) return esc(JSON.stringify(v));
+    return esc(String(v));
+  };
+  const getBodyVal = (body, keys) => {
+    for (const k of keys) {
+      if (body[k] != null && body[k] !== '') return body[k];
+    }
+    return null;
+  };
+  const thLabels = [
+    t(locale, 'cr_th_received_date'),
+    t(locale, 'cr_th_received_time'),
+    t(locale, 'cr_th_route_no'),
+    t(locale, 'cr_th_merchant'),
+    'TransactionId', 'OrderNo', 'Amount', 'status', 'PaymentDate', 'Currency',
+    'CustomerId', 'Description',
+    t(locale, 'tx_th_status'),
+    t(locale, 'tx_th_noti'),
+  ];
+  const thead = '<thead><tr>' + thLabels.map((l) => '<th class="col-body-key">' + esc(l) + '</th>').join('') + '</tr></thead>';
+  const rows = reversed.map((log) => {
+    const body = parseNotiBody(log);
+    const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+    const isCancel = ps === 0 || ps === '0' || ps === 'Cancel' || ps === 'Canceled' || ps === 'Cancelled' || String(ps).toLowerCase() === 'cancel';
+    const isSuccess = ps === 1 || ps === '1' || body.paymentStatus === 'Success' || body.status === 1;
+    let statusKey = 'tx_status_fail';
+    let statusClass = 'tx-status-fail';
+    if (isCancel) {
+      statusKey = 'tx_status_cancel';
+      statusClass = 'tx-status-cancel';
+    } else if (isSuccess) {
+      const payDate = body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
+      const w = getVoidRefundWindow(payDate);
+      if (w === 'void_auto') {
+        statusKey = 'tx_status_void_auto';
+        statusClass = 'tx-status-success';
+      } else if (w === 'void_manual') {
+        statusKey = 'tx_status_void_manual';
+        statusClass = 'tx-status-void-manual';
+      } else {
+        statusKey = 'tx_status_refund_auto';
+        statusClass = 'tx-status-refund-manual';
+      }
+    }
+    const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : '');
+    let notiLabel = '-';
+    if (txId) {
+      if (hasVoidNotiSent(txId)) notiLabel = t(locale, 'tx_status_force_void');
+      else if (hasRefundNotiSent(txId)) notiLabel = t(locale, 'tx_status_force_refund');
+    }
+    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const cells = [];
+    for (const col of TRANSACTION_LIST_COLUMNS) {
+      if (col.type === 'fixed') {
+        if (col.id === 'received_date') cells.push('<td class="col-date">' + esc(dt.date) + '</td>');
+        else if (col.id === 'received_time') cells.push('<td class="col-time">TH: ' + esc(dt.timeTh) + '<br><span class="time-jp">JP: ' + esc(dt.timeJp) + '</span></td>');
+        else if (col.id === 'route_no') cells.push('<td class="col-narrow">' + esc(routeNoDisplay) + '</td>');
+        else if (col.id === 'merchant') cells.push('<td class="col-narrow">' + esc(log.merchantId || '') + '</td>');
+        else if (col.id === 'status') cells.push('<td class="col-narrow ' + statusClass + '">' + esc(t(locale, statusKey)) + '</td>');
+        else if (col.id === 'noti') cells.push('<td class="col-narrow">' + esc(notiLabel) + '</td>');
+      } else {
+        let v = getBodyVal(body, col.keys);
+        if (col.display === 'currency') v = formatCurrencyForDisplay(v) ?? v;
+        cells.push('<td class="col-body-val" style="max-width:140px;word-break:break-all;font-size:11px;">' + formatVal(v) + '</td>');
+      }
+    }
+    return '<tr>' + cells.join('') + '</tr>';
+  }).join('');
+  const tableContent = '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_transaction_list') + ' (' + reversed.length + ')', tableContent, '', req.originalUrl, req.session.member));
+});
+
+app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cancel_refund'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const reversed = [...NOTI_LOGS].slice().reverse();
+  const cancelled = reversed.filter((log) => {
+    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+    return ps === 0 || ps === '0' || ps === 'Cancel' || ps === 'Canceled' || ps === 'Cancelled' || String(ps).toLowerCase() === 'cancel';
+  });
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const rows = cancelled.map((log, i) => {
+    const realIndex = NOTI_LOGS.length - 1 - reversed.indexOf(log);
+    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const txId = body.TransactionId ?? body.transactionId ?? '-';
+    const orderNo = body.OrderNo ?? body.orderNo ?? '-';
+    const amount = body.Amount ?? body.amount ?? '-';
+    const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    return `<tr>
+      <td class="col-date">${esc(dt.date)}</td>
+      <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
+      <td class="col-narrow">${esc(routeNoDisplay)}</td>
+      <td class="col-narrow">${esc(log.merchantId || '')}</td>
+      <td>${esc(txId)} / ${esc(orderNo)} / ${esc(amount)}</td>
+    </tr>`;
+  }).join('');
+  const thead = '<thead><tr><th>수신일</th><th>수신시각</th><th>Route No.</th><th>가맹점</th><th>TransactionId / OrderNo / Amount</th></tr></thead>';
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_cancel') + ' (' + cancelled.length + ')', thead + '<tbody>' + rows + '</tbody>', '', req.originalUrl, req.session.member));
+});
+
+app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cancel_refund'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const q = req.query || {};
+  const typeFilter = (q.type || 'all').toString();
+  const days = parseInt(q.days, 10) || 30;
+  const entries = loadVoidRefundNotiLog(days);
+  const filtered = typeFilter === 'void' ? entries.filter((e) => e.type === 'void') : typeFilter === 'refund' ? entries.filter((e) => e.type === 'refund') : entries;
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const relayLabel = (s) => (s === 'ok' ? '<span class="status-ok">' + t(locale, 'cr_status_ok') + '</span>' : s === 'fail' ? '<span class="status-fail">' + t(locale, 'cr_status_fail') + '</span>' : '-');
+  const internalLabel = (s) => (s === 'ok' ? '<span class="status-ok">' + t(locale, 'cr_status_ok') + '</span>' : s === 'fail' ? '<span class="status-fail">' + t(locale, 'cr_status_fail') + '</span>' : s === 'skip' ? '<span class="status-skip">' + t(locale, 'cr_status_skip') + '</span>' : '-');
+  const rows = filtered.map((e) => {
+    const dt = e.sentAtIso ? new Date(e.sentAtIso).toLocaleString('ko-KR', { hour12: false }) : '-';
+    const typeLabel = e.type === 'void' ? t(locale, 'cr_type_void') : e.type === 'refund' ? t(locale, 'cr_type_refund') : e.type || '-';
+    return `<tr>
+      <td class="col-date">${esc(dt)}</td>
+      <td class="col-narrow">${esc(typeLabel)}</td>
+      <td class="col-narrow">${esc(e.transactionId || '')}</td>
+      <td class="col-narrow">${esc(e.orderNo || '')}</td>
+      <td class="col-narrow">${esc(e.merchantId || '')}</td>
+      <td class="col-narrow">${esc(e.routeNo || '')}</td>
+      <td class="col-status">${relayLabel(e.relayStatus)}</td>
+      <td class="col-status">${internalLabel(e.internalStatus)}</td>
+    </tr>`;
+  }).join('');
+  const filterLinks = `<div style="margin-bottom:12px;"><span style="font-size:13px;color:#374151;">${t(locale, 'cr_filter_type')}: </span>
+    <a href="/admin/cancel-refund/noti?type=all&days=${days}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${typeFilter === 'all' ? '#2563eb' : '#e5e7eb'};color:${typeFilter === 'all' ? '#fff' : '#374151'};">${t(locale, 'cr_filter_all')}</a>
+    <a href="/admin/cancel-refund/noti?type=void&days=${days}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${typeFilter === 'void' ? '#2563eb' : '#e5e7eb'};color:${typeFilter === 'void' ? '#fff' : '#374151'};">${t(locale, 'cr_type_void')}</a>
+    <a href="/admin/cancel-refund/noti?type=refund&days=${days}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${typeFilter === 'refund' ? '#2563eb' : '#e5e7eb'};color:${typeFilter === 'refund' ? '#fff' : '#374151'};">${t(locale, 'cr_type_refund')}</a>
+    <span style="margin-left:12px;font-size:13px;">${t(locale, 'cr_period_recent')} ${days}${t(locale, 'cr_days')}</span>
+    <a href="/admin/cancel-refund/noti?type=${typeFilter}&days=7" style="margin-left:6px;font-size:12px;">7${t(locale, 'cr_days')}</a>
+    <a href="/admin/cancel-refund/noti?type=${typeFilter}&days=30" style="margin-left:4px;font-size:12px;">30${t(locale, 'cr_days')}</a>
+    <a href="/admin/cancel-refund/noti?type=${typeFilter}&days=90" style="margin-left:4px;font-size:12px;">90${t(locale, 'cr_days')}</a>
+  </div>`;
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_sent_at') + '</th><th>' + t(locale, 'cr_th_type') + '</th><th>TransactionId</th><th>OrderNo</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant_receive') + '</th><th>' + t(locale, 'cr_th_internal_receive') + '</th></tr></thead>';
+  const tableContent = filterLinks + '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_noti') + ' (' + filtered.length + ')', tableContent, '', req.originalUrl, req.session.member));
+});
+
+app.get('/admin/cancel-refund/void', requireAuth, requirePage('cancel_refund'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const q = req.query || {};
+  const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
+  let alertHtml = q.void === 'ok' ? '<div class="alert alert-ok">' + t(locale, 'cr_alert_void_ok') + '</div>' : q.void === 'fail' && q.reason ? '<div class="alert alert-fail">' + t(locale, 'cr_alert_void_fail') + ': ' + escQ(q.reason) + '</div>' : '';
+  if (q.sync === 'ok') {
+    const sent = parseInt(q.sent, 10) || 0;
+    const total = parseInt(q.total, 10) || 0;
+    alertHtml += '<div class="alert alert-ok">' + t(locale, 'cr_alert_sync_void_ok').replace(/\{\{total\}\}/g, total).replace(/\{\{sent\}\}/g, sent) + '</div>';
+  } else if (q.sync === 'fail' && q.reason) {
+    alertHtml += '<div class="alert alert-fail">' + t(locale, 'cr_alert_sync_fail') + ': ' + escQ(q.reason) + '</div>';
+  }
+  const confirmSyncVoid = (t(locale, 'cr_confirm_sync_void') || '').replace(/'/g, "\\'");
+  const syncForm = '<form method="post" action="/admin/cancel-refund/sync-void" style="margin-bottom:14px;" onsubmit="return confirm(\'' + confirmSyncVoid + '\');"><button type="submit" class="btn-email">' + t(locale, 'cr_btn_sync_void') + '</button></form>';
+  const reversed = [...NOTI_LOGS].slice().reverse();
+  const voidList = reversed.filter((log) => {
+    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
+    const isSuccess = body.PaymentStatus === 1 || body.PaymentStatus === '1' || body.paymentStatus === 'Success' || body.status === 1;
+    if (!txId || !isSuccess || !log.merchantId || !MERCHANTS.get(log.merchantId)) return false;
+    const payDate = body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
+    const w = getVoidRefundWindow(payDate);
+    return w === 'void_auto' || w === 'void_manual';
+  });
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const cfg = loadChillPayTransactionConfig();
+  const rows = voidList.map((log) => {
+    const realIndex = NOTI_LOGS.indexOf(log);
+    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const payDate = body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
+    const windowType = getVoidRefundWindow(payDate);
+    const txId = body.TransactionId ?? body.transactionId ?? '-';
+    const orderNo = body.OrderNo ?? body.orderNo ?? '-';
+    const amount = body.Amount ?? body.amount ?? '-';
+    const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const confirmVoid = (t(locale, 'cr_confirm_void') || '').replace(/'/g, "\\'");
+    let action = '';
+    if (windowType === 'void_auto') {
+      action = `<form method="post" action="/admin/cancel-refund/void-request" style="display:inline;" onsubmit="return confirm('${confirmVoid}');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-void">${t(locale, 'cr_btn_void_request')}</button></form>`;
+    } else {
+      const manualFrom = cfg.voidCutoffHour + ':' + String(cfg.voidCutoffMinute).padStart(2, '0');
+      const manualTo = cfg.refundStartHour + ':' + String(cfg.refundStartMinute).padStart(2, '0');
+      const manualWindowTip = (t(locale, 'cr_manual_email_window') || '') + ': ' + manualFrom + '~' + manualTo;
+      if (isCurrentTimeInVoidManualWindow()) {
+        const { subject, body: bodyText } = buildVoidEmailContent(log);
+        const emailTo = (cfg.emailTo || 'help@chillpay.co.th').trim();
+        const mailto = 'mailto:' + encodeURIComponent(emailTo) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(bodyText);
+        action = `<a href="${mailto}" class="btn-email">${t(locale, 'cr_btn_email_send')}</a>`;
+      } else {
+        action = `<span class="btn-email-disabled" title="${manualWindowTip}">${t(locale, 'cr_btn_email_disabled')}</span>`;
+      }
+    }
+    return `<tr>
+      <td class="col-date">${esc(dt.date)}</td>
+      <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
+      <td class="col-narrow">${esc(routeNoDisplay)}</td>
+      <td class="col-narrow">${esc(log.merchantId || '')}</td>
+      <td>${esc(txId)} / ${esc(orderNo)} / ${esc(amount)}</td>
+      <td class="col-action">${action}</td>
+    </tr>`;
+  }).join('');
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_tx_order_amount') + '</th><th>' + t(locale, 'cr_th_action') + '</th></tr></thead>';
+  const tableContent = syncForm + '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_void') + ' (' + voidList.length + ')', tableContent, alertHtml, req.originalUrl, req.session.member));
+});
+
+app.get('/admin/cancel-refund/force-void', requireAuth, requirePage('cancel_refund'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const q = req.query || {};
+  const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
+  let alertHtml = q.ok === '1' ? '<div class="alert alert-ok">' + t(locale, 'cr_alert_force_void_ok') + '</div>' : (q.fail === '1' && q.reason ? '<div class="alert alert-fail">' + escQ(q.reason) + '</div>' : '');
+  const reversed = [...NOTI_LOGS].slice().reverse();
+  const forceVoidList = reversed.filter((log) => {
+    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
+    const isSuccess = body.PaymentStatus === 1 || body.PaymentStatus === '1' || body.paymentStatus === 'Success' || body.status === 1;
+    if (!txId || !isSuccess || !log.merchantId || !MERCHANTS.get(log.merchantId)) return false;
+    const payDate = body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
+    const w = getVoidRefundWindow(payDate);
+    return w === 'void_auto' || w === 'void_manual';
+  });
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const confirmForceVoid = (t(locale, 'cr_confirm_force_void') || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  const rows = forceVoidList.map((log) => {
+    const realIndex = NOTI_LOGS.indexOf(log);
+    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const txId = body.TransactionId ?? body.transactionId ?? '-';
+    const orderNo = body.OrderNo ?? body.orderNo ?? '-';
+    const amount = body.Amount ?? body.amount ?? '-';
+    const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const action = '<form method="post" action="/admin/cancel-refund/force-void-request" style="display:inline;" onsubmit="return confirm(\'' + confirmForceVoid + '\');"><input type="hidden" name="index" value="' + realIndex + '" /><button type="submit" class="btn-void">' + t(locale, 'cr_btn_force_void') + '</button></form>';
+    return `<tr>
+      <td class="col-date">${esc(dt.date)}</td>
+      <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
+      <td class="col-narrow">${esc(routeNoDisplay)}</td>
+      <td class="col-narrow">${esc(log.merchantId || '')}</td>
+      <td>${esc(txId)} / ${esc(orderNo)} / ${esc(amount)}</td>
+      <td class="col-action">${action}</td>
+    </tr>`;
+  }).join('');
+  const descHtml = '<p class="perm-legend" style="margin-bottom:12px;">' + (t(locale, 'cr_force_void_desc') || '').replace(/</g, '&lt;') + '</p>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_tx_order_amount') + '</th><th>' + t(locale, 'cr_th_action') + '</th></tr></thead>';
+  const tableContent = descHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_force_void') + ' (' + forceVoidList.length + ')', tableContent, alertHtml, req.originalUrl, req.session.member));
+});
+
+app.post('/admin/cancel-refund/sync-void', requireAuth, requirePage('cancel_refund'), async (req, res) => {
+  const locale = getLocale(req);
   try {
-    const relayRes = await relayToMerchant(targetUrl, log.body);
-    const ok = relayRes.status >= 200 && relayRes.status < 300;
-    return res.redirect('/admin/logs?resend=' + (ok ? 'ok' : 'fail'));
+    const result = await syncChillPayVoidNoti();
+    if (result.success) {
+      return res.redirect('/admin/cancel-refund/void?sync=ok&sent=' + (result.sent || 0) + '&total=' + (result.total || 0));
+    }
+    return res.redirect('/admin/cancel-refund/void?sync=fail&reason=' + encodeURIComponent(result.error || t(locale, 'cr_alert_sync_fail')));
   } catch (err) {
-    return res.redirect('/admin/logs?resend=fail');
+    const msg = err && err.message ? err.message : String(err);
+    return res.redirect('/admin/cancel-refund/void?sync=fail&reason=' + encodeURIComponent(msg));
   }
+});
+
+app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cancel_refund'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const q = req.query || {};
+  const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
+  let alertHtml = q.refund === 'ok' ? '<div class="alert alert-ok">환불 요청이 완료되었습니다.</div>' : q.refund === 'fail' && q.reason ? '<div class="alert alert-fail">환불 요청 실패: ' + escQ(q.reason) + '</div>' : '';
+  if (q.sync === 'ok') {
+    const sent = parseInt(q.sent, 10) || 0;
+    const total = parseInt(q.total, 10) || 0;
+    alertHtml += '<div class="alert alert-ok">ChillPay 환불 건 동기화 완료. 조회 ' + total + '건 중 환불 노티 전송 ' + sent + '건.</div>';
+  } else if (q.sync === 'fail' && q.reason) {
+    alertHtml += '<div class="alert alert-fail">동기화 실패: ' + escQ(q.reason) + '</div>';
+  }
+  const syncForm = '<form method="post" action="/admin/cancel-refund/sync-refund" style="margin-bottom:14px;" onsubmit="return confirm(\'ChillPay에서 최근 7일 환불 처리된 건을 조회하고, 아직 환불 노티를 보내지 않은 건만 가맹점/전산에 전송합니다. 진행할까요?\');"><button type="submit" class="btn-email">ChillPay 환불 건 동기화 (조회 후 미전송만 노티)</button></form>';
+  const reversed = [...NOTI_LOGS].slice().reverse();
+  const refundList = reversed.filter((log) => {
+    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
+    const isSuccess = body.PaymentStatus === 1 || body.PaymentStatus === '1' || body.paymentStatus === 'Success' || body.status === 1;
+    if (!txId || !isSuccess || !log.merchantId || !MERCHANTS.get(log.merchantId)) return false;
+    const payDate = body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
+    return getVoidRefundWindow(payDate) === 'refund';
+  });
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const rows = refundList.map((log) => {
+    const realIndex = NOTI_LOGS.indexOf(log);
+    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const txId = body.TransactionId ?? body.transactionId ?? '-';
+    const orderNo = body.OrderNo ?? body.orderNo ?? '-';
+    const amount = body.Amount ?? body.amount ?? '-';
+    const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const confirmRefund = (t(locale, 'cr_confirm_refund') || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    const action = `<form method="post" action="/admin/cancel-refund/refund-request" style="display:inline;" onsubmit="return confirm('${confirmRefund}');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-refund">${t(locale, 'cr_btn_refund_request')}</button></form>`;
+    return `<tr>
+      <td class="col-date">${esc(dt.date)}</td>
+      <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
+      <td class="col-narrow">${esc(routeNoDisplay)}</td>
+      <td class="col-narrow">${esc(log.merchantId || '')}</td>
+      <td>${esc(txId)} / ${esc(orderNo)} / ${esc(amount)}</td>
+      <td class="col-action">${action}</td>
+    </tr>`;
+  }).join('');
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_tx_order_amount') + '</th><th>' + t(locale, 'cr_th_action') + '</th></tr></thead>';
+  const tableContent = syncForm + '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_refund') + ' (' + refundList.length + ')', tableContent, alertHtml, req.originalUrl, req.session.member));
+});
+
+app.post('/admin/cancel-refund/sync-refund', requireAuth, requirePage('cancel_refund'), async (req, res) => {
+  const locale = getLocale(req);
+  try {
+    const result = await syncChillPayRefundNoti();
+    if (result.success) {
+      return res.redirect('/admin/cancel-refund/refund?sync=ok&sent=' + (result.sent || 0) + '&total=' + (result.total || 0));
+    }
+    return res.redirect('/admin/cancel-refund/refund?sync=fail&reason=' + encodeURIComponent(result.error || t(locale, 'cr_alert_sync_fail')));
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    return res.redirect('/admin/cancel-refund/refund?sync=fail&reason=' + encodeURIComponent(msg));
+  }
+});
+
+app.post('/admin/cancel-refund/force-void-request', requireAuth, requirePage('cancel_refund'), async (req, res) => {
+  const locale = getLocale(req);
+  const index = parseInt(req.body.index, 10);
+  if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
+    return res.redirect('/admin/cancel-refund/force-void?fail=1&reason=' + encodeURIComponent(t(locale, 'cr_err_invalid_index')));
+  }
+  const log = NOTI_LOGS[index];
+  const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+  const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
+  if (!txId) return res.redirect('/admin/cancel-refund/force-void?fail=1&reason=' + encodeURIComponent(t(locale, 'cr_err_no_transaction_id')));
+  await sendVoidOrRefundNoti(log, 'void');
+  markVoidNotiSent(txId);
+  return res.redirect('/admin/cancel-refund/force-void?ok=1');
+});
+
+app.post('/admin/cancel-refund/void-request', requireAuth, requirePage('cancel_refund'), async (req, res) => {
+  const locale = getLocale(req);
+  const index = parseInt(req.body.index, 10);
+  if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
+    return res.redirect('/admin/cancel-refund/void?void=fail&reason=' + encodeURIComponent(t(locale, 'cr_err_invalid_index')));
+  }
+  const log = NOTI_LOGS[index];
+  const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+  const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
+  if (!txId) return res.redirect('/admin/cancel-refund/void?void=fail&reason=' + encodeURIComponent(t(locale, 'cr_err_no_transaction_id')));
+  const cfg = loadChillPayTransactionConfig();
+  const result = await chillPayRequestVoid(txId, cfg.useSandbox);
+  if (!result.success) return res.redirect('/admin/cancel-refund/void?void=fail&reason=' + encodeURIComponent(result.error || t(locale, 'cr_alert_void_fail')));
+  if (!hasVoidNotiSent(txId)) {
+    await sendVoidOrRefundNoti(log, 'void');
+    markVoidNotiSent(txId);
+  }
+  return res.redirect('/admin/cancel-refund/void?void=ok');
+});
+
+app.post('/admin/cancel-refund/refund-request', requireAuth, requirePage('cancel_refund'), async (req, res) => {
+  const locale = getLocale(req);
+  const index = parseInt(req.body.index, 10);
+  if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
+    return res.redirect('/admin/cancel-refund/refund?refund=fail&reason=' + encodeURIComponent(t(locale, 'cr_err_invalid_index')));
+  }
+  const log = NOTI_LOGS[index];
+  const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+  const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
+  if (!txId) return res.redirect('/admin/cancel-refund/refund?refund=fail&reason=' + encodeURIComponent(t(locale, 'cr_err_no_transaction_id')));
+  const cfg = loadChillPayTransactionConfig();
+  const result = await chillPayRequestRefund(txId, cfg.useSandbox);
+  if (!result.success) return res.redirect('/admin/cancel-refund/refund?refund=fail&reason=' + encodeURIComponent(result.error || t(locale, 'cr_alert_refund_fail')));
+  await sendVoidOrRefundNoti(log, 'refund');
+  markRefundNotiSent(txId);
+  return res.redirect('/admin/cancel-refund/refund?refund=ok');
+});
+
+app.post('/admin/logs/resend', requireAuth, requirePageAny(['pg_logs', 'pg_result']), async (req, res) => {
+  const returnTo = (req.body.returnTo || '').trim() || 'logs';
+  const base = returnTo === 'logs-result' ? '/admin/logs-result' : '/admin/logs';
+  const index = parseInt(req.body.index, 10);
+  if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
+    return res.redirect(base + '?err=invalid');
+  }
+  const log = NOTI_LOGS[index];
+  const targetUrl = (log.targetUrl && String(log.targetUrl).trim()) || (findMerchantByRouteKey(log.routeKey) && findMerchantByRouteKey(log.routeKey).targetUrl) || '';
+  if (!targetUrl) {
+    return res.redirect(base + '?err=no_target&reason=' + encodeURIComponent('가맹점 URL 없음'));
+  }
+  const hasRawBody = log.rawBody !== undefined && log.rawBody !== null && String(log.rawBody).trim() !== '';
+  const hasBody = log.body !== undefined && log.body !== null && (typeof log.body === 'object' || typeof log.body === 'string');
+  if (!hasRawBody && !hasBody) {
+    return res.redirect(base + '?err=no_body&reason=' + encodeURIComponent('노티 본문 없음'));
+  }
+  const forceJson = req.body.resendAsJson === '1' || req.body.resendAsJson === 'true';
+  const forceForm = req.body.resendAsForm === '1' || req.body.resendAsForm === 'true';
+  const contentType = forceJson ? 'application/json' : forceForm ? 'application/x-www-form-urlencoded' : ((log.contentType || '').toString().trim() || 'application/json');
+  try {
+    let relayRes;
+    if (hasRawBody && !forceJson && !forceForm) {
+      // ChillPay에서 받은 원문 그대로 전송 (가공 없음)
+      relayRes = await relayToMerchant(targetUrl, null, { contentType, rawBody: log.rawBody });
+    } else {
+      // rawBody 없음 또는 재전송(JSON)/재전송(FORM) 선택 시: body 객체로 전송
+      let bodyToSend = log.body;
+      if (typeof bodyToSend === 'string') {
+        try { bodyToSend = JSON.parse(bodyToSend); } catch { return res.redirect(base + '?err=no_body&reason=' + encodeURIComponent('노티 본문 파싱 실패')); }
+      }
+      if (!bodyToSend || typeof bodyToSend !== 'object' || Array.isArray(bodyToSend)) {
+        return res.redirect(base + '?err=no_body&reason=' + encodeURIComponent('노티 본문 형식 오류'));
+      }
+      relayRes = await relayToMerchant(targetUrl, bodyToSend, { contentType });
+    }
+    const ok = relayRes.status >= 200 && relayRes.status < 300;
+    if (ok) {
+      const formatUsed = forceJson ? 'json' : forceForm ? 'form' : 'raw';
+      if (NOTI_LOGS[index]) {
+        NOTI_LOGS[index].relayStatus = 'ok';
+        NOTI_LOGS[index].relayFailReason = '';
+        NOTI_LOGS[index].relayFormatUsed = formatUsed;
+      }
+      return res.redirect(base + '?resend=ok');
+    }
+    const bodyPart = relayRes.data != null
+      ? (typeof relayRes.data === 'string' ? String(relayRes.data) : JSON.stringify(relayRes.data))
+      : '';
+    const reason = `HTTP ${relayRes.status}` + (bodyPart ? ': ' + bodyPart.slice(0, 300) : '');
+    return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason));
+  } catch (err) {
+    const reason = err.code || err.message || String(err);
+    const returnTo = (req.body.returnTo || '').trim() || 'logs';
+    const base = returnTo === 'logs-result' ? '/admin/logs-result' : '/admin/logs';
+    return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason));
+  }
+});
+
+// 피지결과 (요약) 페이지
+app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) => {
+  const locale = getLocale(req);
+  const q = req.query || {};
+  const resendMsg =
+    q.resend === 'ok'
+      ? '<div class="alert alert-ok">재전송이 완료되었습니다.</div>'
+      : q.resend === 'fail' && q.reason
+      ? '<div class="alert alert-fail">재전송 실패: ' + String(q.reason).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>'
+      : q.err === 'invalid'
+      ? '<div class="alert alert-fail">잘못된 요청입니다.</div>'
+      : q.err === 'no_target' || q.err === 'no_body'
+      ? '<div class="alert alert-fail">' + (q.reason ? String(q.reason).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : (q.err === 'no_target' ? '가맹점 URL 없음' : '노티 본문 없음')) + '</div>'
+      : '';
+  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+  const adminUser = req.session.adminUser || '';
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const reversed = [...NOTI_LOGS].slice().reverse();
+  const rows = reversed
+    .map((log, i) => {
+      const realIndex = NOTI_LOGS.length - 1 - i;
+      const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+      const envLabel = (log.env && String(log.env).toLowerCase()) === 'sandbox' ? 'sandbox' : 'live';
+      const routeNo = (log.routeKey && (log.routeKey.match(/\/(\d+)$/) || [null, log.routeKey])[1]) || log.routeKey || '-';
+      const relayStatus = log.relayStatus || '-';
+      const relayLabel = relayStatus === 'ok' ? '성공' : relayStatus === 'fail' ? '실패' : relayStatus === 'skip' ? '미전송' : relayStatus;
+      const formatUsed = log.relayFormatUsed || (log.relaySentAsJson === true ? 'json' : 'raw');
+      const relayClass = relayStatus === 'ok' ? (formatUsed === 'json' ? 'status-ok' : formatUsed === 'form' ? 'status-ok-form' : 'status-ok-normal') : relayStatus === 'fail' ? 'status-fail' : '';
+      const failReason = (log.relayFailReason || '').trim();
+      const canResend = (relayStatus === 'fail' || relayStatus === 'ok') && (log.targetUrl || findMerchantByRouteKey(log.routeKey)) && (log.body || log.rawBody);
+      const resendBtn = canResend
+        ? `<div class="resend-wrap" style="display:inline-flex;flex-direction:row;gap:6px;align-items:center;flex-wrap:nowrap;"><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><button type="submit" class="btn-resend" onclick="return confirm('일반(원문) 형식으로 다시 전송하시겠습니까?');">일반</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json" onclick="return confirm('JSON 형식으로 다시 전송하시겠습니까?');">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form" onclick="return confirm('FORM 형식으로 다시 전송하시겠습니까?');">FORM</button></form></div>`
+        : '-';
+      return `<tr>
+        <td>${esc(dt.date)}</td>
+        <td>TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
+        <td>${esc(routeNo)}</td>
+        <td>${esc(envLabel)}</td>
+        <td>${esc(log.merchantId || '-')}</td>
+        <td><span class="${relayClass}">${esc(relayLabel)}</span></td>
+        <td class="col-fail-reason">${failReason ? esc(failReason) : '-'}</td>
+        <td>${resendBtn}</td>
+      </tr>`;
+    })
+    .join('');
+
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${t(locale, 'nav_pg_result') || '피지 결과'}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+    table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
+    th { background: #e5f0ff; }
+    tr:nth-child(even) { background:#f9fafb; }
+    .status-ok { color: #059669; font-weight: 600; }
+    .status-ok-normal { color: #2563eb; font-weight: 600; }
+    .status-ok-form { color: #ca8a04; font-weight: 600; }
+    .status-fail { color: #dc2626; font-weight: 600; }
+    .time-jp { color: #2563eb; }
+    .col-fail-reason { text-align: center; word-break: break-all; max-width: 200px; }
+    .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .btn-resend-json { padding: 4px 10px; font-size: 12px; background: #059669; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .btn-resend-json:hover { background: #047857; }
+    .btn-resend-form { padding: 4px 10px; font-size: 12px; background: #ca8a04; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .btn-resend-form:hover { background: #a16207; }
+    .alert { padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
+    .alert-ok { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+    .alert-fail { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .layout { display:flex; min-height:100vh; width:100%; margin:0; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
+    .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
+    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
+    .topbar span { margin-right:12px; }
+    .card { background:#fff; padding:16px 20px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); border:1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
+      <div class="card">
+      ${resendMsg}
+      <h1>${t(locale, 'nav_pg_result') || '피지 결과'} (${NOTI_LOGS.length})</h1>
+      <p style="font-size:13px;color:#555;">노티 수신·가맹점 전달 결과 요약 (성공/실패·실패 사유·재전송) ㅣ 성공 <span style="color:#2563eb;font-weight:600;">파란색</span>=일반, <span style="color:#059669;font-weight:600;">녹색</span>=JSON, <span style="color:#ca8a04;font-weight:600;">노란색</span>=FORM</p>
+      <table>
+        <thead>
+          <tr>
+            <th>수신일</th>
+            <th>수신시각</th>
+            <th>route</th>
+            <th>환경</th>
+            <th>merchant id</th>
+            <th>성공유무</th>
+            <th>실패원인</th>
+            <th>재전송</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows || '<tr><td colspan="8" style="text-align:center;color:#777;">데이터 없음</td></tr>'}
+        </tbody>
+      </table>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
 });
 
 // 전산 노티 대상 관리 페이지
@@ -3067,14 +4857,14 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
     button { margin-top: 12px; padding: 9px 16px; background:#60a5fa; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; }
     button:hover { background:#3b82f6; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
     .nav a,
-    .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -3083,7 +4873,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -3233,13 +5023,13 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
     .btn-save-row { padding: 4px 8px; font-size: 11px; background:#2563eb; color:#fff; border:none; border-radius: 4px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
     .btn-save-row:hover { background:#1d4ed8; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
-    .nav a, .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; margin-bottom:16px; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -3249,7 +5039,7 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -3393,13 +5183,13 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
     .btn-save-row { padding: 4px 8px; font-size: 11px; background:#2563eb; color:#fff; border:none; border-radius: 4px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
     .btn-save-row:hover { background:#1d4ed8; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
-    .nav a, .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; margin-bottom:16px; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -3409,7 +5199,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -3609,6 +5399,23 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
   const editId = (req.query.id || '').toString();
   const editingConfig = editId && TEST_CONFIGS.get(editId) ? TEST_CONFIGS.get(editId) : null;
 
+  // 가맹점 추가에 이미 등록된 Route No 목록 (경고 표시용)
+  const usedRouteNos = [
+    ...new Set(
+      [...MERCHANTS.values()]
+        .filter((m) => m && (m.routeNo != null && m.routeNo !== ''))
+        .map((m) => String(m.routeNo).trim()),
+    ),
+  ];
+  const routeNoInUse =
+    editingConfig && usedRouteNos.includes(String(editingConfig.routeNo || '').trim());
+
+  // 설정 ID 중복 검사용: 이미 등록된 ID 목록 (수정 시에는 현재 id 제외)
+  const existingConfigIds = editingConfig
+    ? [...TEST_CONFIGS.keys()].filter((k) => k !== editingConfig.id)
+    : [...TEST_CONFIGS.keys()];
+  const idDuplicate = false;
+
   const rows = Array.from(TEST_CONFIGS.values())
     .map(
       (cfg) =>
@@ -3638,10 +5445,10 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
               : cfg.currency
           }</td>
           <td class="td-long">${cfg.paymentApiUrl || ''}</td>
-          <td class="td-long">${cfg.returnUrl || ''}</td>
+          <td class="td-long">${cfg.useTestResultPage ? '[테스트 결과 페이지 사용]' : (cfg.returnUrl || '')}</td>
           <td class="actions-cell">
             <div style="display:flex;flex-direction:column;gap:4px;align-items:center;">
-              <form method="get" action="/admin/test-configs" style="margin:0;">
+              <form method="get" action="/admin/test-configs" style="margin:0;" onsubmit="return confirm('수정 하시겠습니까?');">
                 <input type="hidden" name="id" value="${cfg.id}" />
                 <button type="submit" style="padding:4px 8px;font-size:12px;background:#facc15;color:#111827;border:none;border-radius:4px;cursor:pointer;">${t(locale, 'common_edit')}</button>
               </form>
@@ -3677,14 +5484,14 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
     button { margin-top: 12px; padding: 9px 16px; background:#60a5fa; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; }
     button:hover { background:#3b82f6; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
     .nav a,
-    .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -3693,17 +5500,21 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'test_config_title')}</h1>
         <p style="font-size:13px;color:#555;">${t(locale, 'test_config_desc')}</p>
         <h2>등록/수정</h2>
-        <form method="post" action="/admin/test-configs" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
+        <form method="post" action="/admin/test-configs" id="test-config-form" onsubmit="return (function(){ var dup=document.getElementById('test-config-id-dup'); if(dup&&dup.style.display!=='none'){ alert('동일한 이름이 있습니다. 설정 ID를 다른 값으로 변경해 주세요.'); return false; } return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}'); })();">
+          ${editingConfig ? `<input type="hidden" name="originalId" value="${editingConfig.id}" />` : ''}
           <label>
             설정 ID (영문/숫자)
-            <input type="text" name="id" value="${editingConfig ? editingConfig.id : ''}" ${editingConfig ? 'readonly' : ''} required />
+            <input type="text" name="id" id="test-config-id" value="${editingConfig ? editingConfig.id : ''}" required />
+            <div id="test-config-id-dup" style="color:#dc2626;font-size:13px;margin-top:6px;font-weight:500;display:${idDuplicate ? 'block' : 'none'};">
+              동일한 이름이 있습니다. 다른 ID를 입력해 주세요.
+            </div>
           </label>
           <label>
             설정 이름 (예: Sandbox JPY, Prod USD)
@@ -3722,8 +5533,39 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
           </label>
           <label>
             Route No
-            <input type="text" name="routeNo" value="${editingConfig ? editingConfig.routeNo : ''}" required />
+            <input type="text" name="routeNo" id="test-config-routeNo" value="${editingConfig ? editingConfig.routeNo : ''}" required />
+            <div id="route-no-warning" style="color:#dc2626;font-size:13px;margin-top:6px;font-weight:500;display:${routeNoInUse ? 'block' : 'none'};">
+              ⚠ 이미 가맹점 추가에 등록되어 사용 중인 번호입니다. 해당 번호로 테스트 시 정식 가맹점 노티와 혼동될 수 있으니 주의하세요. (테스트는 가능합니다.)
+            </div>
           </label>
+          <script>
+          (function(){
+            var usedRouteNos = ${JSON.stringify(usedRouteNos)};
+            var input = document.getElementById('test-config-routeNo');
+            var warning = document.getElementById('route-no-warning');
+            if (!input || !warning) return;
+            function check() {
+              var val = (input.value || '').trim();
+              warning.style.display = usedRouteNos.indexOf(val) !== -1 ? 'block' : 'none';
+            }
+            input.addEventListener('input', check);
+            input.addEventListener('change', check);
+          })();
+          <\/script>
+          <script>
+          (function(){
+            var existingIds = ${JSON.stringify(existingConfigIds)};
+            var idInput = document.getElementById('test-config-id');
+            var dupMsg = document.getElementById('test-config-id-dup');
+            if (!idInput || !dupMsg) return;
+            function checkId() {
+              var val = (idInput.value || '').trim();
+              dupMsg.style.display = existingIds.indexOf(val) !== -1 ? 'block' : 'none';
+            }
+            idInput.addEventListener('input', checkId);
+            idInput.addEventListener('change', checkId);
+          })();
+          <\/script>
           <label>
             API KEY
             <input type="text" name="apiKey" value="${editingConfig ? editingConfig.apiKey : ''}" required />
@@ -3747,8 +5589,14 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
           </label>
           <label>
             ReturnUrl (PG 결제 완료 후 돌아올 URL)
-            <input type="text" name="returnUrl" value="${editingConfig ? (editingConfig.returnUrl || '') : ''}" placeholder="예: https://tapi.soonpay.co.kr/pay/chillResul" />
+            <input type="text" name="returnUrl" value="${editingConfig ? (editingConfig.returnUrl || '') : ''}" placeholder="예: https://tapi.soonpay.co.kr/pay/chillResult" />
           </label>
+          <label style="margin-top:12px; display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" name="useTestResultPage" ${editingConfig && editingConfig.useTestResultPage ? 'checked' : ''} />
+            테스트결과페이지 사용하기
+          </label>
+          <p style="font-size:12px;color:#6b7280;margin-top:4px;">체크 시: PG 결제 완료 후 우리 서버의 테스트 결과 페이지로 이동합니다. 체크 해제 시: 위 주소 입력창에 입력한 URL로 이동합니다.</p>
+          ${editingConfig && editingConfig.useTestResultPage ? `<p style="font-size:12px;color:#0369a1;margin-top:4px;">ChillPay <strong>URL Result(노티 수신)</strong> 등록: <code style="background:#e0f2fe;padding:2px 6px;border-radius:4px;">${req.protocol}://${req.get('host') || req.hostname}/noti/result/test_${editingConfig.id}</code></p><p style="font-size:12px;color:#0369a1;margin-top:2px;">(고객 리다이렉트용) <strong>Return URL</strong> 등록: <code style="background:#e0f2fe;padding:2px 6px;border-radius:4px;">${req.protocol}://${req.get('host') || req.hostname}/admin/test-pay/return</code></p>` : ''}
           <button type="submit">저장</button>
         </form>
       </div>
@@ -3788,6 +5636,7 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
 app.post('/admin/test-configs', requireAuth, requirePage('test_config'), (req, res) => {
   const {
     id,
+    originalId,
     name,
     environment,
     merchantCode,
@@ -3797,9 +5646,22 @@ app.post('/admin/test-configs', requireAuth, requirePage('test_config'), (req, r
     currency,
     paymentApiUrl,
     returnUrl,
+    useTestResultPage,
   } = req.body;
   if (!id || !name || !environment || !merchantCode || !routeNo || !apiKey || !md5Key || !currency) {
     return res.status(400).send('모든 필드는 필수입니다.');
+  }
+
+  const idTrim = String(id).trim();
+  const originalIdTrim = originalId ? String(originalId).trim() : '';
+
+  if (originalIdTrim && idTrim !== originalIdTrim) {
+    if (TEST_CONFIGS.has(idTrim)) {
+      return res.status(400).send('동일한 이름이 있습니다. 설정 ID를 다른 값으로 변경해 주세요.');
+    }
+    TEST_CONFIGS.delete(originalIdTrim);
+  } else if (!originalIdTrim && TEST_CONFIGS.has(idTrim)) {
+    return res.status(400).send('동일한 이름이 있습니다. 설정 ID를 다른 값으로 변경해 주세요.');
   }
 
   const actor = req.session.adminUser || 'unknown';
@@ -3807,10 +5669,10 @@ app.post('/admin/test-configs', requireAuth, requirePage('test_config'), (req, r
     (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
     req.ip ||
     '';
-  const before = TEST_CONFIGS.get(id) || null;
+  const before = TEST_CONFIGS.get(idTrim) || null;
 
-  TEST_CONFIGS.set(id, {
-    id,
+  TEST_CONFIGS.set(idTrim, {
+    id: idTrim,
     name,
     environment,
     merchantCode,
@@ -3820,6 +5682,7 @@ app.post('/admin/test-configs', requireAuth, requirePage('test_config'), (req, r
     currency,
     paymentApiUrl: paymentApiUrl || '',
     returnUrl: returnUrl || '',
+    useTestResultPage: useTestResultPage === 'on',
   });
   saveTestConfigs();
 
@@ -3827,9 +5690,9 @@ app.post('/admin/test-configs', requireAuth, requirePage('test_config'), (req, r
     type: 'test_config_update',
     actor,
     clientIp,
-    testConfigId: id,
+    testConfigId: idTrim,
     before,
-    after: TEST_CONFIGS.get(id),
+    after: TEST_CONFIGS.get(idTrim),
   });
 
   return res.redirect('/admin/test-configs');
@@ -3902,14 +5765,14 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
     button { margin-top: 12px; padding: 9px 16px; background:#60a5fa; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; }
     button:hover { background:#3b82f6; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
     .nav a,
-    .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; }
     .topbar span { margin-right:12px; }
@@ -3920,7 +5783,7 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -3990,14 +5853,14 @@ app.post('/admin/test-pay/start', requireAuth, requirePage('test_run'), (req, re
   <style>
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin:0; background:#111827; color:#f9fafb; }
     .layout { display:flex; min-height:100vh; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
     .nav a,
-    .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; padding:24px; background:#edf2f7; box-sizing:border-box; display:flex; justify-content:center; align-items:flex-start; }
     .card { width:100%; max-width:720px; background:#ffffff; border-radius:12px; padding:20px 24px; box-shadow:0 20px 40px rgba(15,23,42,0.15); border:1px solid #e5e7eb; color:#111827; }
     h1 { margin:0 0 8px; font-size:20px; }
@@ -4099,6 +5962,7 @@ app.post('/admin/test-pay/start', requireAuth, requirePage('test_run'), (req, re
 // 테스트 결제 토큰 수신 및 ChillCredit 결제 API 호출
 app.post('/admin/test-pay/submit', requireAuth, requirePage('test_run'), async (req, res) => {
   const data = req.body || {};
+  const locale = getLocale(req);
   const clientIp =
     (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
     req.ip ||
@@ -4316,14 +6180,14 @@ app.post('/admin/test-pay/submit', requireAuth, requirePage('test_run'), async (
     h2 { margin-top: 20px; margin-bottom: 8px; font-size:16px; }
     pre { background:#020617; color:#e5e7eb; padding:12px; border-radius:8px; font-size:12px; white-space:pre-wrap; word-break:break-all; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
     .nav a,
-    .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; }
     .topbar span { margin-right:12px; }
@@ -4334,24 +6198,11 @@ app.post('/admin/test-pay/submit', requireAuth, requirePage('test_run'), async (
 </head>
 <body>
   <div class="layout">
-    <aside class="sidebar">
-      <div class="sidebar-title">PG 노티 관리자</div>
-      <div class="sidebar-sub">테스트 내역</div>
-      <div class="sidebar-user">사용자: ${adminUser || '-'}</div>
-      <div class="nav">
-        <div class="nav-section-title">테스트</div>
-        <a href="/admin/test-configs">테스트 설정</a>
-        <a href="/admin/test-pay">테스트 실행</a>
-        <a href="/admin/test-logs">테스트 내역</a>
-        <div class="nav-section-title">로그</div>
-        <a href="/admin/logs">PG 노티 로그</a>
-        <a href="/admin/internal">전산 노티 로그</a>
-      </div>
-    </aside>
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       <div class="topbar">
         <span>접속 IP: ${clientIp || '-'}</span>
-        <span>시간: ${now}</span>
+        <span>시간: ${nowKr}</span>
         <span>아이디: ${adminUser || '-'}</span>
       </div>
       <div class="card">
@@ -4360,20 +6211,26 @@ app.post('/admin/test-pay/submit', requireAuth, requirePage('test_run'), async (
 
         ${
           !paymentError && paymentResponse && paymentResponse.data && paymentResponse.data.data && paymentResponse.data.data.paymentUrl
-            ? `<div style="margin:10px 0 16px;padding:10px 12px;border-radius:8px;border:1px solid #d1d5db;background:#ecfeff;font-size:13px;line-height:1.5;">
+            ? (() => {
+                const otpUrl = paymentResponse.data.data.paymentUrl;
+                return `<div style="margin:10px 0 16px;padding:10px 12px;border-radius:8px;border:1px solid #d1d5db;background:#ecfeff;font-size:13px;line-height:1.5;">
                 <div style="font-weight:600;color:#0369a1;margin-bottom:4px;">3DS(OTP) 인증 페이지</div>
                 <div style="word-break:break-all;margin-bottom:6px;">
-                  <code style="font-size:12px;background:#e5e7eb;padding:2px 4px;border-radius:4px;color:#111827;">${
-                    paymentResponse.data.data.paymentUrl
-                  }</code>
+                  <code style="font-size:12px;background:#e5e7eb;padding:2px 4px;border-radius:4px;color:#111827;">${otpUrl}</code>
                 </div>
-                <a href="${
-                  paymentResponse.data.data.paymentUrl
-                }" target="_blank" rel="noopener noreferrer"
+                <a href="${otpUrl}" target="_blank" rel="noopener noreferrer"
                    style="display:inline-block;margin-top:4px;padding:6px 12px;border-radius:6px;background:#0ea5e9;color:#f9fafb;text-decoration:none;font-size:13px;">
                   새 탭에서 3DS 페이지 열기
                 </a>
-              </div>`
+                <p style="margin-top:8px;font-size:12px;color:#0369a1;">아래 링크를 클릭하거나, 팝업이 차단된 경우 새 탭에서 3DS 페이지 열기 버튼을 눌러주세요.</p>
+              </div>
+              <script>
+              (function(){
+                var u = ${JSON.stringify(otpUrl)};
+                if (u) window.open(u, '_blank', 'noopener,noreferrer');
+              })();
+              <\/script>`;
+              })()
             : ''
         }
 
@@ -4399,6 +6256,68 @@ app.post('/admin/test-pay/submit', requireAuth, requirePage('test_run'), async (
         <form method="get" action="/admin/test-pay">
           <button type="submit">다른 테스트 실행</button>
         </form>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
+});
+
+// PG 결제 완료 후 돌아올 테스트 결과 페이지 (ReturnUrl/Result 노티 릴레이 대상)
+// POST: ChillPay Result 노티를 미들웨어가 릴레이할 때 호출 (가맹점 resultUrl 과 동일 방식), 인증 없음
+app.post('/admin/test-pay/return', (req, res) => {
+  // 릴레이 수신만 처리, 200 반환 (실제 결과 표시는 GET 또는 ChillPay 고객 리다이렉트로)
+  res.status(200).json({ ok: true });
+});
+
+// GET: 고객이 ChillPay 리다이렉트로 접근하거나 관리자가 직접 접근 시 결과 페이지 표시
+app.get('/admin/test-pay/return', requireAuth, requirePage('test_run'), (req, res) => {
+  const locale = getLocale(req);
+  const clientIp =
+    (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
+    req.ip ||
+    '';
+  const adminUser = req.session.adminUser || '';
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+
+  res.send(`<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>테스트 결제 완료</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+    .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
+    .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
+    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; }
+    .topbar span { margin-right:12px; }
+    .card { background:#fff; padding:24px 28px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); margin-bottom:8px; border:1px solid #e5e7eb; }
+    .success-msg { font-size:18px; color:#166534; font-weight:600; margin:16px 0; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    <main class="main">
+      <div class="topbar">
+        <span>접속 IP: ${clientIp || '-'}</span>
+        <span>시간: ${nowKr}</span>
+        <span>아이디: ${adminUser || '-'}</span>
+      </div>
+      <div class="card">
+        <h1>테스트 결제 완료</h1>
+        <p class="success-msg">테스트는 정상적으로 완료 되었습니다. 축하합니다.</p>
+        <p style="font-size:13px;color:#555;">PG 결제 완료 후 ReturnUrl 로 이동한 페이지입니다.</p>
+        <a href="/admin/test-pay" style="display:inline-block;margin-top:12px;padding:8px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-size:14px;">테스트 실행으로 돌아가기</a>
       </div>
     </main>
   </div>
@@ -4459,14 +6378,14 @@ app.get('/admin/test-logs', requireAuth, requirePage('test_history'), (req, res)
     th { background: #e5f0ff; text-align: center; }
     tr:nth-child(even) { background:#f9fafb; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
     .nav a,
-    .nav a:visited { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -4476,7 +6395,7 @@ app.get('/admin/test-logs', requireAuth, requirePage('test_history'), (req, res)
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -4575,11 +6494,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
   const rows = reversedInternal
     .map((log, i) => {
       const realIndex = INTERNAL_LOGS.length - 1 - i;
-      const tz = formatTimeMultiTZ(log.storedAt);
-      const timeHtml =
-        typeof tz === 'object' && tz.th != null
-          ? `TH: ${esc(tz.th)}<br>JP: ${esc(tz.jp)}<br>SG: ${esc(tz.sg)}<br>US: ${esc(tz.us)}`
-          : esc(log.storedAt || '-');
+      const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
       const payload = log.payload || {};
       const jsonHeader = Object.keys(payload).join(', ');
       const jsonValue = JSON.stringify(payload, null, 2);
@@ -4591,7 +6506,8 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
         ? `<form method="post" action="/admin/internal/resend" style="display:inline;" onsubmit="return confirm('해당 노티를 전산으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-resend">재전송</button></form>`
         : '<span class="label-none">노티없음</span>';
       return `<tr>
-        <td class="col-time">${timeHtml}</td>
+        <td class="col-date">${esc(dt.date)}</td>
+        <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
         <td class="col-status"><span class="${internalClass}">${esc(internalLabel)}</span></td>
         <td class="col-header"><pre>${esc(jsonHeader)}</pre></td>
         <td class="col-json"><pre>${esc(jsonValue)}</pre></td>
@@ -4609,22 +6525,24 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: top; text-align:center; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
-    .nav a { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
     .card { background:#fff; padding:16px 20px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); margin-bottom:8px; border:1px solid #e5e7eb; }
-    pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; white-space:pre-wrap; font-size:12px; text-align:left; margin:0; }
+    .col-header, .col-json { text-align: left; }
+    pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; white-space:pre-wrap; font-size:12px; text-align: left; margin:0; }
+    .time-jp { color: #2563eb; }
     .status-ok { color: #059669; font-weight: 600; }
     .status-fail { color: #dc2626; font-weight: 600; }
     .label-none { color:#b91c1c; font-weight:700; }
@@ -4634,17 +6552,18 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       <h1>${t(locale, 'internal_logs_title')} (${INTERNAL_LOGS.length})</h1>
       <p style="font-size:13px;color:#555;">${t(locale, 'internal_logs_desc')}</p>
       <table>
-        <colgroup><col style="width:10%;" /><col style="width:6%;" /><col style="width:24%;" /><col style="width:48%;" /><col style="width:6%;" /></colgroup>
+        <colgroup><col style="width:8%;" /><col style="width:10%;" /><col style="width:6%;" /><col style="width:22%;" /><col style="width:46%;" /><col style="width:6%;" /></colgroup>
         <thead>
           <tr>
-            <th>${t(locale, 'internal_logs_time')}</th>
+            <th>수신일</th>
+            <th>수신시각</th>
             <th>전산 수신</th>
             <th>${t(locale, 'internal_logs_header')}</th>
             <th>${t(locale, 'internal_logs_value')}</th>
@@ -4652,7 +6571,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="5" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="6" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
         </tbody>
       </table>
       </div>
@@ -4663,22 +6582,134 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
 });
 
 // 정산 노티 재전송 (전산으로 수동 재전송)
-app.post('/admin/internal/resend', requireAuth, requirePage('internal_logs'), async (req, res) => {
+app.post('/admin/internal/resend', requireAuth, requirePageAny(['internal_logs', 'internal_result']), async (req, res) => {
+  const returnTo = (req.body.returnTo || '').trim() || 'internal';
+  const base = returnTo === 'internal-result' ? '/admin/internal-result' : '/admin/internal';
   const index = parseInt(req.body.index, 10);
   if (Number.isNaN(index) || index < 0 || index >= INTERNAL_LOGS.length) {
-    return res.redirect('/admin/internal?err=invalid');
+    return res.redirect(base + '?err=invalid');
   }
   const log = INTERNAL_LOGS[index];
   const url = log.internalTargetUrl;
   if (!url || !log.payload) {
-    return res.redirect('/admin/internal?err=no_target');
+    return res.redirect(base + '?err=no_target');
   }
   try {
     const result = await sendToInternal(url, log.payload);
-    return res.redirect('/admin/internal?resend=' + (result.success ? 'ok' : 'fail'));
+    if (result.success) return res.redirect(base + '?resend=ok');
+    const reason = result.status ? 'HTTP ' + result.status : (result.error || '');
+    return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason));
   } catch (err) {
-    return res.redirect('/admin/internal?resend=fail');
+    return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(err.message || String(err)));
   }
+});
+
+// 전산결과 (요약) 페이지
+app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (req, res) => {
+  const locale = getLocale(req);
+  const q = req.query || {};
+  const resendMsg =
+    q.resend === 'ok'
+      ? '<div class="alert alert-ok">재전송이 완료되었습니다.</div>'
+      : q.resend === 'fail'
+      ? '<div class="alert alert-fail">재전송 실패' + (q.reason ? ': ' + String(q.reason).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '') + '</div>'
+      : q.err ? '<div class="alert alert-fail">' + (q.err === 'invalid' ? '잘못된 요청입니다.' : '대상 URL 없음') + '</div>'
+      : '';
+  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+  const adminUser = req.session.adminUser || '';
+  const nowKr = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowTh = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const envLabel = APP_ENV === 'test' ? 'sandbox' : 'live';
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const reversed = [...INTERNAL_LOGS].slice().reverse();
+  const rows = reversed
+    .map((log, i) => {
+      const realIndex = INTERNAL_LOGS.length - 1 - i;
+      const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+      const status = log.internalDeliveryStatus || '-';
+      const label = status === 'ok' ? '성공' : status === 'fail' ? '실패' : status === 'skip' ? '미전송' : status;
+      const statusClass = status === 'ok' ? 'status-ok' : status === 'fail' ? 'status-fail' : '';
+      const canResend = log.internalTargetUrl && log.payload;
+      const resendBtn = canResend
+        ? `<form method="post" action="/admin/internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="internal-result" /><button type="submit" class="btn-resend" onclick="return confirm('해당 노티를 전산으로 다시 전송하시겠습니까?');">재전송</button></form>`
+        : '-';
+      return `<tr>
+        <td>${esc(dt.date)}</td>
+        <td>TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
+        <td>${esc(log.routeNo || '-')}</td>
+        <td>${esc(envLabel)}</td>
+        <td>${esc(log.merchantId || '-')}</td>
+        <td><span class="${statusClass}">${esc(label)}</span></td>
+        <td class="col-fail-reason">-</td>
+        <td>${resendBtn}</td>
+      </tr>`;
+    })
+    .join('');
+
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${t(locale, 'nav_internal_result') || '전산 결과'}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+    table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
+    th { background: #e5f0ff; }
+    tr:nth-child(even) { background:#f9fafb; }
+    .status-ok { color: #059669; font-weight: 600; }
+    .status-fail { color: #dc2626; font-weight: 600; }
+    .time-jp { color: #2563eb; }
+    .col-fail-reason { text-align: center; word-break: break-all; max-width: 200px; }
+    .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .alert { padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
+    .alert-ok { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+    .alert-fail { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .layout { display:flex; min-height:100vh; width:100%; margin:0; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
+    .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
+    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
+    .topbar span { margin-right:12px; }
+    .card { background:#fff; padding:16px 20px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); border:1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
+      <div class="card">
+      ${resendMsg}
+      <h1>${t(locale, 'nav_internal_result') || '전산 결과'} (${INTERNAL_LOGS.length})</h1>
+      <p style="font-size:13px;color:#555;">전산 노티 전달 결과 요약 (성공/실패·재전송)</p>
+      <table>
+        <thead>
+          <tr>
+            <th>수신일</th>
+            <th>수신시각</th>
+            <th>route</th>
+            <th>환경</th>
+            <th>merchant id</th>
+            <th>성공유무</th>
+            <th>실패원인</th>
+            <th>재전송</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows || '<tr><td colspan="8" style="text-align:center;color:#777;">데이터 없음</td></tr>'}
+        </tbody>
+      </table>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
 });
 
 // 개발 노티 로그 페이지
@@ -4697,11 +6728,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
   const rows = reversedDev
     .map((log, i) => {
       const realIndex = DEV_INTERNAL_LOGS.length - 1 - i;
-      const tz = formatTimeMultiTZ(log.storedAt);
-      const timeHtml =
-        typeof tz === 'object' && tz.th != null
-          ? `TH: ${esc(tz.th)}<br>JP: ${esc(tz.jp)}<br>SG: ${esc(tz.sg)}<br>US: ${esc(tz.us)}`
-          : esc(log.storedAt || '-');
+      const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
       const payload = log.payload || {};
       const jsonHeader = Object.keys(payload).join(', ');
       const jsonValue = JSON.stringify(payload, null, 2);
@@ -4720,7 +6747,8 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
         ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('해당 노티를 개발 전산으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-resend">재전송</button></form>`
         : '<span class="label-none">노티없음</span>';
       return `<tr>
-        <td class="col-time">${timeHtml}</td>
+        <td class="col-date">${esc(dt.date)}</td>
+        <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
         <td class="col-status"><span class="${internalClass}">${esc(internalLabel)}</span></td>
         <td class="col-header"><pre>${esc(jsonHeader)}</pre></td>
         <td class="col-json"><pre>${esc(jsonValue)}</pre></td>
@@ -4738,22 +6766,24 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: top; text-align:center; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
-    .nav a { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
     .card { background:#fff; padding:16px 20px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); margin-bottom:8px; border:1px solid #e5e7eb; }
-    pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; white-space:pre-wrap; font-size:12px; text-align:left; margin:0; }
+    .col-header, .col-json { text-align: left; }
+    pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; white-space:pre-wrap; font-size:12px; text-align: left; margin:0; }
+    .time-jp { color: #2563eb; }
     .status-ok { color: #059669; font-weight: 600; }
     .status-fail { color: #dc2626; font-weight: 600; }
     .label-none { color:#b91c1c; font-weight:700; }
@@ -4763,17 +6793,18 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       <h1>${t(locale, 'nav_dev_internal_noti_log') || '개발 노티 로그'} (${DEV_INTERNAL_LOGS.length})</h1>
       <p style="font-size:13px;color:#555;">${t(locale, 'internal_logs_desc')}</p>
       <table>
-        <colgroup><col style="width:10%;" /><col style="width:6%;" /><col style="width:24%;" /><col style="width:48%;" /><col style="width:6%;" /></colgroup>
+        <colgroup><col style="width:8%;" /><col style="width:10%;" /><col style="width:6%;" /><col style="width:22%;" /><col style="width:46%;" /><col style="width:6%;" /></colgroup>
         <thead>
           <tr>
-            <th>${t(locale, 'internal_logs_time')}</th>
+            <th>수신일</th>
+            <th>수신시각</th>
             <th>전산 수신</th>
             <th>${t(locale, 'internal_logs_header')}</th>
             <th>${t(locale, 'internal_logs_value')}</th>
@@ -4781,7 +6812,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="5" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="6" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
         </tbody>
       </table>
       </div>
@@ -4792,22 +6823,134 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
 });
 
 // 개발 노티 재전송
-app.post('/admin/dev-internal/resend', requireAuth, requirePage('dev_internal_logs'), async (req, res) => {
+app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_internal_logs', 'dev_result']), async (req, res) => {
+  const returnTo = (req.body.returnTo || '').trim() || 'dev-internal';
+  const base = returnTo === 'dev-internal-result' ? '/admin/dev-internal-result' : '/admin/dev-internal';
   const index = parseInt(req.body.index, 10);
   if (Number.isNaN(index) || index < 0 || index >= DEV_INTERNAL_LOGS.length) {
-    return res.redirect('/admin/dev-internal?err=invalid');
+    return res.redirect(base + '?err=invalid');
   }
   const log = DEV_INTERNAL_LOGS[index];
   const url = log.internalTargetUrl;
   if (!url || !log.payload) {
-    return res.redirect('/admin/dev-internal?err=no_target');
+    return res.redirect(base + '?err=no_target');
   }
   try {
     const result = await sendToInternal(url, log.payload);
-    return res.redirect('/admin/dev-internal?resend=' + (result.success ? 'ok' : 'fail'));
+    if (result.success) return res.redirect(base + '?resend=ok');
+    const reason = result.status ? 'HTTP ' + result.status : (result.error || '');
+    return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason));
   } catch (err) {
-    return res.redirect('/admin/dev-internal?resend=fail');
+    return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(err.message || String(err)));
   }
+});
+
+// 개발결과 (요약) 페이지
+app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (req, res) => {
+  const locale = getLocale(req);
+  const q = req.query || {};
+  const resendMsg =
+    q.resend === 'ok'
+      ? '<div class="alert alert-ok">재전송이 완료되었습니다.</div>'
+      : q.resend === 'fail'
+      ? '<div class="alert alert-fail">재전송 실패' + (q.reason ? ': ' + String(q.reason).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '') + '</div>'
+      : q.err ? '<div class="alert alert-fail">' + (q.err === 'invalid' ? '잘못된 요청입니다.' : '대상 URL 없음') + '</div>'
+      : '';
+  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+  const adminUser = req.session.adminUser || '';
+  const nowKr = new Date().toLocaleString('ko-KR', { hour12: false });
+  const nowTh = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const envLabel = APP_ENV === 'test' ? 'sandbox' : 'live';
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const reversed = [...DEV_INTERNAL_LOGS].slice().reverse();
+  const rows = reversed
+    .map((log, i) => {
+      const realIndex = DEV_INTERNAL_LOGS.length - 1 - i;
+      const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+      const status = log.internalDeliveryStatus || '-';
+      const label = status === 'ok' ? '성공' : status === 'fail' ? '실패' : status === 'skip' ? '미전송' : status;
+      const statusClass = status === 'ok' ? 'status-ok' : status === 'fail' ? 'status-fail' : '';
+      const canResend = log.internalTargetUrl && log.payload;
+      const resendBtn = canResend
+        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="dev-internal-result" /><button type="submit" class="btn-resend" onclick="return confirm('해당 노티를 개발 전산으로 다시 전송하시겠습니까?');">재전송</button></form>`
+        : '-';
+      return `<tr>
+        <td>${esc(dt.date)}</td>
+        <td>TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
+        <td>${esc(log.routeNo || '-')}</td>
+        <td>${esc(envLabel)}</td>
+        <td>${esc(log.merchantId || '-')}</td>
+        <td><span class="${statusClass}">${esc(label)}</span></td>
+        <td class="col-fail-reason">-</td>
+        <td>${resendBtn}</td>
+      </tr>`;
+    })
+    .join('');
+
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${t(locale, 'nav_dev_result') || '개발 결과'}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+    table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
+    th { background: #e5f0ff; }
+    tr:nth-child(even) { background:#f9fafb; }
+    .status-ok { color: #059669; font-weight: 600; }
+    .status-fail { color: #dc2626; font-weight: 600; }
+    .time-jp { color: #2563eb; }
+    .col-fail-reason { text-align: center; word-break: break-all; max-width: 200px; }
+    .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .alert { padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
+    .alert-ok { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+    .alert-fail { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .layout { display:flex; min-height:100vh; width:100%; margin:0; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
+    .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
+    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
+    .topbar span { margin-right:12px; }
+    .card { background:#fff; padding:16px 20px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); border:1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
+      <div class="card">
+      ${resendMsg}
+      <h1>${t(locale, 'nav_dev_result') || '개발 결과'} (${DEV_INTERNAL_LOGS.length})</h1>
+      <p style="font-size:13px;color:#555;">개발 전산 노티 전달 결과 요약 (성공/실패·재전송)</p>
+      <table>
+        <thead>
+          <tr>
+            <th>수신일</th>
+            <th>수신시각</th>
+            <th>route</th>
+            <th>환경</th>
+            <th>merchant id</th>
+            <th>성공유무</th>
+            <th>실패원인</th>
+            <th>재전송</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows || '<tr><td colspan="8" style="text-align:center;color:#777;">데이터 없음</td></tr>'}
+        </tbody>
+      </table>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
 });
 
 // 트래픽 분석 (일자별 / 월간별 / 시간별)
@@ -4877,13 +7020,13 @@ app.get('/admin/traffic', requireAuth, requirePage('traffic_analysis'), (req, re
   <style>
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; color:#111827; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:260px; background:#111827; padding:20px 16px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:4px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:16px; padding:6px 8px; background:#1f2937; border-radius:6px; }
-    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:12px 4px 4px; text-transform:uppercase; letter-spacing:0.08em; }
-    .nav a { display:block; padding:8px 10px; margin-bottom:4px; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover { background:#1f2937; color:#e0f2fe; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav a { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(139, 92, 246, 0.35); color:#e9d5ff; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; min-width:0; }
     .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; margin-bottom:0; flex-wrap:wrap; }
     .topbar span { margin-right:12px; }
@@ -4920,7 +7063,7 @@ app.get('/admin/traffic', requireAuth, requirePage('traffic_analysis'), (req, re
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card traffic-card">
