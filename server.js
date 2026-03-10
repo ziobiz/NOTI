@@ -13,6 +13,7 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const QRCode = require('qrcode');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const { t } = require('./locales');
 
 const app = express();
@@ -123,6 +124,7 @@ const PAGE_KEYS = [
   'settings',
   'account_reset',
   'cancel_refund',
+  'mail_logs',
 ];
 const INITIAL_PASSWORD_SUFFIX = '1!';
 const INTERNAL_TARGETS_CONFIG_PATH = path.join(CONFIG_DIR, 'internal-targets.json');
@@ -181,6 +183,8 @@ const DEFAULT_PG_TRANSACTION_SYNC_INTERVAL_MINUTES = 30;
 const DEFAULT_PG_TRANSACTION_INITIAL_SYNC_MONTHS = 3;
 const DEFAULT_AMOUNT_DISPLAY_OP = '/'; // '*', '/', '+', '-'
 const DEFAULT_AMOUNT_DISPLAY_VALUE = 100;
+const DEFAULT_SMTP_PORT = 587;
+const SMTP_PASSWORD_DUMMY = '********';
 
 function loadChillPayTransactionConfig() {
   try {
@@ -217,7 +221,12 @@ function loadChillPayTransactionConfig() {
       companyName: (o && o.companyName != null) ? String(o.companyName).trim() : '',
       contactName: (o && o.contactName != null) ? String(o.contactName).trim() : '',
       emailTo: (o && o.emailTo != null) ? String(o.emailTo).trim() : 'help@chillpay.co.th',
-      emailBodyTemplate: (o && o.emailBodyTemplate != null) ? String(o.emailBodyTemplate).trim() : '아래 거래에 대해 취소를 요청합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n',
+      emailBodyTemplate: (o && o.emailBodyTemplate != null) ? String(o.emailBodyTemplate).trim() : '안녕하세요. 아래의 거래에 대해 무효 처리를 요청합니다 감사합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n',
+      smtpHost: (o && o.smtpHost != null) ? String(o.smtpHost).trim() : '',
+      smtpPort: Number.isFinite(o && o.smtpPort) ? o.smtpPort : DEFAULT_SMTP_PORT,
+      smtpSecure: !!(o && o.smtpSecure === true),
+      smtpUser: (o && o.smtpUser != null) ? String(o.smtpUser).trim() : '',
+      smtpPass: (o && o.smtpPass != null) ? String(o.smtpPass) : '',
     };
   } catch (e) {
     return {
@@ -237,7 +246,12 @@ function loadChillPayTransactionConfig() {
       companyName: '',
       contactName: '',
       emailTo: 'help@chillpay.co.th',
-      emailBodyTemplate: '아래 거래에 대해 취소를 요청합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n',
+      emailBodyTemplate: '안녕하세요. 아래의 거래에 대해 무효 처리를 요청합니다 감사합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n',
+      smtpHost: '',
+      smtpPort: DEFAULT_SMTP_PORT,
+      smtpSecure: false,
+      smtpUser: '',
+      smtpPass: '',
     };
   }
 }
@@ -265,6 +279,11 @@ function saveChillPayTransactionConfig(o) {
     contactName: (o && o.contactName != null) ? String(o.contactName).trim() : cur.contactName,
     emailTo: (o && o.emailTo != null) ? String(o.emailTo).trim() : cur.emailTo,
     emailBodyTemplate: (o && o.emailBodyTemplate != null) ? String(o.emailBodyTemplate).trim() : cur.emailBodyTemplate,
+    smtpHost: (o && o.smtpHost != null) ? String(o.smtpHost).trim() : cur.smtpHost,
+    smtpPort: o && Number.isFinite(o.smtpPort) ? o.smtpPort : cur.smtpPort,
+    smtpSecure: o && typeof o.smtpSecure === 'boolean' ? o.smtpSecure : cur.smtpSecure,
+    smtpUser: (o && o.smtpUser != null) ? String(o.smtpUser).trim() : cur.smtpUser,
+    smtpPass: (o && o.smtpPass != null && String(o.smtpPass).trim() !== '') ? String(o.smtpPass) : cur.smtpPass,
   };
   fs.writeFileSync(CHILLPAY_TRANSACTION_CONFIG_PATH, JSON.stringify(toSave, null, 2));
   return toSave;
@@ -436,7 +455,7 @@ function requireRole(roles) {
   return (req, res, next) => {
     if (!req.session || !req.session.member) return res.redirect('/admin/login');
     if (arr.includes(req.session.member.role)) return next();
-    return res.status(403).send('접근 권한이 없습니다.');
+    return res.status(403).send(t(getLocale(req), 'err_forbidden'));
   };
 }
 
@@ -449,7 +468,7 @@ function requirePage(pageKey) {
     const m = req.session.member;
     if (m.role === ROLES.SUPER_ADMIN || m.role === ROLES.ADMIN) return next();
     if (m.role === ROLES.OPERATOR && m.permissions && m.permissions.includes(pageKey)) return next();
-    return res.status(403).send('해당 페이지 접근 권한이 없습니다.');
+    return res.status(403).send(t(getLocale(req), 'err_page_forbidden'));
   };
 }
 
@@ -460,7 +479,7 @@ function requirePageAny(keys) {
     const m = req.session.member;
     if (m.role === ROLES.SUPER_ADMIN || m.role === ROLES.ADMIN) return next();
     if (m.role === ROLES.OPERATOR && m.permissions && keys.some((k) => m.permissions && m.permissions.includes(k))) return next();
-    return res.status(403).send('해당 페이지 접근 권한이 없습니다.');
+    return res.status(403).send(t(getLocale(req), 'err_page_forbidden'));
   };
 }
 
@@ -743,7 +762,7 @@ function saveMerchants() {
 const TRAFFIC_HITS = [];
 const TRAFFIC_HITS_MAX = 10000;
 
-// ===== 노티/테스트 로그 파일 경로 =====
+// ===== 노티/테스트/메일 로그 파일 경로 =====
 const DATA_DIR = path.join(__dirname, 'data');
 const PG_NOTI_LOG_PATH = path.join(DATA_DIR, 'pg-noti.log');
 const CHILLPAY_VOID_NOTI_SENT_PATH = path.join(DATA_DIR, 'chillpay-void-noti-sent.json');
@@ -757,6 +776,7 @@ const TEST_LOG_PATH = path.join(DATA_DIR, 'test-payments.log');
 const CONFIG_LOG_PATH = path.join(DATA_DIR, 'config-change.log');
 const VOID_REFUND_NOTI_LOG_PATH = path.join(DATA_DIR, 'void-refund-noti.log');
 const VOID_UI_DELETED_PATH = path.join(DATA_DIR, 'void-ui-deleted.log');
+const MAIL_LOG_PATH = path.join(DATA_DIR, 'mail-logs.log');
 const VOID_UI_DELETED_RETENTION_DAYS = 31;
 
 // ChillPay PG 거래 동기화용 최근 API 오류 (페이지 상단 안내용)
@@ -995,6 +1015,29 @@ function appendTestLog(entry) {
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.appendFile(TEST_LOG_PATH, JSON.stringify(log) + '\n', () => {});
+  } catch {
+    // 무시
+  }
+}
+
+// ===== 메일 발송 로그 (최근 7일 메모리 + 파일에도 기록) =====
+let MAIL_LOGS = loadJsonLogFile(MAIL_LOG_PATH, 'sentAtIso');
+
+function appendMailLog(entry) {
+  const nowIso = new Date().toISOString();
+  const log = {
+    ...entry,
+    sentAtIso: nowIso,
+  };
+  MAIL_LOGS.push(log);
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  MAIL_LOGS = MAIL_LOGS.filter((e) => {
+    const t = Date.parse(e.sentAtIso || e.sentAt);
+    return !Number.isNaN(t) && t >= cutoff;
+  });
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFile(MAIL_LOG_PATH, JSON.stringify(log) + '\n', () => {});
   } catch {
     // 무시
   }
@@ -1735,20 +1778,6 @@ function buildVoidRefundNotiMap(days) {
   }
   return map;
 }
-// 무효/환불 노티 전송 시각 맵 (type별, 최신 1건만). 무효거래·환불거래 목록에서 "전송일/전송시각" 표시용
-function buildVoidRefundNotiSentMaps(days) {
-  const entries = loadVoidRefundNotiLog(days || 30);
-  const voidMap = {};
-  const refundMap = {};
-  for (const e of entries) {
-    const tid = e.transactionId && String(e.transactionId).trim();
-    if (!tid) continue;
-    if (e.type === 'void' && !voidMap[tid]) voidMap[tid] = e;
-    if (e.type === 'refund' && !refundMap[tid]) refundMap[tid] = e;
-  }
-  return { voidMap, refundMap };
-}
-// 무효/환불 노티 전송 시각 맵 (type별, 최신 1건만). 무효거래·환불거래 목록에서 "전송일/전송시각" 표시용
 function buildVoidRefundNotiSentMaps(days) {
   const entries = loadVoidRefundNotiLog(days || 30);
   const voidMap = {};
@@ -1828,12 +1857,7 @@ async function syncChillPayVoidNoti() {
           const body = l.body && typeof l.body === 'object' ? l.body : (typeof l.body === 'string'
             ? (() => { try { return JSON.parse(l.body); } catch (e) { return {}; } })()
             : {});
-          const ps = body.PaymentStatus != null ? body.PaymentStatus : (body.paymentStatus != null ? body.paymentStatus : body.status);
-          const isSuccess =
-            ps === 1 || ps === '1' ||
-            (body.paymentStatus && String(body.paymentStatus).toLowerCase() === 'success') ||
-            body.status === 1;
-          return isSuccess;
+          return isSuccessPaymentBody(body);
         }) || candidates[0];
     }
     if (!log) {
@@ -1853,7 +1877,7 @@ async function syncChillPayVoidNoti() {
     }
     try {
       console.log('[무효 동기화] 무효 노티 전송 시도 txId=', txId, 'merchantId=', log.merchantId);
-      await sendVoidOrRefundNoti(log, 'void');
+      await sendVoidOrRefundNoti(log, 'void', 'auto');
       markVoidNotiSent(txId);
       sent += 1;
       items.push({ transactionId: txId, orderNo, result: 'sent' });
@@ -1928,12 +1952,7 @@ async function syncChillPayRefundNoti() {
           const body = l.body && typeof l.body === 'object' ? l.body : (typeof l.body === 'string'
             ? (() => { try { return JSON.parse(l.body); } catch (e) { return {}; } })()
             : {});
-          const ps = body.PaymentStatus != null ? body.PaymentStatus : (body.paymentStatus != null ? body.paymentStatus : body.status);
-          const isSuccess =
-            ps === 1 || ps === '1' ||
-            (body.paymentStatus && String(body.paymentStatus).toLowerCase() === 'success') ||
-            body.status === 1;
-          return isSuccess;
+          return isSuccessPaymentBody(body);
         }) || candidates[0];
     }
     if (!log) {
@@ -1942,7 +1961,7 @@ async function syncChillPayRefundNoti() {
       continue;
     }
     try {
-      await sendVoidOrRefundNoti(log, 'refund');
+      await sendVoidOrRefundNoti(log, 'refund', 'auto');
       markRefundNotiSent(txId);
       sent += 1;
       items.push({ transactionId: txId, orderNo, result: 'sent' });
@@ -1955,15 +1974,18 @@ async function syncChillPayRefundNoti() {
 
 // 결제 시각 기준 자동화 구간: 'void_auto' | 'void_manual' | 'refund'
 // 기준 (태국 시간 기준, 일본 시간은 +2시간):
-// - 당일 00:01 ~ (자동 무효 마감 + 2분)  → void_auto (자동 무효 가능, 2분 오차 허용)
-// - 그 이후 → void_manual (이메일로 환불/무효 요청 안내용)
-// - 환불 가능 일자(결제 다음날 00:00부터 N일간)는 별도 isWithinRefundWindow에서 일자 기준으로 판정
-function getVoidRefundWindow(paymentDateOrIso) {
+// 태국시간 기준 무효/환불 구간 판정
+// - 당일 거래에 한해:
+//   - 00:01 ~ 설정된 자동 무효 마감 시각(기본 21:00)까지  → 'void_auto'  (자동 무효 가능)
+//   - 자동 무효 마감 시각 이후 ~ 23:59                     → 'void_manual'(수동 이메일만 가능)
+// - 날짜가 바뀐 이후(결제일이 오늘이 아닌 경우)          → 'refund_only'(무효 불가, 환불만 가능)
+// 환불 가능 일자(결제 다음날 00:00からN日間）は isWithinRefundWindow で別途判定
+function getVoidRefundWindow(paymentDateOrIso, nowIso) {
   const cfg = loadChillPayTransactionConfig();
   const tz = cfg.timezone || DEFAULT_CHILLPAY_TIMEZONE;
   let date = null;
   const str = (paymentDateOrIso && String(paymentDateOrIso).trim()) || '';
-  if (!str) return 'void_manual';
+  if (!str) return 'refund_only';
   if (/^\d{4}-\d{2}-\d{2}T/.test(str)) {
     date = new Date(str);
   } else if (/^\d{2}\/\d{2}\/\d{4}\s+\d{1,2}:\d{2}/.test(str)) {
@@ -1974,19 +1996,41 @@ function getVoidRefundWindow(paymentDateOrIso) {
   } else {
     date = new Date(str);
   }
-  if (Number.isNaN(date.getTime())) return 'void_manual';
-  // 태국 시간 기준 시각 추출
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(date);
-  const get = (name) => (parts.find((p) => p.type === name) || {}).value || '0';
-  const hour = parseInt(get('hour'), 10) || 0;
-  const minute = parseInt(get('minute'), 10) || 0;
-  const payMins = hour * 60 + minute;
-  const cutoffMins = cfg.voidCutoffHour * 60 + cfg.voidCutoffMinute; // 기본 21:00
-  const toleranceMins = 2; // TransactionDate / PaymentDate 1분 차이 등을 위한 여유
-  const effectiveCutoff = Math.min(cutoffMins + toleranceMins, 23 * 60 + 59);
-  // 00:01 이후 ~ (자동 무효 마감 + 2분)까지는 자동 무효로 인정
-  if (payMins <= effectiveCutoff && payMins > 0) return 'void_auto';
-  return 'void_manual';
+  if (Number.isNaN(date.getTime())) return 'refund_only';
+
+  const nowDate = nowIso ? new Date(nowIso) : new Date();
+  if (Number.isNaN(nowDate.getTime())) return 'refund_only';
+
+  // 태국 시간 기준 결제일과 오늘 날짜を取得
+  const fmtDate = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const payParts = fmtDate.formatToParts(date);
+  const nowParts = fmtDate.formatToParts(nowDate);
+  const getVal = (parts, name) => (parts.find((p) => p.type === name) || {}).value || '0';
+  const payY = parseInt(getVal(payParts, 'year'), 10) || 0;
+  const payM = parseInt(getVal(payParts, 'month'), 10) || 0;
+  const payD = parseInt(getVal(payParts, 'day'), 10) || 0;
+  const nowY = parseInt(getVal(nowParts, 'year'), 10) || 0;
+  const nowM = parseInt(getVal(nowParts, 'month'), 10) || 0;
+  const nowD = parseInt(getVal(nowParts, 'day'), 10) || 0;
+
+  // 결제일이 오늘(태국 기준)이 아니면 이미 무효 가능 시간이 지난 것으로 보고 환불 전용
+  if (payY !== nowY || payM !== nowM || payD !== nowD) return 'refund_only';
+
+  // 오늘(당일 거래)인 경우: 현재 시각 기준으로 구간 판정
+  const timeParts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(nowDate);
+  const nowHour = parseInt(getVal(timeParts, 'hour'), 10) || 0;
+  const nowMin = parseInt(getVal(timeParts, 'minute'), 10) || 0;
+  const nowMins = nowHour * 60 + nowMin;
+
+  const cutoffMins = cfg.voidCutoffHour * 60 + cfg.voidCutoffMinute; // 예: 21:00
+  const manualEndMins = 23 * 60 + 59;                                // 23:59 までメール可
+
+  // 00:01〜자동 무효 마감時刻まで → 자동 무효
+  if (nowMins > 0 && nowMins <= cutoffMins) return 'void_auto';
+  // 자동 무효 마감 이후〜23:59 → 수동 이메일만
+  if (nowMins > cutoffMins && nowMins <= manualEndMins) return 'void_manual';
+  // 그 외(이론상ここには来ないが、安全のため)
+  return 'refund_only';
 }
 
 // 환불 요청 버튼 활성화 여부: 결제 다음날 0시 기준, 환경설정 환불 가능 기간(일) 안인지 검사
@@ -2027,7 +2071,7 @@ function isWithinRefundWindow(paymentDateOrIso, nowIso) {
 
 // 현재 시각이 수동 무효 이메일 가능 시간대(설정 기준 void_manual 구간)인지 여부
 function isCurrentTimeInVoidManualWindow() {
-  return getVoidRefundWindow(new Date().toISOString()) === 'void_manual';
+  return getVoidRefundWindow(new Date().toISOString(), new Date().toISOString()) === 'void_manual';
 }
 
 // 취소/무효/환불 목록·이메일용 Route 번호만 표시 (callback/16 → 16, 가맹점 routeNo 우선)
@@ -2049,7 +2093,7 @@ function buildVoidEmailContent(log) {
   const amount = body.Amount != null ? body.Amount : (body.amount != null ? body.amount : '');
   const routeNo = getRouteNoDisplay(merchant, log.routeKey);
   const paymentDate = body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt || '';
-  const defaultTemplate = '아래 거래에 대해 취소를 요청합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n';
+  const defaultTemplate = '안녕하세요. 아래의 거래에 대해 무효 처리를 요청합니다 감사합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n';
   const template = (cfg.emailBodyTemplate || '').trim() || defaultTemplate;
   const bodyText = template
     .replace(/\{\{transNo\}\}/g, String(transNo))
@@ -2058,12 +2102,13 @@ function buildVoidEmailContent(log) {
     .replace(/\{\{routeNo\}\}/g, String(routeNo))
     .replace(/\{\{paymentDate\}\}/g, String(paymentDate))
     .replace(/\{\{mid\}\}/g, String(mid || ''));
-  return { subject: '취소 요청: ' + (transNo || orderNo || ''), body: bodyText };
+  // 이메일은 무효 요청용이므로 제목도 "무효 요청"으로 통일
+  return { subject: '무효 요청: ' + (transNo || orderNo || ''), body: bodyText };
 }
 
-// 무효 또는 환불 노티 전송 (가맹점 callback/result + 전산). log = NOTI_LOGS 항목, type = 'void' | 'refund'
+// 무효 또는 환불 노티 전송 (가맹점 callback/result + 전산). log = NOTI_LOGS 항목, type = 'void' | 'refund', mode = 'auto' | 'manual'
 // 전송하지 않은 경우(가맹점 없음 등)에도 노티 결과에 '미전송'으로 기록해, '안 보냄'과 '보냈는데 실패'를 구분할 수 있게 함.
-async function sendVoidOrRefundNoti(log, type) {
+async function sendVoidOrRefundNoti(log, type, mode) {
   const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
   const bodyForId = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body || '{}'); } catch { return {}; } })() : {});
   const txIdForLog = bodyForId.TransactionId != null ? bodyForId.TransactionId : (bodyForId.transactionId != null ? bodyForId.transactionId : '');
@@ -2072,6 +2117,7 @@ async function sendVoidOrRefundNoti(log, type) {
     const skipReason = !merchant ? 'no_merchant' : 'no_body';
     appendVoidRefundNotiLog({
       type,
+      mode: mode || 'manual',
       transactionId: txIdForLog,
       orderNo: orderNoForLog,
       merchantId: log.merchantId || '',
@@ -2085,7 +2131,7 @@ async function sendVoidOrRefundNoti(log, type) {
   }
   const paymentStatus = type === 'refund' ? '9' : '2';
   const payload = typeof log.body === 'object' ? { ...log.body, PaymentStatus: paymentStatus } : { ...JSON.parse(log.body || '{}'), PaymentStatus: paymentStatus };
-  console.log('[취소 노티 전송] type=', type, 'PaymentStatus=', paymentStatus, 'merchantId=', log.merchantId, 'TransactionId=', payload.TransactionId);
+  console.log('[무효/환불 노티 전송] type=', type, 'PaymentStatus=', paymentStatus, 'merchantId=', log.merchantId, 'TransactionId=', payload.TransactionId);
   const urls = [];
   if (merchant.callbackUrl) urls.push({ url: merchant.callbackUrl, kind: 'callback' });
   if (merchant.resultUrl && merchant.resultUrl !== merchant.callbackUrl) urls.push({ url: merchant.resultUrl, kind: 'result' });
@@ -2125,6 +2171,7 @@ async function sendVoidOrRefundNoti(log, type) {
   const internalSkipReason = !internalUrl ? 'no_internal_url' : null;
   appendVoidRefundNotiLog({
     type: type,
+    mode: mode || 'manual',
     transactionId: body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : ''),
     orderNo: body.OrderNo != null ? body.OrderNo : (body.orderNo != null ? body.orderNo : ''),
     merchantId: log.merchantId || '',
@@ -2406,7 +2453,7 @@ async function handleNotiRequest(routeKey, req, res) {
     try {
       console.log('[포워딩 중] 가맹점으로 릴레이:', merchantId, kind, targetUrl, 'relayFormat=', relayFormat, 'Content-Type=', relayOpts.contentType);
       let relayRes = await relayToMerchant(targetUrl, body, relayOpts);
-      relaySuccess = relayRes.status >= 200 && relayRes.status < 300;
+      relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
       if (relaySuccess) {
         console.log('[포워딩 성공] status=', relayRes.status);
       } else {
@@ -2414,7 +2461,7 @@ async function handleNotiRequest(routeKey, req, res) {
         console.warn('[포워딩 실패] status=', relayRes.status, ' 1회 재시도 예정');
         await new Promise((r) => setTimeout(r, 2000));
         relayRes = await relayToMerchant(targetUrl, body, relayOpts);
-        relaySuccess = relayRes.status >= 200 && relayRes.status < 300;
+        relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
         if (relaySuccess) {
           console.log('[포워딩 재시도 성공] status=', relayRes.status);
           relayFailReason = '';
@@ -2648,8 +2695,8 @@ function getAdminSidebar(locale, adminUser, member, currentPath) {
   if (can('merchants')) {
     nav.push(navGroup(t(locale, 'nav_merchant'), ['/admin/merchants'], link('/admin/merchants', t(locale, 'nav_merchant_settings'))));
   }
-  if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('traffic_analysis')) {
-    const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/traffic'];
+  if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('traffic_analysis') || can('mail_logs')) {
+    const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/mail-logs', '/admin/traffic'];
     const logItems = [];
     if (can('pg_result')) logItems.push(link('/admin/logs-result', t(locale, 'nav_pg_result') || '피지 결과'));
     if (can('internal_result')) logItems.push(link('/admin/internal-result', t(locale, 'nav_internal_result') || '전산 결과'));
@@ -2657,6 +2704,7 @@ function getAdminSidebar(locale, adminUser, member, currentPath) {
     if (can('pg_logs')) logItems.push(link('/admin/logs', t(locale, 'nav_pg_noti_log')));
     if (can('internal_logs')) logItems.push(link('/admin/internal', t(locale, 'nav_internal_noti_log')));
     if (can('dev_internal_logs')) logItems.push(link('/admin/dev-internal', t(locale, 'nav_dev_internal_noti_log') || '개발 노티로그'));
+    if (can('mail_logs')) logItems.push(link('/admin/mail-logs', t(locale, 'nav_mail_logs') || '메일로그'));
     if (can('traffic_analysis')) logItems.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis') || '트래픽분석'));
     nav.push(navGroup(t(locale, 'nav_logs'), logPaths, logItems.join('')));
   }
@@ -2669,17 +2717,18 @@ function getAdminSidebar(locale, adminUser, member, currentPath) {
     nav.push(navGroup(t(locale, 'nav_internal'), internalPaths, internalItems.join('')));
   }
   if (can('cancel_refund')) {
-    const crPaths = ['/admin/transactions', '/admin/pg-transactions', '/admin/cancel-refund/cancel', '/admin/cancel-refund/void', '/admin/cancel-refund/force-void', '/admin/cancel-refund/refund', '/admin/cancel-refund/noti', '/admin/cancel-refund/void-deleted-list'];
+    const crPaths = ['/admin/transactions', '/admin/pg-transactions', '/admin/cancel-refund/cancel', '/admin/cancel-refund/void', '/admin/cancel-refund/void-summary', '/admin/cancel-refund/force-void', '/admin/cancel-refund/refund', '/admin/cancel-refund/noti', '/admin/cancel-refund/void-deleted-list'];
     const crItems = [
       link('/admin/transactions', t(locale, 'nav_transaction_list')),
       // 피지거래내역은 기본 진입 시 항상 "당일"이 선택되도록 sort=today를 기본으로 붙인다.
       link('/admin/pg-transactions?sort=today', t(locale, 'nav_pg_transaction_list')),
       link('/admin/cancel-refund/cancel', t(locale, 'nav_cancel_refund_cancel')),
       link('/admin/cancel-refund/void', t(locale, 'nav_cancel_refund_void')),
+      link('/admin/cancel-refund/void-summary', t(locale, 'nav_cancel_refund_void_summary')),
       link('/admin/cancel-refund/force-void', t(locale, 'nav_cancel_refund_force_void')),
       link('/admin/cancel-refund/refund', t(locale, 'nav_cancel_refund_refund')),
       link('/admin/cancel-refund/noti', t(locale, 'nav_cancel_refund_noti')),
-      link('/admin/cancel-refund/void-deleted-list', '삭제거래'),
+      link('/admin/cancel-refund/void-deleted-list', t(locale, 'cr_void_deleted_list')),
     ];
     nav.push(navGroup(t(locale, 'nav_cancel_refund'), crPaths, crItems.join('')));
   }
@@ -2719,7 +2768,7 @@ function getAdminTopbar(locale, clientIp, nowLocal, nowTh, adminUser, currentPat
     const label = l === 'zh' ? 'CH' : l.toUpperCase();
     return `<a href="/admin/set-locale?lang=${l}&back=${encodeURIComponent(back)}" style="color:#0369a1;text-decoration:none;margin:0 4px;">${label}</a>`;
   }).join(' ');
-  const logoutLink = '<a href="/admin/logout" style="color:#0369a1;text-decoration:none;">로그아웃</a>';
+  const logoutLink = '<a href="/admin/logout" style="color:#0369a1;text-decoration:none;">' + t(locale, 'common_logout') + '</a>';
   return `<div class="topbar">
     <span>${t(locale, 'topbar_ip')}: ${clientIp || '-'}</span>
     <span> ㅣ ${t(locale, 'topbar_time')}: ${nowLocal}</span>
@@ -2789,7 +2838,7 @@ app.get('/admin/login', (req, res) => {
         <div class="hint">${t(locale, 'login_otp_hint')}</div>
         <button type="submit">${t(locale, 'login_submit')}</button>
       </form>
-      <p style="margin-top:14px;font-size:13px;"><a href="/admin/forgot" style="color:#93c5fd;">비밀번호 초기화 요청</a> &middot; <a href="/admin/forgot-id" style="color:#93c5fd;">아이디 찾기</a></p>
+      <p style="margin-top:14px;font-size:13px;"><a href="/admin/forgot" style="color:#93c5fd;">${t(locale, 'forgot_title')}</a> &middot; <a href="/admin/forgot-id" style="color:#93c5fd;">${t(locale, 'forgot_id_title')}</a></p>
     </div>
   </div>
   ${alertScript}
@@ -2802,21 +2851,21 @@ app.get('/admin/forgot-id', (req, res) => {
   const locale = getLocale(req);
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
-<head><meta charset="UTF-8"/><title>아이디 찾기</title>
+<head><meta charset="UTF-8"/><title>${t(locale, 'forgot_id_title')}</title>
 <style>body{font-family:system-ui;margin:0;background:#111827;color:#f9fafb;}.c{max-width:400px;margin:60px auto;padding:24px;}.card{background:#1f2937;padding:24px;border-radius:10px;}label{display:block;margin-top:12px;}input{width:100%;padding:10px;box-sizing:border-box;border-radius:6px;border:1px solid #4b5563;background:#111827;color:#f9fafb;}button{margin-top:16px;padding:10px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;width:100%;}a{color:#93c5fd;}</style>
 </head>
 <body>
   <div class="c">
     <div class="card">
-      <h1>아이디 찾기</h1>
-      <p style="font-size:13px;color:#9ca3af;">가입 시 등록한 성명, 이메일, 국가가 일치하면 등록된 이메일로 아이디를 안내합니다.</p>
+      <h1>${t(locale, 'forgot_id_title')}</h1>
+      <p style="font-size:13px;color:#9ca3af;">${t(locale, 'forgot_id_desc')}</p>
       <form method="post" action="/admin/forgot-id">
-        <label>성명 <input type="text" name="name" required /></label>
-        <label>이메일 <input type="email" name="email" required /></label>
-        <label>국가 <input type="text" name="country" /></label>
-        <button type="submit">확인</button>
+        <label>${t(locale, 'member_name')} <input type="text" name="name" required /></label>
+        <label>${t(locale, 'member_email')} <input type="email" name="email" required /></label>
+        <label>${t(locale, 'member_country')} <input type="text" name="country" /></label>
+        <button type="submit">${t(locale, 'forgot_id_btn')}</button>
       </form>
-      <p style="margin-top:16px;"><a href="/admin/login">로그인</a></p>
+      <p style="margin-top:16px;"><a href="/admin/login">${t(locale, 'login_submit')}</a></p>
     </div>
   </div>
 </body>
@@ -2825,12 +2874,13 @@ app.get('/admin/forgot-id', (req, res) => {
 
 app.post('/admin/forgot-id', (req, res) => {
   const { name, email, country } = req.body || {};
+  const locale = getLocale(req);
   MEMBERS = loadMembers();
   const mem = MEMBERS.find((m) => (m.name || '').trim() === (name || '').trim() && (m.email || '').trim().toLowerCase() === (email || '').trim().toLowerCase() && (m.country || '').trim() === (country || '').trim());
   if (!mem) {
-    return res.status(400).send('일치하는 회원 정보가 없습니다. 성명, 이메일, 국가를 확인하세요. <a href="/admin/forgot-id">다시 시도</a>');
+    return res.status(400).send(t(locale, 'forgot_id_no_match') + ' <a href="/admin/forgot-id">' + t(locale, 'forgot_try_again') + '</a>');
   }
-  return res.send('등록된 이메일로 아이디를 발송했습니다. (테스트: 회원 아이디는 <strong>' + (mem.userId || '').replace(/</g, '&lt;') + '</strong> 입니다.) <a href="/admin/login">로그인</a>');
+  return res.send((t(locale, 'forgot_id_sent') || '').replace(/\{\{id\}\}/g, (mem.userId || '').replace(/</g, '&lt;')) + ' <a href="/admin/login">' + t(locale, 'login_submit') + '</a>');
 });
 
 // 로그인 처리 (회원 기반: userId, password, OTP)
@@ -3086,8 +3136,8 @@ app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) 
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'account_title')}</h1>
-        <p style="font-size:13px;color:#555;">${t(locale, 'account_desc')}</p>
-        ${forceOtp ? `<div style="margin:10px 0 0;padding:10px 12px;border-radius:8px;background:#fef3c7;border:1px solid #f59e0b;color:#92400e;font-size:13px;">OTP 등록이 필요합니다. 아래에서 <strong>OTP 새로 생성</strong>을 체크한 뒤 저장하고, QR 코드를 Google OTP 앱에 등록하세요.</div>` : ''}
+        <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'account_desc')}</p>
+        ${forceOtp ? `<div style="margin:10px 0 0;padding:10px 12px;border-radius:8px;background:#fef3c7;border:1px solid #f59e0b;color:#92400e;font-size:13px;">${t(locale, 'account_otp_required')}</div>` : ''}
         <form method="post" action="/admin/account" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
           <label>${t(locale, 'account_new_username')}<input type="text" name="username" value="${(currentMember.userId || '').replace(/"/g, '&quot;')}" required /></label>
           <label>${t(locale, 'account_new_password')}<input type="password" name="password" /></label>
@@ -3101,6 +3151,39 @@ app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) 
       </div>
     </main>
   </div>
+  <script>
+    (function() {
+      var preset = document.getElementById('smtpPreset');
+      if (!preset) return;
+      var host = document.querySelector('input[name="smtpHost"]');
+      var port = document.querySelector('input[name="smtpPort"]');
+      var secure = document.querySelector('input[name="smtpSecure"]');
+      preset.addEventListener('change', function() {
+        if (!host || !port || !secure) return;
+        if (this.value === 'gmail') {
+          host.value = 'smtp.gmail.com';
+          port.value = 587;
+          secure.checked = true;
+        } else if (this.value === 'naver') {
+          host.value = 'smtp.naver.com';
+          port.value = 587;
+          secure.checked = true;
+        } else {
+          // 기타: 사용자가 직접 입력
+        }
+      });
+      var sampleCb = document.getElementById('chillpayEmailUseSample');
+      var bodyEl = document.getElementById('chillpayEmailBody');
+      if (sampleCb && bodyEl) {
+        var sampleText = ${JSON.stringify((t('en', 'chillpay_email_sample_en') || '').replace(/\r\n/g, '\n'))};
+        sampleCb.addEventListener('change', function() {
+          if (this.checked && sampleText) {
+            bodyEl.value = sampleText;
+          }
+        });
+      }
+    })();
+  </script>
 </body>
 </html>`);
 });
@@ -3211,6 +3294,15 @@ app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
   const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const site = loadSiteSettings();
+  const q = req.query || {};
+  const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
+  let alertHtml = '';
+  if (q.testEmail === 'ok') {
+    alertHtml = '<div class="alert alert-ok">' + escQ(t(locale, 'smtp_test_ok') || 'Test email sent successfully.') + '</div>';
+  } else if (q.testEmail === 'fail') {
+    const reason = q.reason ? escQ(q.reason) : (t(locale, 'smtp_test_fail') || 'Test email failed.');
+    alertHtml = '<div class="alert alert-fail">' + reason + '</div>';
+  }
   const titleVal = (site.sidebarTitle || '').replace(/"/g, '&quot;');
   const subVal = (site.sidebarSub || '').replace(/"/g, '&quot;');
   const pageTitleVal = (site.pageTitle || '').replace(/"/g, '&quot;');
@@ -3302,14 +3394,15 @@ app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
+        ${alertHtml}
         <h1>${t(locale, 'nav_settings')}</h1>
-        <p class="hint">왼쪽 상단 노출 이름, 추가 문구, 브라우저 탭 제목, 파비콘(ico) URL을 설정합니다.</p>
+        <p class="hint">${t(locale, 'settings_desc')}</p>
         <form method="post" action="/admin/settings" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
-          <label>왼쪽 상단 노출 이름 <input type="text" name="sidebarTitle" value="${titleVal}" placeholder="예: PG 노티 관리자" /></label>
-          <label>추가 노출 문구 (한 줄) <input type="text" name="sidebarSub" value="${subVal}" placeholder="예: Webhooks &amp; Internal Notices" /></label>
-          <label>브라우저 탭 제목 <input type="text" name="pageTitle" value="${pageTitleVal}" placeholder="접속 시 브라우저 상단에 표시되는 이름" /></label>
-          <label>파비콘(ico) URL <input type="text" name="favicon" value="${faviconVal}" placeholder="예: https://example.com/favicon.ico" /></label>
-          <button type="submit">저장</button>
+          <label>${t(locale, 'settings_label_sidebar')} <input type="text" name="sidebarTitle" value="${titleVal}" placeholder="${t(locale, 'settings_placeholder_sidebar')}" /></label>
+          <label>${t(locale, 'settings_label_sub')} <input type="text" name="sidebarSub" value="${subVal}" placeholder="Webhooks &amp; Internal Notices" /></label>
+          <label>${t(locale, 'settings_label_page_title')} <input type="text" name="pageTitle" value="${pageTitleVal}" placeholder="${t(locale, 'settings_placeholder_page_title')}" /></label>
+          <label>${t(locale, 'settings_label_favicon')} <input type="text" name="favicon" value="${faviconVal}" placeholder="${t(locale, 'settings_placeholder_favicon')}" /></label>
+          <button type="submit">${t(locale, 'common_save')}</button>
         </form>
       </div>
       ${(function() {
@@ -3325,68 +3418,86 @@ app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
         const startLabelJp = pad2(startHourJp) + ':' + pad2(startMinTh);
         const endLabelTh = '23:59';
         const endLabelJp = '01:59';
-        return '<div class="card card-chillpay"><h2>ChillPay 환경 설정</h2><p class="hint chillpay-desc">무효·환불 API 호출에 사용할 Sandbox / Production 키입니다. 수정 시 수정 버튼을 누른 뒤 변경하고, 저장 시 확인 후 저장됩니다. 본 데이터는 빈 값으로 덮어쓰지 않습니다.</p>'
-          + '<form id="chillpay-cred-form" method="post" action="/admin/settings/chillpay-credentials" onsubmit="return confirm(\'저장하시겠습니까?\');">'
-          + '<section class="chillpay-section"><h3>Sandbox (테스트 환경)</h3><p class="chillpay-hint">1줄: Mid · ApiKey / 2줄: MD5</p>'
+        return '<div class="card card-chillpay"><h2>ChillPay ' + t(locale, 'nav_settings') + '</h2><p class="hint chillpay-desc">' + t(locale, 'chillpay_cred_desc') + '</p>'
+          + '<form id="chillpay-cred-form" method="post" action="/admin/settings/chillpay-credentials" onsubmit="return confirm(\'' + (t(locale, 'chillpay_confirm_save') || '').replace(/'/g, "\\'") + '\');">'
+          + '<section class="chillpay-section"><h3>Sandbox (' + t(locale, 'chillpay_sandbox_label') + ')</h3><p class="chillpay-hint">' + t(locale, 'chillpay_hint_mid_apikey') + '</p>'
           + '<div class="chillpay-row"><label class="chillpay-cell chillpay-cell-mid"><span class="chillpay-label">Mid</span><input type="text" name="sandboxMid" data-initial="' + q(c.sandbox.mid) + '" value="' + q(c.sandbox.mid) + '" placeholder="MerchantCode" maxlength="20" readonly /></label>'
           + '<label class="chillpay-cell chillpay-cell-api"><span class="chillpay-label">ApiKey</span><input type="text" name="sandboxApiKey" data-initial="' + q(c.sandbox.apiKey) + '" value="' + q(c.sandbox.apiKey) + '" placeholder="ApiKey" readonly /></label></div>'
           + '<div class="chillpay-row chillpay-row-md5"><label class="chillpay-cell chillpay-cell-md5"><span class="chillpay-label">MD5</span><input type="text" name="sandboxMd5" data-initial="' + q(c.sandbox.md5) + '" value="' + q(c.sandbox.md5) + '" placeholder="MD5 Secret Key" readonly /></label></div></section>'
-          + '<section class="chillpay-section"><h3>Production (운영 환경)</h3><p class="chillpay-hint">1줄: Mid · ApiKey / 2줄: MD5</p>'
+          + '<section class="chillpay-section"><h3>Production (' + t(locale, 'chillpay_production_label') + ')</h3><p class="chillpay-hint">' + t(locale, 'chillpay_hint_mid_apikey') + '</p>'
           + '<div class="chillpay-row"><label class="chillpay-cell chillpay-cell-mid"><span class="chillpay-label">Mid</span><input type="text" name="productionMid" data-initial="' + q(c.production.mid) + '" value="' + q(c.production.mid) + '" placeholder="MerchantCode" maxlength="20" readonly /></label>'
           + '<label class="chillpay-cell chillpay-cell-api"><span class="chillpay-label">ApiKey</span><input type="text" name="productionApiKey" data-initial="' + q(c.production.apiKey) + '" value="' + q(c.production.apiKey) + '" placeholder="ApiKey" readonly /></label></div>'
           + '<div class="chillpay-row chillpay-row-md5"><label class="chillpay-cell chillpay-cell-md5"><span class="chillpay-label">MD5</span><input type="text" name="productionMd5" data-initial="' + q(c.production.md5) + '" value="' + q(c.production.md5) + '" placeholder="MD5 Secret Key" readonly /></label></div></section>'
           + '<div class="chillpay-submit chillpay-cred-btns">'
-          + '<button type="button" id="chillpay-cred-edit-btn" style="margin-right:8px;background:#eab308;color:#1f2937;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:600;">수정</button>'
-          + '<button type="submit" id="chillpay-cred-save-btn" style="display:none;margin-right:8px;">저장</button>'
-          + '<button type="button" id="chillpay-cred-cancel-btn" style="display:none;">취소</button>'
+          + '<button type="button" id="chillpay-cred-edit-btn" style="margin-right:8px;background:#eab308;color:#1f2937;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:600;">' + t(locale, 'common_edit') + '</button>'
+          + '<button type="submit" id="chillpay-cred-save-btn" style="display:none;margin-right:8px;">' + t(locale, 'common_save') + '</button>'
+          + '<button type="button" id="chillpay-cred-cancel-btn" style="display:none;">' + t(locale, 'common_cancel') + '</button>'
           + '</div></form>'
-          + '<script>(function(){ var f=document.getElementById("chillpay-cred-form"); if(!f) return; var inps=f.querySelectorAll("input[type=\'text\']"); var editBtn=document.getElementById("chillpay-cred-edit-btn"); var saveBtn=document.getElementById("chillpay-cred-save-btn"); var cancelBtn=document.getElementById("chillpay-cred-cancel-btn"); editBtn.onclick=function(){ if(!confirm("수정하시겠습니까?")) return; inps.forEach(function(i){ i.removeAttribute("readonly"); }); editBtn.style.display="none"; saveBtn.style.display="inline-block"; cancelBtn.style.display="inline-block"; }; cancelBtn.onclick=function(){ inps.forEach(function(i){ var v=i.getAttribute("data-initial"); if(v!==null) i.value=v; i.setAttribute("readonly","readonly"); }); editBtn.style.display="inline-block"; saveBtn.style.display="none"; cancelBtn.style.display="none"; }; })();</script></div>'
-          + '<div class="card card-chillpay"><h2>시간 및 동기화 설정</h2><p class="hint chillpay-desc">무효·환불 가능 시간(우리가 ChillPay API로 무효/환불 요청할 수 있는 구간)과 피지거래내역 동기화 주기입니다. 취소는 노티 수신만 있으므로 이 설정과 무관합니다.</p>'
-          + '<form method="post" action="/admin/settings/chillpay-time" onsubmit="return confirm(\'시간 및 동기화 설정을 저장하시겠습니까?\');">'
-          + '<section class="chillpay-section"><h3>무효/환불 가능 시간 (기준: 태국 시간)</h3><p class="chillpay-hint">무효/타임아웃 관련 구간은 <strong>TransactionDate</strong> 기준, 정산·환불 관련 기간은 <strong>PaymentDate</strong> 기준으로 판정됩니다. 모든 시각은 <strong>태국 시간(ICT)</strong> 기준이며, 화면에는 일본 시간(JST)도 함께 표기됩니다. (일본은 태국보다 2시간 빠릅니다.) 취소는 ChillPay 노티로만 수신되며, 우리가 API로 처리하는 것은 무효·환불뿐입니다.</p>'
-          + '<table class="chillpay-time-table"><thead><tr><th>자동 무효 마감 (당일)</th><th>수동 이메일 가능 (당일)</th><th>환불 구간 시작 (다음날)</th><th>금액 표시 계산식</th></tr></thead><tbody>'
+          + '<script>(function(){ var f=document.getElementById("chillpay-cred-form"); if(!f) return; var inps=f.querySelectorAll("input[type=\'text\']"); var editBtn=document.getElementById("chillpay-cred-edit-btn"); var saveBtn=document.getElementById("chillpay-cred-save-btn"); var cancelBtn=document.getElementById("chillpay-cred-cancel-btn"); var confirmEdit="' + (t(locale, 'chillpay_confirm_edit') || '').replace(/"/g, '&quot;') + '"; editBtn.onclick=function(){ if(!confirm(confirmEdit)) return; inps.forEach(function(i){ i.removeAttribute("readonly"); }); editBtn.style.display="none"; saveBtn.style.display="inline-block"; cancelBtn.style.display="inline-block"; }; cancelBtn.onclick=function(){ inps.forEach(function(i){ var v=i.getAttribute("data-initial"); if(v!==null) i.value=v; i.setAttribute("readonly","readonly"); }); editBtn.style.display="inline-block"; saveBtn.style.display="none"; cancelBtn.style.display="none"; }; })();</script></div>'
+          + '<div class="card card-chillpay"><h2>' + t(locale, 'chillpay_time_title') + '</h2><p class="hint chillpay-desc">' + t(locale, 'chillpay_time_desc') + '</p>'
+          + '<form method="post" action="/admin/settings/chillpay-time" onsubmit="return confirm(\'' + (t(locale, 'chillpay_time_confirm_save') || '').replace(/'/g, "\\'") + '\');">'
+          + '<section class="chillpay-section"><h3>' + t(locale, 'chillpay_time_void_window') + '</h3><p class="chillpay-hint">' + t(locale, 'chillpay_time_hint_dates') + '</p>'
+          + '<table class="chillpay-time-table"><thead><tr><th>' + t(locale, 'chillpay_th_void_cutoff') + '</th><th>' + t(locale, 'chillpay_th_manual_email') + '</th><th>' + t(locale, 'chillpay_th_refund_start') + '</th><th>' + t(locale, 'chillpay_th_amount_formula') + '</th></tr></thead><tbody>'
           + '<tr>'
-          + '<td><input type="number" name="voidCutoffHour" min="0" max="23" value="' + c.voidCutoffHour + '" /> 시 <input type="number" name="voidCutoffMinute" min="0" max="59" value="' + c.voidCutoffMinute + '" /> 분</td>'
+          + '<td><input type="number" name="voidCutoffHour" min="0" max="23" value="' + c.voidCutoffHour + '" style="text-align:center;" /> 시 <input type="number" name="voidCutoffMinute" min="0" max="59" value="' + c.voidCutoffMinute + '" style="text-align:center;" /> 분</td>'
           + '<td><input type="text" value="23시 59분" readonly style="width:100%;padding:4px 6px;border:1px solid #e5e7eb;background:#f9fafb;color:#6b7280;font-size:12px;box-sizing:border-box;cursor:not-allowed;text-align:center;" /></td>'
-          + '<td><input type="number" name="refundStartHour" min="0" max="23" value="' + c.refundStartHour + '" /> 시 <input type="number" name="refundStartMinute" min="0" max="59" value="' + c.refundStartMinute + '" /> 분</td>'
+          + '<td><input type="number" name="refundStartHour" min="0" max="23" value="' + c.refundStartHour + '" style="text-align:center;" /> 시 <input type="number" name="refundStartMinute" min="0" max="59" value="' + c.refundStartMinute + '" style="text-align:center;" /> 분</td>'
           + '<td><span class="chillpay-time-inputs"><select name="amountDisplayOp"><option value="*" ' + (c.amountDisplayOp === '*' ? 'selected' : '') + '>*</option><option value="/" ' + (c.amountDisplayOp === '/' ? 'selected' : '') + '>/</option><option value="+" ' + (c.amountDisplayOp === '+' ? 'selected' : '') + '>+</option><option value="-" ' + (c.amountDisplayOp === '-' ? 'selected' : '') + '>-</option></select>'
           + ' <input type="number" step="0.01" name="amountDisplayValue" value="' + (Number.isFinite(c.amountDisplayValue) ? c.amountDisplayValue : DEFAULT_AMOUNT_DISPLAY_VALUE) + '" /></span></td>'
           + '</tr>'
           + '<tr>'
-          + '<td class="time-desc-cell">태국 기준. 기본 21:00<br />(일본 기준 23:00)</td>'
-          + '<td class="time-desc-cell">태국 기준 23:59까지<br />(자동 계산, 수정 불가)<br />일본 기준 01:59</td>'
-          + '<td class="time-desc-cell">태국 기준. 기본 00:00<br />(결제(PaymentDate) 다음날 0시부터<br />환불 가능 일자 계산 시작)</td>'
-          + '<td class="time-desc-cell">Amount 원시 값에 계산식을 적용한 결과를<br />「금액」 컬럼에 표시합니다.<br />예: / 100 → 1000 → 10.00</td>'
+          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_th_void').replace(/<br \/>/g, '<br />') + '</td>'
+          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_manual_email').replace(/<br \/>/g, '<br />') + '</td>'
+          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_refund_start').replace(/<br \/>/g, '<br />') + '</td>'
+          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_amount_formula').replace(/<br \/>/g, '<br />') + '</td>'
           + '</tr>'
           + '</tbody></table>'
           + '<table class="chillpay-time-table" style="margin-top:10px;"><thead><tr>'
-          + '<th>피지거래내역 동기화 주기 (분)</th><th>동기화 결과 상세 표시 시간 (분)</th><th>환불 가능 기간 (일)</th><th>피지거래내역 초기화 동기화 기간 (개월)</th>'
+          + '<th>' + t(locale, 'chillpay_th_sync_interval') + '</th><th>' + t(locale, 'chillpay_th_sync_display') + '</th><th>' + t(locale, 'chillpay_th_refund_days') + '</th><th>' + t(locale, 'chillpay_th_reset_months') + '</th>'
           + '</tr></thead><tbody><tr>'
-          + '<td><input type="number" name="pgTransactionSyncIntervalMinutes" min="1" max="1440" value="' + c.pgTransactionSyncIntervalMinutes + '" /> 분</td>'
-          + '<td><input type="number" name="syncResultDisplayMinutes" min="1" max="1440" value="' + c.syncResultDisplayMinutes + '" /> 분</td>'
-          + '<td><input type="number" name="refundWindowDays" min="1" max="365" value="' + (c.refundWindowDays || '7') + '" /> 일</td>'
-          + '<td><input type="number" name="pgTransactionInitialSyncMonths" min="1" max="60" value="' + c.pgTransactionInitialSyncMonths + '" /> 개월</td>'
+          + '<td><input type="number" name="pgTransactionSyncIntervalMinutes" min="1" max="1440" value="' + c.pgTransactionSyncIntervalMinutes + '" style="text-align:center;" /> 분</td>'
+          + '<td><input type="number" name="syncResultDisplayMinutes" min="1" max="1440" value="' + c.syncResultDisplayMinutes + '" style="text-align:center;" /> 분</td>'
+          + '<td><input type="number" name="refundWindowDays" min="1" max="365" value="' + (c.refundWindowDays || '7') + '" style="text-align:center;" /> 일</td>'
+          + '<td><input type="number" name="pgTransactionInitialSyncMonths" min="1" max="60" value="' + c.pgTransactionInitialSyncMonths + '" style="text-align:center;" /> 개월</td>'
           + '</tr><tr>'
-          + '<td class="time-desc-cell">거래 내역 자동 조회 주기. 서버 재시작 시 적용</td>'
-          + '<td class="time-desc-cell">무효/환불 동기화 후 상단 상세 표시 시간. 기본 30분</td>'
-          + '<td class="time-desc-cell">결제(PaymentDate) 다음날 0시 기준, 이 기간 안에서만 환불 요청 버튼이 활성화됩니다. 기본 7일</td>'
-          + '<td class="time-desc-cell">동기화 초기화 시 과거 몇 개월치. 기본 3개월</td>'
+          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_sync_interval') + '</td>'
+          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_sync_display') + '</td>'
+          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_refund_days') + '</td>'
+          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_reset_months') + '</td>'
           + '</tr></tbody></table>'
           + '</section>'
           + '<input type="hidden" name="timezone" value="Asia/Bangkok" />'
-          + '<div class="chillpay-submit"><button type="submit">저장</button></div></form></div>'
-          + '<div class="card card-chillpay"><h2>자동화 이메일 설정</h2><p class="hint chillpay-desc">수동 무효 구간에서 ChillPay에 무효 요청을 위한 이메일 발송에 사용합니다. (취소는 노티 수신만 있으며, 무효·환불만 우리가 API/이메일로 요청 가능합니다.)</p>'
-          + '<form method="post" action="/admin/settings/chillpay-email" onsubmit="return confirm(\'자동화 이메일 설정을 저장하시겠습니까?\');">'
+          + '<div class="chillpay-submit"><button type="submit">' + t(locale, 'common_save') + '</button></div></form></div>'
+          + '<div class="card card-chillpay"><h2>' + t(locale, 'chillpay_email_title') + '</h2><p class="hint chillpay-desc">' + t(locale, 'chillpay_email_desc') + '</p>'
+          + '<form method="post" action="/admin/settings/chillpay-email" onsubmit="return confirm(\'' + (t(locale, 'chillpay_email_confirm_save') || '').replace(/'/g, "\\'") + '\');">'
           + '<section class="chillpay-section"><div class="chillpay-row chillpay-email-sender-row">'
-          + '<label class="chillpay-cell chillpay-email-sender-cell"><span class="chillpay-label">보내는 사람 주소</span><input type="email" name="emailFrom" value="' + q(c.emailFrom) + '" placeholder="발신 이메일" /></label>'
-          + '<label class="chillpay-cell chillpay-email-sender-cell"><span class="chillpay-label">회사명</span><input type="text" name="companyName" value="' + q(c.companyName) + '" placeholder="회사명" /></label>'
-          + '<label class="chillpay-cell chillpay-email-sender-cell"><span class="chillpay-label">담당자 성명</span><input type="text" name="contactName" value="' + q(c.contactName) + '" placeholder="담당자 성명" /></label></div>'
-          + '<div class="chillpay-email-to-row"><label class="chillpay-cell"><span class="chillpay-label">받는 분 (수신 이메일)</span><input type="email" name="emailTo" class="chillpay-email-input-same" value="' + q(c.emailTo || 'help@chillpay.co.th') + '" placeholder="help@chillpay.co.th" /></label></div>'
-          + '<div class="chillpay-email-body-row"><label class="chillpay-cell" style="width:100%;"><span class="chillpay-label">내용 ({{transNo}}, {{orderNo}}, {{amount}}, {{routeNo}}, {{paymentDate}}, {{mid}} 자동 치환)</span>'
-          + '<textarea name="emailBodyTemplate" rows="5" style="width:100%;max-width:600px;padding:8px;border-radius:6px;border:1px solid #d1d5db;box-sizing:border-box;">' + (c.emailBodyTemplate || '아래 거래에 대해 취소를 요청합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n').replace(/</g, '&lt;').replace(/"/g, '&quot;') + '</textarea></label></div></section>'
+          + '<label class="chillpay-cell chillpay-email-sender-cell"><span class="chillpay-label">' + t(locale, 'chillpay_label_from') + '</span><input type="email" name="emailFrom" value="' + q(c.emailFrom) + '" placeholder="' + t(locale, 'chillpay_placeholder_from') + '" /></label>'
+          + '<label class="chillpay-cell chillpay-email-sender-cell"><span class="chillpay-label">' + t(locale, 'chillpay_label_company') + '</span><input type="text" name="companyName" value="' + q(c.companyName) + '" placeholder="' + t(locale, 'chillpay_placeholder_company') + '" /></label>'
+          + '<label class="chillpay-cell chillpay-email-sender-cell"><span class="chillpay-label">' + t(locale, 'chillpay_label_contact') + '</span><input type="text" name="contactName" value="' + q(c.contactName) + '" placeholder="' + t(locale, 'chillpay_placeholder_contact') + '" /></label></div>'
+          + '<div class="chillpay-email-to-row"><label class="chillpay-cell"><span class="chillpay-label">' + t(locale, 'chillpay_label_to') + '</span><input type="email" name="emailTo" class="chillpay-email-input-same" value="' + q(c.emailTo || 'help@chillpay.co.th') + '" placeholder="help@chillpay.co.th" /></label></div>'
+          + '<div class="chillpay-email-body-row"><label class="chillpay-cell" style="width:100%;"><span class="chillpay-label">' + t(locale, 'chillpay_label_body') + '</span>'
+          + '<textarea id="chillpayEmailBody" name="emailBodyTemplate" rows="5" style="width:100%;max-width:600px;padding:8px;border-radius:6px;border:1px solid #d1d5db;box-sizing:border-box;">' + (c.emailBodyTemplate || t(locale, 'chillpay_email_default_body')).replace(/</g, '&lt;').replace(/"/g, '&quot;') + '</textarea>'
+          + '<div style="margin-top:4px;font-size:11px;"><label><input type="checkbox" id="chillpayEmailUseSample" /> ' + t(locale, 'chillpay_email_sample_label') + '</label></div>'
+          + '</label></div></section>'
+          + '<section class="chillpay-section"><h3>' + t(locale, 'smtp_title') + '</h3>'
+          + '<p class="chillpay-hint">' + t(locale, 'smtp_desc') + '</p>'
+          + '<div class="chillpay-row" style="flex-direction:column;gap:6px;">'
+          + '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">'
+          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:0 0 auto;display:flex;align-items:center;gap:6px;margin-top:0;"><span class="chillpay-label" style="margin-bottom:0;">' + t(locale, 'smtp_preset_label') + '</span><select name="smtpPreset" id="smtpPreset"><option value="gmail"' + (c.smtpHost && c.smtpHost.indexOf('smtp.gmail.com') !== -1 ? ' selected' : '') + '>' + t(locale, 'smtp_preset_gmail') + '</option><option value="naver"' + (c.smtpHost && c.smtpHost.indexOf('smtp.naver.com') !== -1 ? ' selected' : '') + '>' + t(locale, 'smtp_preset_naver') + '</option><option value="other"' + (!c.smtpHost || (c.smtpHost.indexOf('smtp.gmail.com') === -1 && c.smtpHost.indexOf('smtp.naver.com') === -1) ? ' selected' : '') + '>' + t(locale, 'smtp_preset_other') + '</option></select></label>'
+          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:1 1 auto;display:flex;align-items:center;gap:6px;margin-top:0;min-width:220px;"><span class="chillpay-label" style="margin-bottom:0;white-space:nowrap;">' + t(locale, 'smtp_label_host') + '</span><input type="text" name="smtpHost" value="' + q(c.smtpHost || '') + '" placeholder="smtp.gmail.com" style="flex:1 1 auto;min-width:160px;" /></label>'
+          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:0 0 auto;display:flex;align-items:center;gap:6px;margin-top:0;"><span class="chillpay-label" style="margin-bottom:0;">' + t(locale, 'smtp_label_port') + '</span><div style="display:flex;align-items:center;gap:8px;"><input type="number" name="smtpPort" value="' + (Number.isFinite(c.smtpPort) ? c.smtpPort : DEFAULT_SMTP_PORT) + '" min="1" max="65535" style="max-width:80px;" /><label style="display:inline-flex;align-items:center;font-size:11px;font-weight:400;color:#374151;margin-top:0;white-space:nowrap;"><input type="checkbox" name="smtpSecure" ' + (c.smtpSecure ? 'checked' : '') + ' style="margin-right:4px;" />' + t(locale, 'smtp_label_secure') + ' · ' + t(locale, 'smtp_label_secure_hint') + '</label></div></label>'
+          + '</div>'
+          + '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:4px;">'
+          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:0 0 auto;display:flex;align-items:center;gap:6px;margin-top:0;min-width:240px;"><span class="chillpay-label" style="margin-bottom:0;white-space:nowrap;">' + t(locale, 'smtp_label_user') + '</span><input type="text" name="smtpUser" value="' + q(c.smtpUser || '') + '" placeholder="user@example.com" style="flex:1 1 auto;min-width:160px;" /></label>'
+          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:0 0 auto;display:flex;align-items:center;gap:6px;margin-top:0;min-width:240px;"><span class="chillpay-label" style="margin-bottom:0;white-space:nowrap;">' + t(locale, 'smtp_label_pass') + '</span><input type="password" name="smtpPass" value="' + (c.smtpPass ? SMTP_PASSWORD_DUMMY : '') + '" autocomplete="off" style="flex:1 1 auto;min-width:160px;" /></label>'
+          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:0 0 auto;display:flex;align-items:center;gap:6px;margin-top:0;min-width:260px;"><span class="chillpay-label" style="margin-bottom:0;white-space:nowrap;">' + t(locale, 'smtp_label_test_to') + '</span><input type="email" name="testEmailTo" value="' + q(c.emailFrom || '') + '" placeholder="test@example.com" style="flex:1 1 auto;min-width:160px;" /></label>'
+          + '</div>'
+          + '</div><div class="chillpay-row" style="margin-top:8px;"><div class="chillpay-cell" style="margin-top:0;"><button type="submit" name="action" value="save_and_test" style="margin-left:0;">' + t(locale, 'smtp_btn_test') + '</button></div></div>'
+          + '<div class="chillpay-cell" style="margin-top:18px;"><button type="submit" name="action" value="save_and_test" style="margin-left:0;">' + t(locale, 'smtp_btn_test') + '</button></div></div>'
+          + '</section>'
           + '<section class="chillpay-section chillpay-sandbox-check"><label class="chillpay-checkbox-wrap"><input type="checkbox" name="useSandbox" ' + (c.useSandbox ? 'checked' : '') + ' /><span>API 호출 시 Sandbox 사용 (테스트 시 체크)</span></label>'
-          + '<p class="chillpay-checkbox-desc">체크 시 무효/환불 요청이 Sandbox로 전송됩니다. 해제 시 Production으로 전송됩니다.</p></section>'
-          + '<div class="chillpay-submit"><button type="submit">저장</button></div></form></div>';
+          + '<p class="chillpay-checkbox-desc">' + t(locale, 'chillpay_checkbox_sandbox') + '</p></section>'
+          + '<div class="chillpay-submit"><button type="submit">' + t(locale, 'common_save') + '</button></div></form></div>';
       })()}
     </main>
   </div>
@@ -3439,21 +3550,62 @@ app.post('/admin/settings/chillpay-time', requireAuth, requirePage('settings'), 
   return res.redirect('/admin/settings');
 });
 
-app.post('/admin/settings/chillpay-email', requireAuth, requirePage('settings'), (req, res) => {
+app.post('/admin/settings/chillpay-email', requireAuth, requirePage('settings'), async (req, res) => {
   const useSandbox = req.body.useSandbox === 'on' || req.body.useSandbox === true;
   const emailFrom = (req.body && req.body.emailFrom != null) ? String(req.body.emailFrom).trim() : '';
   const companyName = (req.body && req.body.companyName != null) ? String(req.body.companyName).trim() : '';
   const contactName = (req.body && req.body.contactName != null) ? String(req.body.contactName).trim() : '';
   const emailTo = (req.body && req.body.emailTo != null) ? String(req.body.emailTo).trim() : 'help@chillpay.co.th';
   const emailBodyTemplate = (req.body && req.body.emailBodyTemplate != null) ? String(req.body.emailBodyTemplate).trim() : '';
-  saveChillPayTransactionConfig({
+  const smtpHost = (req.body && req.body.smtpHost != null) ? String(req.body.smtpHost).trim() : '';
+  const smtpPort = parseInt(req.body.smtpPort, 10);
+  const smtpSecure = req.body.smtpSecure === 'on' || req.body.smtpSecure === true;
+  const smtpUser = (req.body && req.body.smtpUser != null) ? String(req.body.smtpUser).trim() : '';
+  const smtpPassRaw = (req.body && req.body.smtpPass != null) ? String(req.body.smtpPass) : '';
+  const action = (req.body && req.body.action != null) ? String(req.body.action) : '';
+  const smtpPassToSave = (smtpPassRaw && smtpPassRaw.trim() && smtpPassRaw !== SMTP_PASSWORD_DUMMY) ? smtpPassRaw : undefined;
+  const cfg = saveChillPayTransactionConfig({
     useSandbox,
     emailFrom,
     companyName,
     contactName,
     emailTo,
     emailBodyTemplate,
+    smtpHost,
+    smtpPort: Number.isFinite(smtpPort) ? smtpPort : undefined,
+    smtpSecure,
+    smtpUser,
+    smtpPass: smtpPassToSave,
   });
+  if (action === 'save_and_test') {
+    const testEmailTo = (req.body && req.body.testEmailTo != null) ? String(req.body.testEmailTo).trim() : '';
+    const backBase = '/admin/settings';
+    if (!cfg.smtpHost || !cfg.smtpPort) {
+      return res.redirect(backBase + '?testEmail=fail&reason=' + encodeURIComponent('SMTP 설정이 필요합니다 (host/port).'));
+    }
+    if (!testEmailTo) {
+      return res.redirect(backBase + '?testEmail=fail&reason=' + encodeURIComponent('테스트 수신 이메일 주소를 입력해 주세요.'));
+    }
+    try {
+      const transport = nodemailer.createTransport({
+        host: cfg.smtpHost,
+        port: cfg.smtpPort || DEFAULT_SMTP_PORT,
+        secure: !!cfg.smtpSecure,
+        auth: cfg.smtpUser ? { user: cfg.smtpUser, pass: cfg.smtpPass || '' } : undefined,
+      });
+      const fromAddr = cfg.emailFrom && cfg.emailFrom.trim() ? cfg.emailFrom.trim() : cfg.smtpUser || testEmailTo;
+      await transport.sendMail({
+        from: fromAddr,
+        to: testEmailTo,
+        subject: 'SMTP Test from PG Noti Admin',
+        text: 'This is a test email from PG Noti Admin SMTP configuration.',
+      });
+      return res.redirect(backBase + '?testEmail=ok');
+    } catch (e) {
+      const msg = e && e.message ? e.message : 'SMTP error';
+      return res.redirect(backBase + '?testEmail=fail&reason=' + encodeURIComponent(msg.slice(0, 200)));
+    }
+  }
   return res.redirect('/admin/settings');
 });
 
@@ -3527,9 +3679,9 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
     return `<div class="perm-slot"><span class="perm-slot-name" title="${name}">${name}</span><label class="perm-slot-cb"><input type="checkbox" name="perm_${k}" /></label></div>`;
   }).join('');
   const addFormPermBlock = `<div class="perm-grid-2x9">${addFormPermSlots}</div>`;
-  const permHeaderCell = '<th class="perm-header-col">페이지 접근 권한 (OPERATOR)</th>';
+  const permHeaderCell = '<th class="perm-header-col">' + t(locale, 'members_perm_header') + '</th>';
   const confirmDel = (t(locale, 'members_confirm_delete') || '삭제하시겠습니까?').replace(/'/g, "\\'");
-  const confirmPw = '비밀번호를 초기(아이디+1!)로 초기화합니다. 진행할까요?'.replace(/'/g, "\\'");
+  const confirmPw = (t(locale, 'members_confirm_reset_pw') || '비밀번호를 초기(아이디+1!)로 초기화합니다. 진행할까요?').replace(/'/g, "\\'");
   const confirmOtp = 'OTP를 초기화합니다. 해당 계정은 재등록 후 사용 가능합니다. 진행할까요?'.replace(/'/g, "\\'");
   const rows = list
     .map((mem) => {
@@ -3551,19 +3703,19 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
       }).join('');
       const permCell = mem.role === ROLES.OPERATOR
         ? `<td class="perm-td"><div class="perm-grid-2x9">${permGridCells}</div></td>`
-        : `<td class="perm-td perm-td-full">전체</td>`;
+        : `<td class="perm-td perm-td-full">${t(locale, 'members_perm_full')}</td>`;
       const confirmPerm = (t(locale, 'members_confirm_update_permissions') || '페이지 접근 권한을 수정하시겠습니까?').replace(/'/g, "\\'");
       const permForm = mem.role === ROLES.OPERATOR && canEditPerm
-        ? `<form id="perm-form-${mem.id}" method="post" action="/admin/members/update-permissions" style="display:inline;" onsubmit="return confirm('${confirmPerm}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-update-perm">권한</button></form>`
+        ? `<form id="perm-form-${mem.id}" method="post" action="/admin/members/update-permissions" style="display:inline;" onsubmit="return confirm('${confirmPerm}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-update-perm">${t(locale, 'members_btn_perm')}</button></form>`
         : '';
-      const resetPwBtn = canReset ? `<form method="post" action="/admin/members/reset-password" style="display:inline;" onsubmit="return confirm('${confirmPw}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-reset-pw">비번</button></form>` : '-';
+      const resetPwBtn = canReset ? `<form method="post" action="/admin/members/reset-password" style="display:inline;" onsubmit="return confirm('${confirmPw}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-reset-pw">${t(locale, 'members_btn_reset_pw')}</button></form>` : '-';
       const resetOtpBtn = canReset ? `<form method="post" action="/admin/members/reset-otp" style="display:inline;" onsubmit="return confirm('${confirmOtp}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-reset-otp">OTP</button></form>` : '-';
       const initCell = canReset ? `<td class="init-cell">${resetPwBtn} ${resetOtpBtn}</td>` : '<td class="init-cell">-</td>';
       const memberDataAttr = canEditInfo ? (() => {
         const o = { id: mem.id, name: mem.name || '', country: mem.country || '', userId: mem.userId || '', email: mem.email || '', birthDate: mem.birthDate || '', role: mem.role || '', perms: mem.role === ROLES.OPERATOR ? (OPERATOR_PERMISSIONS[mem.userId] || []) : [], otpRequired: !!mem.otpRequired, canAssignPermission: !!mem.canAssignPermission };
         return JSON.stringify(o).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       })() : '';
-      const editInfoBtn = canEditInfo ? `<button type="button" class="btn-edit-info" data-member="${memberDataAttr}" title="상단 폼에 불러와 수정">정보</button>` : '-';
+      const editInfoBtn = canEditInfo ? `<button type="button" class="btn-edit-info" data-member="${memberDataAttr}" title="${t(locale, 'members_edit_account')}">${t(locale, 'common_edit')}</button>` : '-';
       const delBtn = canDelete ? `<form method="post" action="/admin/members/delete" style="display:inline;" onsubmit="return confirm('${confirmDel}');"><input type="hidden" name="id" value="${mem.id}" /><button type="submit" class="btn-del">${t(locale, 'delete_member')}</button></form>` : '-';
       return `<tr>
         <td>${(mem.name || '').replace(/</g, '&lt;')}</td>
@@ -3658,7 +3810,7 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'account_manage_title')}</h1>
-        <p style="font-size:13px;color:#555;">${t(locale, 'account_list_desc')}</p>
+        <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'account_list_desc')}</p>
         ${(isSuper || cur.role === ROLES.ADMIN) ? `
         <h2 id="form-title" data-initial-title="${(t(locale, 'add_member') || '회원 추가').replace(/"/g, '&quot;')}">${t(locale, 'add_member')}</h2>
         <form id="member-form" method="post" action="/admin/members/save" class="add-form-grid" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
@@ -3671,14 +3823,14 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
           ${addFormRoleBlock}
           ${isSuper ? '<label><input type="checkbox" name="canAssignPermission" id="m-canAssignPermission" /> 운영자 권한 부여 가능 (ADMIN용)</label><label><input type="checkbox" name="otpRequired" id="m-otpRequired" /> OTP 로그인 필수 지정</label>' : ''}
           <label style="grid-column:1/-1;">${t(locale, 'page_permissions')} (OPERATOR만 해당) <div id="add-form-perms">${addFormPermBlock}</div></label>
-          <label style="grid-column:1/-1;"><button type="submit" class="btn-add">${t(locale, 'members_save')}</button> <button type="button" id="btn-cancel-edit" style="display:none;padding:10px 18px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px;margin-left:8px;">취소(새로 등록)</button></label>
+          <label style="grid-column:1/-1;"><button type="submit" class="btn-add">${t(locale, 'members_save')}</button> <button type="button" id="btn-cancel-edit" style="display:none;padding:10px 18px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px;margin-left:8px;">${t(locale, 'members_cancel_new_register')}</button></label>
         </form>
         ` : ''}
       </div>
       <div class="card">
         <h2>${t(locale, 'registered_accounts')}</h2>
         <div class="members-table-wrap"><table>
-          <thead><tr><th>${t(locale, 'member_name')}</th><th>${t(locale, 'member_country')}</th><th>${t(locale, 'member_user_id')}</th><th>${t(locale, 'member_email')}</th><th>${t(locale, 'member_birth_date')}</th><th>역할</th>${permHeaderCell}<th>초기화</th><th>관리</th></tr></thead>
+          <thead><tr><th>${t(locale, 'member_name')}</th><th>${t(locale, 'member_country')}</th><th>${t(locale, 'member_user_id')}</th><th>${t(locale, 'member_email')}</th><th>${t(locale, 'member_birth_date')}</th><th>${t(locale, 'members_role')}</th>${permHeaderCell}<th>${t(locale, 'members_init')}</th><th>${t(locale, 'members_manage')}</th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
       </div>
@@ -3691,7 +3843,7 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
       var btnCancel = document.getElementById('btn-cancel-edit');
       var formTitle = document.getElementById('form-title');
       if (!form) return;
-      var permKeys = ['merchants','pg_logs','internal_logs','dev_internal_logs','pg_result','internal_result','dev_result','traffic_analysis','internal_targets','internal_noti_settings','dev_internal_noti_settings','test_config','test_run','test_history','account','settings','account_reset','cancel_refund'];
+      var permKeys = ['merchants','pg_logs','internal_logs','dev_internal_logs','pg_result','internal_result','dev_result','traffic_analysis','internal_targets','internal_noti_settings','dev_internal_noti_settings','test_config','test_run','test_history','account','settings','account_reset','cancel_refund','mail_logs'];
       function parseDataAttr(s) {
         if (!s) return null;
         try { return JSON.parse(s.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')); } catch(e) { return null; }
@@ -3720,19 +3872,19 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
           if (cb) cb.checked = perms.indexOf(k) !== -1;
         });
         if (btnCancel) btnCancel.style.display = 'inline-block';
-        if (formTitle) formTitle.textContent = '계정 수정: ' + (m.userId || '');
+        if (formTitle) formTitle.textContent = t(locale, 'members_edit_account') + ': ' + (m.userId || '');
         form.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
       function clearEditMode() {
         if (editId) editId.value = '';
         if (btnCancel) btnCancel.style.display = 'none';
-        if (formTitle) formTitle.textContent = formTitle.getAttribute('data-initial-title') || '회원 추가';
+        if (formTitle) formTitle.textContent = formTitle.getAttribute('data-initial-title') || t(locale, 'add_member');
         form.reset();
         permKeys.forEach(function(k){ var cb = form.querySelector('[name="perm_'+k+'"]'); if (cb) cb.checked = false; });
       }
       document.querySelectorAll('.btn-edit-info').forEach(function(btn){
         btn.addEventListener('click', function(){
-          if (!confirm('수정 하시겠습니까?')) return;
+          if (!confirm('${(t(locale, 'members_confirm_edit') || '').replace(/'/g, "\\'")}')) return;
           var m = parseDataAttr(this.getAttribute('data-member'));
           if (m) fillForm(m);
         });
@@ -3981,12 +4133,12 @@ app.get('/admin/account-reset', requireAuth, requirePage('account_reset'), (req,
   const pwRows = pwRequests.map((r) => {
     const mem = getMemberByUserId(r.userId);
     const name = mem ? mem.name : '-';
-    return `<tr><td>${esc(r.userId)}</td><td>${esc(name)}</td><td>${esc(r.requestedAt)}</td><td><form method="post" action="/admin/account-reset/approve" style="display:inline;" onsubmit="return confirm('${confirmApprove}');"><input type="hidden" name="userId" value="${esc(r.userId).replace(/"/g, '&quot;')}" /><input type="hidden" name="type" value="password" /><button type="submit" class="btn-approve">승인</button></form></td></tr>`;
+    return `<tr><td>${esc(r.userId)}</td><td>${esc(name)}</td><td>${esc(r.requestedAt)}</td><td><form method="post" action="/admin/account-reset/approve" style="display:inline;" onsubmit="return confirm('${confirmApprove}');"><input type="hidden" name="userId" value="${esc(r.userId).replace(/"/g, '&quot;')}" /><input type="hidden" name="type" value="password" /><button type="submit" class="btn-approve">${t(locale, 'members_approve')}</button></form></td></tr>`;
   }).join('');
   const otpRows = otpRequests.map((r) => {
     const mem = getMemberByUserId(r.userId);
     const name = mem ? mem.name : '-';
-    return `<tr><td>${esc(r.userId)}</td><td>${esc(name)}</td><td>${esc(r.requestedAt)}</td><td><form method="post" action="/admin/account-reset/approve" style="display:inline;" onsubmit="return confirm('${confirmApprove}');"><input type="hidden" name="userId" value="${esc(r.userId).replace(/"/g, '&quot;')}" /><input type="hidden" name="type" value="otp" /><button type="submit" class="btn-approve">승인</button></form></td></tr>`;
+    return `<tr><td>${esc(r.userId)}</td><td>${esc(name)}</td><td>${esc(r.requestedAt)}</td><td><form method="post" action="/admin/account-reset/approve" style="display:inline;" onsubmit="return confirm('${confirmApprove}');"><input type="hidden" name="userId" value="${esc(r.userId).replace(/"/g, '&quot;')}" /><input type="hidden" name="type" value="otp" /><button type="submit" class="btn-approve">${t(locale, 'members_approve')}</button></form></td></tr>`;
   }).join('');
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
@@ -4032,15 +4184,15 @@ app.get('/admin/account-reset', requireAuth, requirePage('account_reset'), (req,
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'nav_account_reset')}</h1>
-        <p style="font-size:13px;color:#555;">비번 초기화·OTP 초기화 요청을 승인할 수 있습니다.</p>
+        <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'account_reset_desc')}</p>
       </div>
       <div class="card">
-        <h2>비번 초기화 요청</h2>
-        ${pwRequests.length === 0 ? '<p>요청이 없습니다.</p>' : `<table><thead><tr><th>아이디</th><th>성명</th><th>요청 시각</th><th>작업</th></tr></thead><tbody>${pwRows}</tbody></table>`}
+        <h2>${t(locale, 'account_reset_pw_title')}</h2>
+        ${pwRequests.length === 0 ? '<p>' + t(locale, 'account_reset_no_requests') + '</p>' : `<table><thead><tr><th>${t(locale, 'member_user_id')}</th><th>${t(locale, 'member_name')}</th><th>${t(locale, 'account_reset_th_requested')}</th><th>${t(locale, 'account_reset_th_action')}</th></tr></thead><tbody>${pwRows}</tbody></table>`}
       </div>
       <div class="card">
-        <h2>OTP 초기화 요청</h2>
-        ${otpRequests.length === 0 ? '<p>요청이 없습니다.</p>' : `<table><thead><tr><th>아이디</th><th>성명</th><th>요청 시각</th><th>작업</th></tr></thead><tbody>${otpRows}</tbody></table>`}
+        <h2>${t(locale, 'account_reset_otp_title')}</h2>
+        ${otpRequests.length === 0 ? '<p>' + t(locale, 'account_reset_no_requests') + '</p>' : `<table><thead><tr><th>${t(locale, 'member_user_id')}</th><th>${t(locale, 'member_name')}</th><th>${t(locale, 'account_reset_th_requested')}</th><th>${t(locale, 'account_reset_th_action')}</th></tr></thead><tbody>${otpRows}</tbody></table>`}
       </div>
     </main>
   </div>
@@ -4079,21 +4231,21 @@ app.get('/admin/forgot', (req, res) => {
   const locale = getLocale(req);
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
-<head><meta charset="UTF-8"/><title>비밀번호 초기화 요청</title>
+<head><meta charset="UTF-8"/><title>${t(locale, 'forgot_title')}</title>
 <style>body{font-family:system-ui;margin:0;background:#111827;color:#f9fafb;}.c{max-width:400px;margin:60px auto;padding:24px;}.card{background:#1f2937;padding:24px;border-radius:10px;}label{display:block;margin-top:12px;}input{width:100%;padding:10px;box-sizing:border-box;border-radius:6px;border:1px solid #4b5563;background:#111827;color:#f9fafb;}button{margin-top:16px;padding:10px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;width:100%;}a{color:#93c5fd;}</style>
 </head>
 <body>
   <div class="c">
     <div class="card">
-      <h1>비밀번호 초기화 요청</h1>
-      <p style="font-size:13px;color:#9ca3af;">가입 시 등록한 이메일, 성명, 생년월일이 일치하면 요청이 접수됩니다. 관리자 승인 후 초기 비밀번호(아이디+1!)로 로그인하여 새 비밀번호를 설정하세요.</p>
+      <h1>${t(locale, 'forgot_title')}</h1>
+      <p style="font-size:13px;color:#9ca3af;">${t(locale, 'forgot_desc')}</p>
       <form method="post" action="/admin/forgot">
-        <label>이메일 <input type="email" name="email" required /></label>
-        <label>성명 <input type="text" name="name" required /></label>
-        <label>생년월일 <input type="date" name="birthDate" /></label>
-        <button type="submit">요청</button>
+        <label>${t(locale, 'member_email')} <input type="email" name="email" required /></label>
+        <label>${t(locale, 'member_name')} <input type="text" name="name" required /></label>
+        <label>${t(locale, 'member_birth_date')} <input type="date" name="birthDate" /></label>
+        <button type="submit">${t(locale, 'forgot_btn')}</button>
       </form>
-      <p style="margin-top:16px;"><a href="/admin/login">로그인</a></p>
+      <p style="margin-top:16px;"><a href="/admin/login">${t(locale, 'login_submit')}</a></p>
     </div>
   </div>
 </body>
@@ -4104,15 +4256,16 @@ app.post('/admin/forgot', (req, res) => {
   const { email, name, birthDate } = req.body || {};
   MEMBERS = loadMembers();
   const mem = MEMBERS.find((m) => (m.email || '').trim().toLowerCase() === (email || '').trim().toLowerCase() && (m.name || '').trim() === (name || '').trim() && (m.birthDate || '').trim() === (birthDate || '').trim());
+  const locale = getLocale(req);
   if (!mem) {
-    return res.status(400).send('일치하는 회원 정보가 없습니다. 이메일, 성명, 생년월일을 확인하세요.');
+    return res.status(400).send(t(locale, 'forgot_no_match'));
   }
   let reqList = loadPasswordResetRequests();
   if (!reqList.find((r) => r.userId === mem.userId && (r.type || 'password') === 'password')) {
     reqList.push({ userId: mem.userId, requestedAt: new Date().toISOString(), type: 'password' });
     savePasswordResetRequests(reqList);
   }
-  return res.send('요청이 접수되었습니다. 관리자 승인 후 초기 비밀번호(아이디+1!)로 로그인하여 새 비밀번호를 설정하세요. <a href="/admin/login">로그인</a>');
+  return res.send(t(locale, 'forgot_success') + ' <a href="/admin/login">' + t(locale, 'login_submit') + '</a>');
 });
 
 // 가맹점 목록 + 등록 폼
@@ -4266,7 +4419,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       <div class="content">
     <div class="card">
       <h1>${t(locale, 'merchants_title')}</h1>
-      <p style="font-size:13px;color:#555;">${t(locale, 'merchants_desc')}</p>
+      <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'merchants_desc')}</p>
       <h2>${t(locale, 'merchants_register')}</h2>
       <form id="merchant-form" method="post" action="/admin/merchants" onsubmit="return confirm('${confirmSaveMsg}');">
         <input type="hidden" name="originalMerchantId" id="originalMerchantId" value="" />
@@ -4285,22 +4438,22 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           PG callback용 번호 (1~50, /noti/callback/번호)
           <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
             <select name="routeCallbackKey" style="width:140px;">
-              <option value="">번호 선택 (1~50)</option>
+              <option value="">${t(locale, 'merchants_select_no')}</option>
               ${callbackNumberOptions}
             </select>
-            <input type="text" id="callback-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;" placeholder="선택 시 전체 주소가 표시됩니다." />
-            <button type="button" id="copy-callback-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;">복사</button>
+            <input type="text" id="callback-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;" placeholder="${t(locale, 'merchants_url_placeholder')}" />
+            <button type="button" id="copy-callback-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;">${t(locale, 'merchants_btn_copy')}</button>
           </div>
         </label>
         <label>
           PG result용 번호 (1~50, /noti/result/번호)
           <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
             <select name="routeResultKey" style="width:140px;">
-              <option value="">번호 선택 (1~50)</option>
+              <option value="">${t(locale, 'merchants_select_no')}</option>
               ${resultNumberOptions}
             </select>
-            <input type="text" id="result-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;" placeholder="선택 시 전체 주소가 표시됩니다." />
-            <button type="button" id="copy-result-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;">복사</button>
+            <input type="text" id="result-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;" placeholder="${t(locale, 'merchants_url_placeholder')}" />
+            <button type="button" id="copy-result-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;">${t(locale, 'merchants_btn_copy')}</button>
           </div>
         </label>
         <label>
@@ -4316,7 +4469,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
               테스트결과페이지 넣기
             </label>
           </div>
-          <div style="margin-top:4px;font-size:11px;color:#6b7280;">체크 시 result URL 입력란에 <code style="background:#f3f4f6;padding:1px 4px;border-radius:4px;">https://noti.icopay.net/admin/test-pay/return</code> 이 자동으로 들어갑니다.</div>
+          <div style="margin-top:4px;font-size:11px;color:#6b7280;">${t(locale, 'merchants_result_url_hint')} <code style="background:#f3f4f6;padding:1px 4px;border-radius:4px;">https://noti.icopay.net/admin/test-pay/return</code></div>
         </label>
         <label>
           RouteNo (전산용 루트번호, 예: 7)
@@ -4334,11 +4487,11 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <label>
           노티 방식 (가맹점 수신 형식)
           <select name="relayFormat">
-            <option value="raw">일반 (피지 원문 그대로)</option>
+            <option value="raw">${t(locale, 'merchants_relay_format_raw')}</option>
             <option value="json">JSON</option>
             <option value="form">FORM (application/x-www-form-urlencoded)</option>
           </select>
-          <span style="font-size:12px;color:#6b7280;display:block;margin-top:4px;">선택하지 않으면 일반 형태로 자동 구성됩니다.</span>
+          <span style="font-size:12px;color:#6b7280;display:block;margin-top:4px;">${t(locale, 'merchants_relay_format_hint')}</span>
         </label>
         <label>
           <input type="checkbox" name="enableInternal" checked />
@@ -4354,29 +4507,29 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
     <div class="card merchants-table-wrap">
       <h2>${t(locale, 'merchants_list')}</h2>
       <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:12px;">
-        <span style="font-size:13px;color:#374151;">정렬:</span>
-        <a href="/admin/merchants?sort=recent" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'recent' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'recent' ? '#fff' : '#374151'};" title="최근 등록순">최신등록 (최근)</a>
-        <a href="/admin/merchants?sort=past" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'past' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'past' ? '#fff' : '#374151'};" title="과거 등록순">최신등록 (과거)</a>
+        <span style="font-size:13px;color:#374151;">${t(locale, 'merchants_sort_label')}:</span>
+        <a href="/admin/merchants?sort=recent" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'recent' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'recent' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_recent')}">${t(locale, 'merchants_sort_recent')}</a>
+        <a href="/admin/merchants?sort=past" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'past' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'past' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_past')}">${t(locale, 'merchants_sort_past')}</a>
         <a href="/admin/merchants?sort=route_asc" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'route_asc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'route_asc' ? '#fff' : '#374151'};" title="Route 번호 오름차순">Route 번호 (작은수)</a>
-        <a href="/admin/merchants?sort=route_desc" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'route_desc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'route_desc' ? '#fff' : '#374151'};" title="Route 번호 내림차순">Route 번호 (큰수)</a>
-        <a href="/admin/merchants?sort=target" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'target' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'target' ? '#fff' : '#374151'};" title="동일 등록대상끼리 묶어서 표시">등록대상</a>
+        <a href="/admin/merchants?sort=route_desc" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'route_desc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'route_desc' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_route_desc')}">${t(locale, 'merchants_sort_route_desc')}</a>
+        <a href="/admin/merchants?sort=target" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'target' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'target' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_target')}">${t(locale, 'merchants_sort_target')}</a>
         <a href="/admin/merchants/export?sort=${sortType}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:#166534;color:#fff;margin-left:8px;" download>Excel 내보내기</a>
       </div>
       <table>
         <thead>
           <tr>
-            <th style="width:90px;">가맹점</th>
+            <th style="width:90px;">${t(locale, 'cr_th_merchant')}</th>
             <th class="cell-url">PG Callurl</th>
             <th class="cell-url">PG Reurl</th>
             <th class="cell-url">Origin CBurl</th>
             <th class="cell-url">Origin Reurl</th>
             <th style="width:70px;">Route</th>
             <th style="width:90px;">CustomerId</th>
-            <th style="width:100px;">등록대상</th>
+            <th style="width:100px;">${t(locale, 'merchants_th_target')}</th>
             <th style="width:50px;">PG</th>
-            <th style="width:50px;">전산</th>
-            <th style="width:50px;">개발</th>
-            <th class="actions-cell" style="width:80px;">관리</th>
+            <th style="width:50px;">${t(locale, 'merchants_internal')}</th>
+            <th style="width:50px;">${t(locale, 'common_dev')}</th>
+            <th class="actions-cell" style="width:80px;">${t(locale, 'members_manage')}</th>
           </tr>
         </thead>
         <tbody>
@@ -4435,7 +4588,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           el.select();
           document.execCommand('copy');
         }
-        alert('복사되었습니다.');
+        alert('${(t(locale, 'merchants_copied') || '').replace(/'/g, "\\'")}');
       }
 
       if (cbSelect) cbSelect.addEventListener('change', updatePreviews);
@@ -4466,7 +4619,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 
       if (form) {
         form.addEventListener('submit', function (e) {
-          var ok = window.confirm('설정을 저장하시겠습니까?');
+          var ok = window.confirm('${(t(locale, 'merchants_confirm_save_config') || '').replace(/'/g, "\\'")}');
           if (!ok) {
             e.preventDefault();
           }
@@ -4521,7 +4674,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       if (editButtons && editButtons.length > 0) {
         Array.prototype.forEach.call(editButtons, function (btn) {
           btn.addEventListener('click', function () {
-            if (!confirm('수정 하시겠습니까?')) return;
+            if (!confirm('${(t(locale, 'members_confirm_edit') || '').replace(/'/g, "\\'")}')) return;
             applyEdit(btn);
           });
         });
@@ -4573,17 +4726,17 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
     return s;
   };
   const header = [
-    '가맹점 ID',
+    t(locale, 'merchants_id'),
     'PG Callback URL',
     'PG Result URL',
     'Callback URL',
     'Result URL',
     'Route No',
     'Internal CustomerId',
-    '등록대상',
-    '릴레이',
-    '전산',
-    '개발',
+    t(locale, 'merchants_th_target'),
+    t(locale, 'merchants_relay'),
+    t(locale, 'merchants_internal'),
+    t(locale, 'common_dev'),
   ];
   const lines = ['\uFEFF' + header.map(escapeCsv).join(',')];
   for (const [id, m] of sortedEntries) {
@@ -4724,25 +4877,25 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
   const q = req.query || {};
   const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
   const resendKind = (q.resendKind || 'payment').toString().toLowerCase();
-  const resendOkLabel = resendKind === 'cancel' ? '취소 재전송이 완료되었습니다.' : '결제 재전송이 완료되었습니다.';
-  const resendFailLabel = resendKind === 'cancel' ? '취소 재전송 실패' : '결제 재전송 실패';
+  const resendOkLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_ok') : t(locale, 'pg_logs_resend_pay_ok');
+  const resendFailLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_fail') : t(locale, 'pg_logs_resend_pay_fail');
   const resendMsg =
     q.resend === 'ok'
       ? '<div class="alert alert-ok">' + resendOkLabel + '</div>'
       : q.resend === 'fail' && q.reason
       ? '<div class="alert alert-fail">' + resendFailLabel + ': ' + escQ(q.reason) + '</div>'
       : q.void === 'ok'
-      ? '<div class="alert alert-ok">무효 요청이 완료되었습니다.' + (q.noti === 'partial' ? ' (노티 일부 실패)' : '') + '</div>'
+      ? '<div class="alert alert-ok">' + t(locale, 'cr_alert_void_ok') + (q.noti === 'partial' ? ' ' + t(locale, 'cr_alert_noti_partial') : '') + '</div>'
       : q.void === 'fail' && q.reason
-      ? '<div class="alert alert-fail">무효 요청 실패: ' + escQ(q.reason) + '</div>'
+      ? '<div class="alert alert-fail">' + t(locale, 'cr_alert_void_fail') + ': ' + escQ(q.reason) + '</div>'
       : q.refund === 'ok'
-      ? '<div class="alert alert-ok">환불 요청이 완료되었습니다.' + (q.noti === 'partial' ? ' (노티 일부 실패)' : '') + '</div>'
+      ? '<div class="alert alert-ok">' + t(locale, 'cr_alert_refund_ok') + (q.noti === 'partial' ? ' ' + t(locale, 'cr_alert_noti_partial') : '') + '</div>'
       : q.refund === 'fail' && q.reason
-      ? '<div class="alert alert-fail">환불 요청 실패: ' + escQ(q.reason) + '</div>'
+      ? '<div class="alert alert-fail">' + t(locale, 'cr_alert_refund_fail') + ': ' + escQ(q.reason) + '</div>'
       : q.err === 'invalid'
-      ? '<div class="alert alert-fail">잘못된 요청입니다.</div>'
+      ? '<div class="alert alert-fail">' + t(locale, 'err_bad_request') + '</div>'
       : q.err === 'no_target' || q.err === 'no_body'
-      ? '<div class="alert alert-fail">' + (q.reason ? escQ(q.reason) : (q.err === 'no_target' ? '가맹점 URL 없음' : '노티 본문 없음')) + '</div>'
+      ? '<div class="alert alert-fail">' + (q.reason ? escQ(q.reason) : (q.err === 'no_target' ? t(locale, 'relay_no_url') : t(locale, 'relay_no_body'))) + '</div>'
       : '';
   const clientIp =
     (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
@@ -4767,13 +4920,13 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       const relayFailReason = (log.relayFailReason || '').trim();
       const relayLabel =
         relayStatus === 'ok'
-          ? '성공'
+          ? t(locale, 'status_ok')
           : relayStatus === 'fail'
-          ? '실패'
+          ? t(locale, 'status_fail')
           : relayStatus === 'skip' && !relayHasTarget
-          ? '노티없음'
+          ? t(locale, 'status_noti_none')
           : relayStatus === 'skip'
-          ? '미전송'
+          ? t(locale, 'status_skip')
           : relayStatus;
       // 성공 시: JSON=녹색, FORM=노란색, 일반(raw)=파란색 (relayFormatUsed 또는 구 relaySentAsJson 호환)
       const formatUsed = log.relayFormatUsed || (log.relaySentAsJson === true ? 'json' : 'raw');
@@ -4788,26 +4941,24 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
       const canResend = (relayStatus === 'fail' || relayStatus === 'ok') && relayHasTarget && (log.body || log.rawBody);
       const resendKindVal = isCancelNotiBody(body) ? 'cancel' : 'payment';
-      const resendKindLabel = resendKindVal === 'cancel' ? '취소' : '결제';
+      const resendKindLabel = resendKindVal === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
       const resendBtn = canResend
-        ? `<div class="resend-wrap"><span class="resend-kind-label" style="font-size:11px;color:#6b7280;margin-right:4px;">${resendKindLabel}</span><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('일반(원문) 형식으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><button type="submit" class="btn-resend">일반</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('JSON 형식으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('FORM 형식으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form">FORM</button></form></div>`
+        ? `<div class="resend-wrap"><span class="resend-kind-label" style="font-size:11px;color:#6b7280;margin-right:4px;">${resendKindLabel}</span><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_plain') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><button type="submit" class="btn-resend">${t(locale, 'pg_logs_btn_plain')}</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_json') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_form') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form">FORM</button></form></div>`
         : !relayHasTarget
-        ? '<span class="label-none">노티없음</span>'
+        ? '<span class="label-none">' + t(locale, 'status_noti_none') + '</span>'
         : '-';
       const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
-      const isSuccess = body.PaymentStatus === 0 || body.PaymentStatus === '0' || body.PaymentStatus === 1 || body.PaymentStatus === '1'
-        || (body.paymentStatus && String(body.paymentStatus).toLowerCase() === 'success')
-        || body.status === 1;
+      const isSuccess = isSuccessPaymentBody(body);
       const baseDate = body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
       const windowType = txId && isSuccess && log.merchantId && MERCHANTS.get(log.merchantId) ? getVoidRefundWindow(baseDate) : null;
       const cfg = loadChillPayTransactionConfig();
       const useSandbox = cfg.useSandbox;
       const voidRefundBtns = windowType === 'void_auto'
-        ? `<form method="post" action="/admin/logs/void-request" style="display:inline;" onsubmit="return confirm('ChillPay에 무효 요청 후 가맹점/전산에 무효 노티를 보냅니다. 진행할까요?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-void">무효 요청</button></form>`
+        ? `<form method="post" action="/admin/logs/void-request" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_void_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-void">${t(locale, 'cr_btn_void_request')}</button></form>`
         : windowType === 'refund'
-        ? `<form method="post" action="/admin/logs/refund-request" style="display:inline;" onsubmit="return confirm('ChillPay에 환불 요청 후 가맹점/전산에 환불 노티를 보냅니다. 진행할까요?');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-refund">환불 요청</button></form>`
+        ? `<form method="post" action="/admin/logs/refund-request" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_refund_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-refund">${t(locale, 'cr_btn_refund_request')}</button></form>`
         : windowType === 'void_manual'
-        ? '<span class="label-manual">수동만</span>'
+        ? '<span class="label-manual">' + t(locale, 'pg_logs_label_manual') + '</span>'
         : '';
       return `<tr>
         <td class="col-date">${esc(dt.date)}</td>
@@ -4898,20 +5049,20 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       <div class="card">
       ${resendMsg}
       <h1>${t(locale, 'pg_logs_title')} (${liveLogs.length})</h1>
-      <p style="font-size:13px;color:#555;">PG에서 우리 서버로 들어온 노티 전문을 그대로 확인할 수 있습니다. ㅣ 재전송: 일반 · JSON · FORM (한 줄). 성공 <span style="color:#2563eb;font-weight:600;">파란색</span>=일반, <span style="color:#059669;font-weight:600;">녹색</span>=JSON, <span style="color:#ca8a04;font-weight:600;">노란색</span>=FORM</p>
+      <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'pg_logs_desc_full')}</p>
       <table>
         <colgroup><col class="col-date" /><col class="col-time" /><col class="col-narrow" /><col class="col-narrow" /><col class="col-status" /><col class="col-json" /><col class="col-json" /><col class="col-action" /><col class="col-void-refund" /></colgroup>
         <thead>
           <tr>
-            <th>수신일</th>
-            <th>수신시각</th>
+            <th>${t(locale, 'pg_logs_th_received_date')}</th>
+            <th>${t(locale, 'pg_logs_th_received_time')}</th>
             <th>${t(locale, 'pg_logs_route_key')}</th>
             <th>${t(locale, 'pg_logs_merchant_id')}</th>
-            <th>가맹점 수신</th>
+            <th>${t(locale, 'pg_logs_th_merchant_recv')}</th>
             <th>${t(locale, 'pg_logs_json_callback')}</th>
             <th>${t(locale, 'pg_logs_json_result')}</th>
-            <th>재전송</th>
-            <th>무효/환불</th>
+            <th>${t(locale, 'pg_logs_th_resend')}</th>
+            <th>${t(locale, 'pg_logs_th_void_refund')}</th>
           </tr>
         </thead>
         <tbody>
@@ -4937,10 +5088,9 @@ app.post('/admin/logs/void-request', requireAuth, requirePageAny(['pg_logs', 'pg
   const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
   const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
   if (!txId) return res.redirect('/admin/logs?void=fail&reason=' + encodeURIComponent('TransactionId 없음'));
-  const cfg = loadChillPayTransactionConfig();
   const result = await chillPayRequestVoid(txId, false);
   if (!result.success) return res.redirect('/admin/logs?void=fail&reason=' + encodeURIComponent(result.error || '무효 요청 실패'));
-  const sendResult = await sendVoidOrRefundNoti(log, 'void');
+  const sendResult = await sendVoidOrRefundNoti(log, 'void', 'manual');
   markVoidNotiSent(txId);
   return res.redirect('/admin/logs?void=ok' + (sendResult.success ? '' : '&noti=partial'));
 });
@@ -4954,10 +5104,9 @@ app.post('/admin/logs/refund-request', requireAuth, requirePageAny(['pg_logs', '
   const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
   const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
   if (!txId) return res.redirect('/admin/logs?refund=fail&reason=' + encodeURIComponent('TransactionId 없음'));
-  const cfg = loadChillPayTransactionConfig();
   const result = await chillPayRequestRefund(txId, false);
   if (!result.success) return res.redirect('/admin/logs?refund=fail&reason=' + encodeURIComponent(result.error || '환불 요청 실패'));
-  const sendResult = await sendVoidOrRefundNoti(log, 'refund');
+  const sendResult = await sendVoidOrRefundNoti(log, 'refund', 'manual');
   markRefundNotiSent(txId);
   return res.redirect('/admin/logs?refund=ok' + (sendResult.success ? '' : '&noti=partial'));
 });
@@ -5203,14 +5352,14 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
   const locale = getLocale(req);
   const adminUser = req.session.adminUser || '';
   const q = req.query || {};
-  const sortBy = (q.sort || 'date').toString();
+  const sortBy = (q.sort || 'time').toString();
   const sortDir = (q.sortDir || 'desc').toString().toLowerCase() === 'asc' ? 'asc' : 'desc';
   const searchKw = (q.search || '').toString().trim();
   const searchField = (q.searchField || 'all').toString();
   let dateFrom = (q.dateFrom || '').toString().trim();
   let dateTo = (q.dateTo || '').toString().trim();
   const period = (q.period || '').toString();
-  const successOnly = (q.successOnly || '') === '1' || String(q.successOnly || '').toLowerCase() === 'true';
+  const statusFilter = (q.statusFilter || '').toString();
   const perPage = Math.max(10, Math.min(200, parseInt(q.perPage, 10) || 25));
   const page = Math.max(1, parseInt(q.page, 10) || 1);
   // 거래 내역 = PG에서 수신한 모든 노티(성공/실패/취소). env 쿼리로 PRODUCTION/SANDBOX 선택.
@@ -5269,10 +5418,19 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
       return !Number.isNaN(t) && t >= fromTs && t < toTs;
     });
   }
-  if (successOnly) {
+  if (statusFilter) {
     list = list.filter((log) => {
       const body = parseNotiBody(log);
-      return isSuccessPaymentBody(body);
+      const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+      const isSuccess = isSuccessPaymentBody(body);
+      const isCancel = isDefinitelyCancelPaymentStatus(ps);
+      const txId = body.TransactionId ?? body.transactionId ?? '';
+      const isVoidOrRefunded = txId && (hasVoidNotiSent(txId) || hasRefundNotiSent(txId));
+      if (statusFilter === 'success') return !!isSuccess;
+      if (statusFilter === 'fail') return !isSuccess && !isCancel && !isVoidOrRefunded;
+      if (statusFilter === 'void') return !!isVoidOrRefunded;
+      if (statusFilter === 'other') return !!isCancel || (!isSuccess && !isVoidOrRefunded && !isCancel);
+      return true;
     });
   }
 
@@ -5306,6 +5464,14 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
     });
   }
   const rev = sortDir === 'asc' ? 1 : -1;
+  const getReceivedTime = (log) => (Date.parse(log.receivedAtIso || log.receivedAt) || 0);
+  const getReceivedDate = (log) => {
+    const t = getReceivedTime(log);
+    if (!t) return 0;
+    const d = new Date(t);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  };
   if (sortBy === 'route') {
     list.sort((a, b) => {
       const ma = a.merchantId ? MERCHANTS.get(a.merchantId) : null;
@@ -5341,8 +5507,11 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
       if (c !== 0) return c;
       return ((Date.parse(b.receivedAtIso || b.receivedAt) || 0) - (Date.parse(a.receivedAtIso || a.receivedAt) || 0)) * rev;
     });
+  } else if (sortBy === 'date') {
+    list.sort((a, b) => (getReceivedDate(a) - getReceivedDate(b)) * rev);
   } else {
-    list.sort((a, b) => ((Date.parse(b.receivedAtIso || b.receivedAt) || 0) - (Date.parse(a.receivedAtIso || a.receivedAt) || 0)) * rev);
+    // 기본: 시간별 (노티 수신 시각 전체)
+    list.sort((a, b) => (getReceivedTime(a) - getReceivedTime(b)) * rev);
   }
   const totalCount = list.length;
   const totalPages = Math.max(1, Math.ceil(totalCount / perPage));
@@ -5361,16 +5530,16 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
     return null;
   };
   const thLabels = [
-    '번호',
+    t(locale, 'tx_th_no'),
     t(locale, 'cr_th_received_date'),
     t(locale, 'cr_th_received_time'),
     'Route',
     t(locale, 'cr_th_merchant'),
-    'TransactionId', 'OrderNo', 'Amount', '전산금액', 'status', 'PaymentDate', 'Currency',
+    'TransactionId', 'OrderNo', 'Amount', t(locale, 'tx_th_internal_amount'), 'status', 'PaymentDate', 'Currency',
     'CustomerId',
     t(locale, 'tx_th_status'),
     t(locale, 'tx_th_noti'),
-    '내역/사유',
+    t(locale, 'tx_th_detail_reason'),
   ];
   const voidRefundByTxId = buildVoidRefundNotiMap(30);
   const formatVoidRefundSentAt = (iso) => {
@@ -5387,7 +5556,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
   const baseUrl = '/admin/transactions';
   const env = getEnvFromReq(req);
   const qs = (overrides) => {
-    const o = { sort: sortBy, search: searchKw, dateFrom, dateTo, searchField, sortDir, perPage, page: pageNum, env, period, successOnly: successOnly ? '1' : '', ...overrides };
+    const o = { sort: sortBy, search: searchKw, dateFrom, dateTo, searchField, sortDir, perPage, page: pageNum, env, period, statusFilter, ...overrides };
     const parts = [];
     if (o.sort) parts.push('sort=' + encodeURIComponent(o.sort));
     if (o.search) parts.push('search=' + encodeURIComponent(o.search));
@@ -5398,29 +5567,30 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
     if (o.perPage && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
     if (o.page && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     if (o.period && o.period !== 'all') parts.push('period=' + encodeURIComponent(o.period));
-    if (o.successOnly === '1') parts.push('successOnly=1');
+    if (o.statusFilter) parts.push('statusFilter=' + encodeURIComponent(o.statusFilter));
     if (o.env) parts.push('env=' + encodeURIComponent(o.env));
     return parts.length ? '?' + parts.join('&') : '';
   };
   const sortLinks = [
-    { key: 'date', label: '일자별' },
+    { key: 'time', label: t(locale, 'tx_filter_time') },
+    { key: 'date', label: t(locale, 'tx_filter_date') },
     { key: 'route', label: 'Route' },
     { key: 'currency', label: 'Currency' },
-    { key: 'status', label: '상태' },
+    { key: 'status', label: t(locale, 'tx_th_status') },
   ].map((o) => {
     const url = baseUrl + qs({ sort: o.key, page: 1 });
     const active = sortBy === o.key;
     return '<a href="' + url + '" style="padding:4px 10px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-right:4px;">' + esc(o.label) + '</a>';
   }).join('');
-  const sortDirLinks = '<a href="' + baseUrl + qs({ sortDir: 'asc', page: 1 }) + '" style="padding:4px 8px;font-size:11px;border-radius:4px;text-decoration:none;background:' + (sortDir === 'asc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'asc' ? '#fff' : '#374151') + ';">오름차순</a><a href="' + baseUrl + qs({ sortDir: 'desc', page: 1 }) + '" style="padding:4px 8px;font-size:11px;border-radius:4px;text-decoration:none;margin-left:4px;background:' + (sortDir === 'desc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'desc' ? '#fff' : '#374151') + ';">내림차순</a>';
+  const sortDirLinks = '<a href="' + baseUrl + qs({ sortDir: 'asc', page: 1 }) + '" style="padding:4px 8px;font-size:11px;border-radius:4px;text-decoration:none;background:' + (sortDir === 'asc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'asc' ? '#fff' : '#374151') + ';">' + t(locale, 'tx_sort_asc') + '</a><a href="' + baseUrl + qs({ sortDir: 'desc', page: 1 }) + '" style="padding:4px 8px;font-size:11px;border-radius:4px;text-decoration:none;margin-left:4px;background:' + (sortDir === 'desc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'desc' ? '#fff' : '#374151') + ';">' + t(locale, 'tx_sort_desc') + '</a>';
 
   const periodOptions = [
-    { key: 'today', label: '당일' },
-    { key: 'yesterday', label: '전일' },
-    { key: 'thisWeek', label: '이번주' },
-    { key: 'lastWeek', label: '지난주' },
-    { key: 'thisMonth', label: '당월' },
-    { key: 'lastMonth', label: '전월' },
+    { key: 'today', label: t(locale, 'tx_filter_today') },
+    { key: 'yesterday', label: t(locale, 'tx_filter_yesterday') },
+    { key: 'thisWeek', label: t(locale, 'tx_filter_this_week') },
+    { key: 'lastWeek', label: t(locale, 'tx_filter_last_week') },
+    { key: 'thisMonth', label: t(locale, 'tx_filter_this_month') },
+    { key: 'lastMonth', label: t(locale, 'tx_filter_last_month') },
   ];
   const periodLinks = periodOptions.map((o) => {
     const url = baseUrl + qs({ period: o.key, page: 1, dateFrom: '', dateTo: '' });
@@ -5428,13 +5598,31 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
     return '<a href="' + url + '" style="padding:4px 10px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-left:4px;">' + esc(o.label) + '</a>';
   }).join('');
 
-  const searchFieldOptions = TRANSACTION_SEARCH_FIELDS.map((f) => '<option value="' + esc(f.key) + '"' + (searchField === f.key ? ' selected' : '') + '>' + esc(f.label) + '</option>').join('');
-  const searchForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:8px;"><input type="hidden" name="sort" value="' + esc(sortBy) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="dateFrom" value="' + esc(dateFrom) + '" /><input type="hidden" name="dateTo" value="' + esc(dateTo) + '" /><input type="hidden" name="perPage" value="' + esc(perPage) + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="period" value="' + esc(period) + '" /><select name="searchField" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;">' + searchFieldOptions + '</select><input type="text" name="search" value="' + esc(searchKw) + '" placeholder="검색" style="padding:4px 8px;font-size:12px;width:140px;border:1px solid #d1d5db;border-radius:4px;margin-left:4px;" /><label style="margin-left:6px;font-size:11px;color:#374151;"><input type="checkbox" name="successOnly" value="1"' + (successOnly ? ' checked' : '') + ' /> 성공건만</label><button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:4px;">검색</button></form>';
+  const transactionSearchFieldsWithLocale = [
+    { key: 'all', label: t(locale, 'tx_filter_all') },
+    { key: 'OrderNo', label: 'OrderNo' },
+    { key: 'CustomerId', label: 'CustomerId' },
+    { key: 'TransactionId', label: 'TransactionId' },
+    { key: 'Amount', label: 'Amount' },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'Route', label: 'Route' },
+    { key: 'Currency', label: 'Currency' },
+    { key: 'Description', label: 'Description' },
+  ];
+  const searchFieldOptions = transactionSearchFieldsWithLocale.map((f) => '<option value="' + esc(f.key) + '"' + (searchField === f.key ? ' selected' : '') + '>' + esc(f.label) + '</option>').join('');
+  const statusFilterOptions = [
+    { key: '', label: t(locale, 'tx_filter_status_all') },
+    { key: 'success', label: t(locale, 'tx_filter_status_success') },
+    { key: 'fail', label: t(locale, 'tx_filter_status_fail') },
+    { key: 'void', label: t(locale, 'tx_filter_status_void') },
+    { key: 'other', label: t(locale, 'tx_filter_status_other') },
+  ].map((o) => '<option value="' + esc(o.key) + '"' + (statusFilter === o.key ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('');
+  const searchForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:8px;"><input type="hidden" name="sort" value="' + esc(sortBy) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="dateFrom" value="' + esc(dateFrom) + '" /><input type="hidden" name="dateTo" value="' + esc(dateTo) + '" /><input type="hidden" name="perPage" value="' + esc(perPage) + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="period" value="' + esc(period) + '" /><select name="searchField" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;">' + searchFieldOptions + '</select><input type="text" name="search" value="' + esc(searchKw) + '" placeholder="' + esc(t(locale, 'common_search')) + '" style="padding:4px 8px;font-size:12px;width:140px;border:1px solid #d1d5db;border-radius:4px;margin-left:4px;" /><select name="statusFilter" style="margin-left:6px;padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;">' + statusFilterOptions + '</select><button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:4px;">' + esc(t(locale, 'common_search')) + '</button></form>';
 
-  const dateForm = '<form method="get" action="' + baseUrl + '" class="tx-date-form"><input type="hidden" name="sort" value="' + esc(sortBy) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="search" value="' + esc(searchKw) + '" /><input type="hidden" name="searchField" value="' + esc(searchField) + '" /><input type="hidden" name="perPage" value="' + esc(perPage) + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="period" value="' + esc(period) + '" /><input type="hidden" name="successOnly" value="' + (successOnly ? '1' : '') + '" /><label class="tx-date-label">기간</label><input type="date" name="dateFrom" value="' + esc(dateFrom) + '" class="tx-date-input" /><span class="tx-date-sep">~</span><input type="date" name="dateTo" value="' + esc(dateTo) + '" class="tx-date-input" /><button type="submit" class="tx-date-btn">적용</button></form>';
+  const dateForm = '<form method="get" action="' + baseUrl + '" class="tx-date-form"><input type="hidden" name="sort" value="' + esc(sortBy) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="search" value="' + esc(searchKw) + '" /><input type="hidden" name="searchField" value="' + esc(searchField) + '" /><input type="hidden" name="perPage" value="' + esc(perPage) + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="period" value="' + esc(period) + '" /><input type="hidden" name="statusFilter" value="' + esc(statusFilter) + '" /><input type="date" name="dateFrom" value="' + esc(dateFrom) + '" class="tx-date-input" /><span class="tx-date-sep">~</span><input type="date" name="dateTo" value="' + esc(dateTo) + '" class="tx-date-input" /><button type="submit" class="tx-date-btn">' + esc(t(locale, 'tx_apply')) + '</button></form>';
   const exportUrl = baseUrl + '/export' + qs({ page: 1 });
-  const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:6px 12px;font-size:12px;background:#0d9488;color:#fff;border-radius:4px;text-decoration:none;">Excel로 Export</a>';
-  const toolbarHtml = '<div style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:nowrap;align-items:center;gap:6px;overflow-x:auto;white-space:nowrap;">' + sortLinks + sortDirLinks + '<span style="margin-left:8px;font-size:11px;color:#374151;">기간:</span>' + periodLinks + dateForm + searchForm + excelBtn + '</div>';
+  const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:6px 12px;font-size:12px;background:#0d9488;color:#fff;border-radius:4px;text-decoration:none;">' + esc(t(locale, 'tx_export_excel')) + '</a>';
+  const toolbarHtml = '<div style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:nowrap;align-items:center;gap:6px;overflow-x:auto;white-space:nowrap;">' + sortLinks + sortDirLinks + '<span style="margin:0 6px;color:#9ca3af;">|</span>' + periodLinks + dateForm + '<span style="margin:0 6px;color:#9ca3af;">|</span>' + searchForm + excelBtn + '</div>';
   const LEGEND_MAX_DESC = 80;
   const truncDesc = (s) => { const t = String(s || '').trim(); return t.length <= LEGEND_MAX_DESC ? t : t.slice(0, LEGEND_MAX_DESC - 1) + '…'; };
   const legendItems = [
@@ -5458,7 +5646,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
   const legendHtml = '<div class="card tx-legend" style="margin-bottom:16px;"><div class="tx-legend-grid">' + legendCells + '</div></div>';
   const txColDefaults = [40, 72, 95, 52, 95, 100, 120, 80, 78, 58, 88, 42, 98, 68, 52, 200];
   const colgroupHtml = '<colgroup>' + thLabels.map((_, i) => '<col id="tx-col-' + i + '" style="width:' + (txColDefaults[i] || 80) + 'px;min-width:40px;">').join('') + '</colgroup>';
-  const thead = '<thead><tr>' + thLabels.map((l, i) => '<th class="col-body-key">' + esc(l) + '<div class="tx-col-resizer" data-col="' + i + '" title="드래그하여 열 너비 조절"></div></th>').join('') + '</tr></thead>';
+  const thead = '<thead><tr>' + thLabels.map((l, i) => '<th class="col-body-key">' + esc(l) + '<div class="tx-col-resizer" data-col="' + i + '" title="' + esc(t(locale, 'tx_col_resize_title')) + '"></div></th>').join('') + '</tr></thead>';
   const rows = list.map((log, index) => {
     const body = parseNotiBody(log);
     const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
@@ -5508,16 +5696,16 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
           if (isVoidedOrRefunded && txId) {
             const entry = voidRefundByTxId[txId];
             const isVoid = hasVoidNotiSent(txId);
-            const kindLabel = isVoid ? '무효' : '환불';
-            const defaultReason = isVoid ? '관리자 무효 요청' : '관리자 환불 요청';
+            const kindLabel = isVoid ? t(locale, 'cr_type_void') : t(locale, 'cr_type_refund');
+            const defaultReason = isVoid ? t(locale, 'tx_detail_void_reason') : t(locale, 'tx_detail_refund_reason');
             const reason = (entry && entry.reason) ? entry.reason : defaultReason;
             if (entry && entry.sentAtIso) {
               const sentStr = formatVoidRefundSentAt(entry.sentAtIso);
-              const relayStr = entry.relayStatus ? ' 가맹점:' + entry.relayStatus : '';
-              const internalStr = entry.internalStatus ? ' 전산:' + entry.internalStatus : '';
-              detailHtml = '내역: ' + kindLabel + ' 처리 ' + sentStr + relayStr + internalStr + ' / 사유: ' + reason;
+              const relayStr = entry.relayStatus ? t(locale, 'cr_detail_relay_prefix') + entry.relayStatus : '';
+              const internalStr = entry.internalStatus ? t(locale, 'cr_detail_internal_prefix') + entry.internalStatus : '';
+              detailHtml = t(locale, 'tx_detail_label') + ': ' + kindLabel + ' ' + t(locale, 'tx_detail_processed') + ' ' + sentStr + relayStr + internalStr + ' / ' + t(locale, 'tx_reason_label') + ': ' + reason;
             } else {
-              detailHtml = '내역: ' + kindLabel + ' 처리됨 / 사유: ' + reason;
+              detailHtml = t(locale, 'tx_detail_label') + ': ' + kindLabel + ' ' + t(locale, 'tx_detail_done') + ' / ' + t(locale, 'tx_reason_label') + ': ' + reason;
             }
           }
           cells.push('<td class="col-void-refund-detail">' + esc(detailHtml) + '</td>');
@@ -5582,6 +5770,7 @@ app.get('/admin/transactions/chillpay-api', requireAuth, requirePage('cancel_ref
   };
   const dateFrom = (q.dateFrom || '').toString().trim();
   const dateTo = (q.dateTo || '').toString().trim();
+  const statusFilter = (q.statusFilter || '').toString();
   const pageSize = Math.max(1, Math.min(100, parseInt(q.pageSize, 10) || 50));
   const pageNumber = Math.max(1, parseInt(q.pageNumber, 10) || 1);
   const searchKeyword = (q.searchKeyword || '').toString().trim();
@@ -5657,7 +5846,7 @@ app.get('/admin/transactions/chillpay-api', requireAuth, requirePage('cancel_ref
     + '<button type="submit" style="padding:6px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;">ChillPay에서 가져오기</button></form>';
   const backLink = '<p style="margin-bottom:12px;"><a href="/admin/transactions' + (env ? '?env=' + encodeURIComponent(env) : '') + '" style="color:#2563eb;">← 노티거래내역으로 돌아가기</a></p>';
   const mainContent = backLink + formHtml + alertHtml + resultHtml;
-  res.send(renderCancelRefundPage(locale, adminUser, 'ChillPay API 거래 내역', mainContent, '', req.originalUrl, req.session.member, req, undefined, env));
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'pg_title_chillpay_api'), mainContent, '', req.originalUrl, req.session.member, req, undefined, env));
 });
 
 // 피지거래내역: 동기화 버튼(오른쪽), 동기화 초기화(빨강), SORT, 검색, 일자별 노출
@@ -5691,7 +5880,7 @@ app.get('/admin/pg-transactions/reset', requireAuth, requirePage('cancel_refund'
   const mainContent = '<div class="card" style="max-width:520px;"><p style="margin:0 0 16px 0;color:#1f2937;">동기화가 초기화 됩니다.</p><p style="margin:0 0 20px 0;color:#6b7280;font-size:14px;">해당 환경(' + esc(envLabel) + ')의 <strong>기존 데이터가 삭제</strong>되고, 설정한 과거 ' + months + '개월 데이터만 덮어 씁니다. 초기화 전 데이터는 최신 2회까지 자동 저장되며 복원에서 되돌릴 수 있습니다.</p>'
     + '<form method="post" action="/admin/pg-transactions/reset"><input type="hidden" name="env" value="' + esc(envKey) + '" /><button type="submit" style="padding:8px 16px;background:#dc2626;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600;">다시 확인</button></form>'
     + '<p style="margin-top:16px;"><a href="' + backUrl + '" style="color:#2563eb;">← 피지거래내역으로 돌아가기</a></p></div>';
-  res.send(renderCancelRefundPage(locale, adminUser, '동기화 초기화', mainContent, '', req.originalUrl, req.session.member, req, undefined, envKey === 'sandbox' ? 'sandbox' : 'live'));
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'pg_title_sync_reset'), mainContent, '', req.originalUrl, req.session.member, req, undefined, envKey === 'sandbox' ? 'sandbox' : 'live'));
 });
 
 app.post('/admin/pg-transactions/reset', requireAuth, requirePage('cancel_refund'), async (req, res) => {
@@ -5747,7 +5936,7 @@ app.get('/admin/pg-transactions/restore', requireAuth, requirePage('cancel_refun
     optionsHtml += '<p style="margin-top:16px;color:#6b7280;">수동 백업이 없습니다. 피지거래내역에서 백업 버튼으로 저장할 수 있습니다.</p>';
   }
   const mainContent = '<div class="card" style="max-width:520px;"><h2 style="margin:0 0 12px 0;">데이터 복원</h2><p style="margin:0 0 16px 0;color:#6b7280;">복원하면 현재 거래 내역이 선택한 백업으로 덮어 씁니다.</p><h3 style="margin:16px 0 8px 0;">초기화 전 자동 백업 (최신 2회)</h3>' + optionsHtml + '<p style="margin-top:20px;"><a href="' + backUrl + '" style="color:#2563eb;">← 피지거래내역으로 돌아가기</a></p></div>';
-  res.send(renderCancelRefundPage(locale, adminUser, '복원', mainContent, '', req.originalUrl, req.session.member, req, undefined, getEnvFromReq(req)));
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'cr_restore'), mainContent, '', req.originalUrl, req.session.member, req, undefined, getEnvFromReq(req)));
 });
 
 app.post('/admin/pg-transactions/restore', requireAuth, requirePage('cancel_refund'), (req, res) => {
@@ -5773,6 +5962,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
   const adminUser = req.session.adminUser || '';
   const env = getPgEnvFromReq(req);
   const q = req.query || {};
+  const statusFilter = (q.statusFilter || '').toString();
   const periodSort = (q.sort || 'today').toString();
   const sortDir = (q.sortDir || 'desc').toString().toLowerCase() === 'asc' ? 'asc' : 'desc';
   const orderBy = (q.orderBy || 'date').toString();
@@ -5858,7 +6048,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const baseUrl = '/admin/pg-transactions';
   const qs = (overrides) => {
-    const o = { env, sort: periodSort, sortDir, orderBy, search: searchKw, searchField, dateFrom, dateTo, ...overrides };
+    const o = { env, sort: periodSort, sortDir, orderBy, search: searchKw, searchField, dateFrom, dateTo, statusFilter: (q.statusFilter || '').toString(), ...overrides };
     const parts = [];
     if (o.env) parts.push('env=' + encodeURIComponent(o.env));
     if (o.sort && o.sort !== 'today') parts.push('sort=' + encodeURIComponent(o.sort));
@@ -5868,6 +6058,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
     if (o.searchField && o.searchField !== 'all') parts.push('searchField=' + encodeURIComponent(o.searchField));
     if (o.dateFrom) parts.push('dateFrom=' + encodeURIComponent(o.dateFrom));
     if (o.dateTo) parts.push('dateTo=' + encodeURIComponent(o.dateTo));
+    if (o.statusFilter) parts.push('statusFilter=' + encodeURIComponent(o.statusFilter));
     return parts.length ? '?' + parts.join('&') : '';
   };
   const syncBtnHtml = '<form method="post" action="' + baseUrl + '/sync" style="display:inline;"><input type="hidden" name="env" value="' + esc(env) + '" /><button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;">동기화</button></form>'
@@ -5889,10 +6080,11 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
     ? '<p style="font-size:10px;color:#6b7280;margin-bottom:8px;">마지막 조회: ' + esc(new Date(lastFetchedAt).toLocaleString('ko-KR', { hour12: false })) + ' (' + syncIntervalMin + '분마다 자동 조회)</p>'
     : '<p style="font-size:10px;color:#6b7280;margin-bottom:8px;">아직 조회된 내역이 없습니다. ' + syncIntervalMin + '분마다 자동 조회됩니다.</p>';
   const orderByOptions = [
-    { key: 'date', label: '일자별' },
+    { key: 'time', label: t(locale, 'tx_filter_time') },
+    { key: 'date', label: t(locale, 'tx_filter_date') },
     { key: 'routeNo', label: 'Route' },
     { key: 'currency', label: 'Currency' },
-    { key: 'status', label: '상태' },
+    { key: 'status', label: t(locale, 'tx_th_status') },
   ];
   const orderByLinks = orderByOptions.map((o) => {
     const url = baseUrl + qs({ orderBy: o.key });
@@ -5926,11 +6118,18 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
     { key: 'Amount', label: 'Amount' },
   ];
   const searchFieldOptions = pgSearchFields.map((f) => '<option value="' + esc(f.key) + '"' + (searchField === f.key ? ' selected' : '') + '>' + esc(f.label) + '</option>').join('');
-  const dateForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:4px;"><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="sort" value="' + esc(periodSort) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="orderBy" value="' + esc(orderBy) + '" /><input type="hidden" name="search" value="' + esc(searchKw) + '" /><input type="hidden" name="searchField" value="' + esc(searchField) + '" /><label style="margin-right:2px;font-size:10px;color:#374151;">기간</label><input type="date" name="dateFrom" value="' + esc(dateFrom) + '" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;" /><span style="margin:0 2px;">~</span><input type="date" name="dateTo" value="' + esc(dateTo) + '" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;" /><button type="submit" style="padding:2px 8px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:2px;">적용</button></form>';
-  const searchForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:4px;"><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="sort" value="' + esc(periodSort) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="orderBy" value="' + esc(orderBy) + '" /><input type="hidden" name="dateFrom" value="' + esc(dateFrom) + '" /><input type="hidden" name="dateTo" value="' + esc(dateTo) + '" /><select name="searchField" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;">' + searchFieldOptions + '</select><input type="text" name="search" value="' + esc(searchKw) + '" placeholder="검색" style="padding:2px 6px;font-size:10px;width:100px;border:1px solid #d1d5db;border-radius:4px;margin-left:2px;" /><button type="submit" style="padding:2px 8px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:2px;">검색</button></form>';
+  const statusFilterOptions = [
+    { key: '', label: t(locale, 'tx_filter_status_all') },
+    { key: 'success', label: t(locale, 'tx_filter_status_success') },
+    { key: 'fail', label: t(locale, 'tx_filter_status_fail') },
+    { key: 'void', label: t(locale, 'tx_filter_status_void') },
+    { key: 'other', label: t(locale, 'tx_filter_status_other') },
+  ].map((o) => '<option value="' + esc(o.key) + '"' + (statusFilter === o.key ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('');
+  const dateForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:4px;"><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="sort" value="' + esc(periodSort) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="orderBy" value="' + esc(orderBy) + '" /><input type="hidden" name="search" value="' + esc(searchKw) + '" /><input type="hidden" name="searchField" value="' + esc(searchField) + '" /><input type="hidden" name="statusFilter" value="' + esc(statusFilter) + '" /><input type="date" name="dateFrom" value="' + esc(dateFrom) + '" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;" /><span style="margin:0 2px;">~</span><input type="date" name="dateTo" value="' + esc(dateTo) + '" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;" /><button type="submit" style="padding:2px 8px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:2px;">적용</button></form>';
+  const searchForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:4px;"><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="sort" value="' + esc(periodSort) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="orderBy" value="' + esc(orderBy) + '" /><input type="hidden" name="dateFrom" value="' + esc(dateFrom) + '" /><input type="hidden" name="dateTo" value="' + esc(dateTo) + '" /><select name="searchField" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;">' + searchFieldOptions + '</select><input type="text" name="search" value="' + esc(searchKw) + '" placeholder="검색" style="padding:2px 6px;font-size:10px;width:100px;border:1px solid #d1d5db;border-radius:4px;margin-left:2px;" /><select name="statusFilter" style="margin-left:2px;padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;">' + statusFilterOptions + '</select><button type="submit" style="padding:2px 8px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:2px;">검색</button></form>';
   const exportUrl = baseUrl + '/export' + qs();
-  const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:4px 8px;font-size:10px;background:#0d9488;color:#fff;border-radius:4px;text-decoration:none;">Excel로 Export</a>';
-  const toolbarHtml = '<div style="margin-bottom:8px;font-size:10px;display:flex;flex-wrap:wrap;align-items:center;gap:4px;max-width:100%;">' + orderByLinks + sortDirLinks + '<span style="margin-left:4px;font-size:10px;color:#374151;">기간:</span>' + periodLinks + dateForm + searchForm + excelBtn + '</div>';
+  const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:4px 8px;font-size:12px;background:#0d9488;color:#fff;border-radius:4px;text-decoration:none;">Excel</a>';
+  const toolbarHtml = '<div style="margin-bottom:8px;font-size:10px;display:flex;flex-wrap:wrap;align-items:center;gap:4px;max-width:100%;">' + orderByLinks + sortDirLinks + '<span style="margin:0 4px;color:#9ca3af;">|</span>' + periodLinks + dateForm + '<span style="margin:0 4px;color:#9ca3af;">|</span>' + searchForm + excelBtn + '</div>';
   const thLabels = ['TransactionId', '거래일시', 'Merchant', 'Customer', 'OrderNo', 'PaymentChannel', '결제일시', 'Amount', 'Fee', 'TotalAmount', 'Currency', 'RouteNo', 'Status', 'Settled'];
   const colWidths = ['7%', '7%', '6%', '6%', '18%', '6%', '7%', '5%', '4%', '6%', '4%', '4%', '5%', '3%'];
   const colgroup = '<colgroup>' + colWidths.map((w) => '<col style="width:' + w + ';">').join('') + '</colgroup>';
@@ -5979,15 +6178,23 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
   };
   const parseAmount = (v) => { const n = parseFloat(String(v || '0').replace(/,/g, '')); return Number.isFinite(n) ? n : 0; };
   const parsePgDate = (str) => { if (!str) return 0; const m = String(str).trim().match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/); if (!m) return 0; const [, d, mo, y] = m; return new Date(parseInt(y, 10), parseInt(mo, 10) - 1, parseInt(d, 10)).getTime(); };
+  const parsePgDateTime = (str) => {
+    if (!str) return 0;
+    const m = String(str).trim().match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})/);
+    if (!m) return parsePgDate(str);
+    const [, d, mo, y, hh, mm, ss] = m;
+    return new Date(parseInt(y, 10), parseInt(mo, 10) - 1, parseInt(d, 10), parseInt(hh, 10), parseInt(mm, 10), parseInt(ss, 10)).getTime();
+  };
   const sortRows = (list) => {
     const rev = sortDir === 'asc' ? 1 : -1;
     return list.slice().sort((a, b) => {
       let c = 0;
       if (orderBy === 'date') c = (parsePgDate(a.transactionDate) - parsePgDate(b.transactionDate)) * rev;
+      else if (orderBy === 'time') c = (parsePgDateTime(a.transactionDate) - parsePgDateTime(b.transactionDate)) * rev;
       else if (orderBy === 'routeNo') c = (String(a.routeNo != null ? a.routeNo : '').localeCompare(String(b.routeNo != null ? b.routeNo : ''), 'ja')) * rev;
       else if (orderBy === 'currency') c = (String(a.currency || '').localeCompare(String(b.currency || ''), 'ja')) * rev;
       else if (orderBy === 'status') c = String(a.status || '').localeCompare(String(b.status || ''), 'ja') * rev;
-      else c = (parsePgDate(a.transactionDate) - parsePgDate(b.transactionDate)) * rev;
+      else c = (parsePgDateTime(a.transactionDate) - parsePgDateTime(b.transactionDate)) * rev;
       return c;
     });
   };
@@ -6026,6 +6233,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
 });
 
 app.get('/admin/pg-transactions/export', requireAuth, requirePage('cancel_refund'), (req, res) => {
+  const locale = getLocale(req);
   const q = req.query || {};
   const env = getPgEnvFromReq(req);
   const periodSort = (q.sort || 'today').toString();
@@ -6106,7 +6314,7 @@ app.get('/admin/pg-transactions/export', requireAuth, requirePage('cancel_refund
   }
   list = sortRows(list);
   const csvEscape = (v) => { const s = String(v ?? ''); if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'; return s; };
-  const headerRow = ['TransactionId', '거래일시', 'Merchant', 'Customer', 'OrderNo', 'PaymentChannel', '결제일시', 'Amount', 'Fee', 'TotalAmount', 'Currency', 'RouteNo', 'Status', 'Settled'];
+  const headerRow = ['TransactionId', t(locale, 'pg_tx_datetime'), 'Merchant', 'Customer', 'OrderNo', 'PaymentChannel', t(locale, 'pg_tx_pay_datetime'), 'Amount', 'Fee', 'TotalAmount', 'Currency', 'RouteNo', 'Status', 'Settled'];
   const rows = list.map((row) => {
     return [
       row.transactionId,
@@ -6132,6 +6340,7 @@ app.get('/admin/pg-transactions/export', requireAuth, requirePage('cancel_refund
 });
 
 app.get('/admin/transactions/export', requireAuth, requirePage('cancel_refund'), (req, res) => {
+  const locale = getLocale(req);
   const q = req.query || {};
   const sortBy = (q.sort || 'date').toString();
   const sortDir = (q.sortDir || 'desc').toString().toLowerCase() === 'asc' ? 'asc' : 'desc';
@@ -6203,9 +6412,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cancel_refund'),
       const body = parseNotiBody(log);
       const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
       const isCancel = ps === 0 || ps === '0' || String(ps).toLowerCase() === 'cancel';
-      const isSuccess = ps === 1 || ps === '1'
-        || (body.paymentStatus && String(body.paymentStatus).toLowerCase() === 'success')
-        || body.status === 1;
+      const isSuccess = isSuccessPaymentBody(body);
       if (isCancel) return 1;
       if (!isSuccess) return 0;
       const baseDate = body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
@@ -6222,7 +6429,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cancel_refund'),
   } else {
     list.sort((a, b) => ((Date.parse(b.receivedAtIso || b.receivedAt) || 0) - (Date.parse(a.receivedAtIso || a.receivedAt) || 0)) * rev);
   }
-  const headerRow = ['번호', '수신일', '수신시', 'Route', '가맹점', 'TransactionId', 'OrderNo', 'Amount', '전산금액', 'status', 'PaymentDate', 'Currency', 'CustomerId', '상태', '노티', '내역/사유'];
+  const headerRow = [t(locale, 'pg_tx_header_no'), t(locale, 'pg_tx_header_received_date'), t(locale, 'pg_tx_header_received_time'), 'Route', t(locale, 'cr_th_merchant'), 'TransactionId', 'OrderNo', 'Amount', t(locale, 'tx_th_internal_amount'), 'status', 'PaymentDate', 'Currency', 'CustomerId', t(locale, 'pg_tx_header_status'), t(locale, 'pg_tx_header_noti'), t(locale, 'tx_th_detail_reason')];
   const exportVoidRefundByTxId = buildVoidRefundNotiMap(30);
   const formatExportSentAt = (iso) => {
     if (!iso) return '';
@@ -6241,17 +6448,17 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cancel_refund'),
     const isCancel = isDefinitelyCancelPaymentStatus(ps);
     const isSuccess = isSuccessPaymentBody(body);
     const isError = isErrorPaymentStatus(ps);
-    let statusLabel = '실패';
-    if (isCancel) statusLabel = '취소';
-    else if (isSuccess) statusLabel = '결제';
-    else if (isError) statusLabel = '오류';
+    let statusLabel = t(locale, 'status_fail');
+    if (isCancel) statusLabel = t(locale, 'status_cancel');
+    else if (isSuccess) statusLabel = t(locale, 'status_payment');
+    else if (isError) statusLabel = t(locale, 'status_error');
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
     const routeNo = getRouteNoDisplay(merchant, log.routeKey);
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
     const txId = body.TransactionId ?? body.transactionId ?? '';
     let notiLabel = '';
-    if (txId && hasVoidNotiSent(txId)) notiLabel = '무효';
-    else if (txId && hasRefundNotiSent(txId)) notiLabel = '환불';
+    if (txId && hasVoidNotiSent(txId)) notiLabel = t(locale, 'cr_type_void');
+    else if (txId && hasRefundNotiSent(txId)) notiLabel = t(locale, 'cr_type_refund');
     const isVoidedOrRefunded = isSuccess && txId && (hasVoidNotiSent(txId) || hasRefundNotiSent(txId));
     const amountVal = body.Amount ?? body.amount ?? '';
     const amountStr = isVoidedOrRefunded ? '-' : formatAmountWithSeparator(amountVal !== '' && amountVal != null ? amountVal : null);
@@ -6261,16 +6468,16 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cancel_refund'),
     if (isVoidedOrRefunded && txId) {
       const entry = exportVoidRefundByTxId[txId];
       const isVoid = hasVoidNotiSent(txId);
-      const kindLabel = isVoid ? '무효' : '환불';
-      const defaultReason = isVoid ? '관리자 무효 요청' : '관리자 환불 요청';
+      const kindLabel = isVoid ? t(locale, 'cr_type_void') : t(locale, 'cr_type_refund');
+      const defaultReason = isVoid ? t(locale, 'tx_detail_void_reason') : t(locale, 'tx_detail_refund_reason');
       const reason = (entry && entry.reason) ? entry.reason : defaultReason;
       if (entry && entry.sentAtIso) {
         const sentStr = formatExportSentAt(entry.sentAtIso);
-        const relayStr = entry.relayStatus ? ' 가맹점:' + entry.relayStatus : '';
-        const internalStr = entry.internalStatus ? ' 전산:' + entry.internalStatus : '';
-        detailStr = '내역: ' + kindLabel + ' 처리 ' + sentStr + relayStr + internalStr + ' / 사유: ' + reason;
+        const relayStr = entry.relayStatus ? t(locale, 'cr_detail_relay_prefix') + entry.relayStatus : '';
+        const internalStr = entry.internalStatus ? t(locale, 'cr_detail_internal_prefix') + entry.internalStatus : '';
+        detailStr = t(locale, 'tx_detail_label') + ': ' + kindLabel + ' ' + t(locale, 'tx_detail_processed') + ' ' + sentStr + relayStr + internalStr + ' / ' + t(locale, 'tx_reason_label') + ': ' + reason;
       } else {
-        detailStr = '내역: ' + kindLabel + ' 처리됨 / 사유: ' + reason;
+        detailStr = t(locale, 'tx_detail_label') + ': ' + kindLabel + ' ' + t(locale, 'tx_detail_done') + ' / ' + t(locale, 'tx_reason_label') + ': ' + reason;
       }
     }
     return [
@@ -6345,12 +6552,16 @@ function getEnvFilteredLogs(req) {
 function isSuccessPaymentBody(body) {
   if (!body || typeof body !== 'object') return false;
   const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
-  return ps === 0 || ps === '0' || ps === 1 || ps === '1'
-    || (typeof ps === 'string' && ps.toLowerCase() === 'success');
+  if (ps === 0 || ps === '0') return true;
+  if (typeof ps === 'string') {
+    const lower = ps.toLowerCase();
+    if (lower === 'success' || lower === 'complete') return true;
+  }
+  return false;
 }
 // 취소 노티로 인정: PDF Appendix C 기준 2=Cancel, Transaction API 기준 3=Cancel. 0은 PDF에서 Success이므로 제외.
 function isDefinitelyCancelPaymentStatus(ps) {
-  if (ps === 0 || ps === '0' || ps === 1 || ps === '1') return false;
+  if (ps === 0 || ps === '0') return false;
   return ps === 2 || ps === '2' || ps === 3 || ps === '3'
     || ps === 'Cancel' || ps === 'Canceled' || ps === 'Cancelled'
     || (typeof ps === 'string' && ps.toLowerCase() === 'cancel');
@@ -6365,7 +6576,7 @@ function isErrorPaymentStatus(ps) {
 function isCancelNotiBody(body) {
   if (!body || typeof body !== 'object') return false;
   const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
-  if (ps === 0 || ps === '0' || ps === 1 || ps === '1') return false;
+  if (ps === 0 || ps === '0') return false;
   return ps === 2 || ps === '2' || ps === 3 || ps === '3'
     || ps === 6 || ps === '6' || ps === 7 || ps === '7' || ps === 8 || ps === '8' || ps === 9 || ps === '9'
     || ps === 20 || ps === '20' || ps === 21 || ps === '21' || ps === 22 || ps === '22' || ps === 24 || ps === '24' || ps === 25 || ps === '25'
@@ -6430,8 +6641,8 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cancel_refund')
       <td class="col-action">${resendBtn}</td>
     </tr>`;
   }).join('');
-  const helpPg = '<p class="hint" style="margin-bottom:12px;color:#6b7280;font-size:13px;"><strong>취소</strong>는 ChillPay 노티로만 수신되는 건입니다. 우리가 칠페이에서 결제 취소를 요청·처리하는 기능은 없습니다. 아래는 PG에서 <strong>취소</strong>로 들어온 노티만 표시하며, 재전송 시 PaymentStatus=2(취소)로 전달됩니다. ChillCredit 매뉴얼: 0=성공, 2=Cancel. <a href="/admin/cancel-refund/noti">노티 결과</a>·<a href="/admin/internal-result">전산 결과</a>에서 TransactionId로 확인하세요.</p>';
-  const thead = '<thead><tr><th>수신일</th><th>수신시각</th><th>Route No.</th><th>가맹점</th><th>TransactionId / OrderNo / Amount</th><th>PaymentStatus</th><th>전산 재전송 / 피지 재전송</th></tr></thead>';
+  const helpPg = '<p class="hint" style="margin-bottom:12px;color:#6b7280;font-size:13px;">' + t(locale, 'cr_help_cancel') + '</p>';
+  const thead = '<thead><tr><th>' + t(locale, 'pg_logs_th_received_date') + '</th><th>' + t(locale, 'pg_logs_th_received_time') + '</th><th>Route No.</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId / OrderNo / Amount</th><th>PaymentStatus</th><th>' + t(locale, 'pg_result_th_resend') + '</th></tr></thead>';
   res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_cancel') + ' (' + cancelled.length + ')', alertHtml + helpPg + '<table>' + thead + '<tbody>' + rows + '</tbody></table>', '', req.originalUrl, req.session.member, req, undefined, getEnvFromReq(req)));
 });
 
@@ -6440,12 +6651,12 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
   const locale = getLocale(req);
   const index = parseInt(req.body.index, 10);
   if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
-    return res.redirect('/admin/cancel-refund/cancel?resend=fail&reason=' + encodeURIComponent('잘못된 요청'));
+    return res.redirect('/admin/cancel-refund/cancel?resend=fail&reason=' + encodeURIComponent(t(locale, 'err_bad_request')));
   }
   const log = NOTI_LOGS[index];
   const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
   if (!merchant) {
-    return res.redirect('/admin/cancel-refund/cancel?resend=fail&reason=' + encodeURIComponent('가맹점 없음'));
+    return res.redirect('/admin/cancel-refund/cancel?resend=fail&reason=' + encodeURIComponent(t(locale, 'relay_no_merchant')));
   }
   let internalUrl = merchant.internalTargetId ? findInternalTargetUrl(merchant.internalTargetId, 'callback') : null;
   if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
@@ -6616,9 +6827,7 @@ app.post('/admin/cancel-refund/noti-resend-internal', requireAuth, requirePage('
   const log = NOTI_LOGS.find((l) => {
     const body = l.body && typeof l.body === 'object' ? l.body : (typeof l.body === 'string' ? (() => { try { return JSON.parse(l.body || '{}'); } catch { return {}; } })() : {});
     const tid = body.TransactionId != null ? String(body.TransactionId) : (body.transactionId != null ? String(body.transactionId) : '');
-    const isSuccess = body.PaymentStatus === 0 || body.PaymentStatus === '0' || body.PaymentStatus === 1 || body.PaymentStatus === '1'
-      || (body.paymentStatus && String(body.paymentStatus).toLowerCase() === 'success')
-      || body.status === 1;
+    const isSuccess = isSuccessPaymentBody(body);
     return tid === transactionId && l.merchantId === merchantId && isSuccess;
   });
   if (!log || !log.body) {
@@ -6651,7 +6860,10 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cancel_refund'), 
   const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   let alertHtml = q.void === 'ok' ? '<div class="alert alert-ok">' + t(locale, 'cr_alert_void_ok') + '</div>' : q.void === 'fail' && q.reason ? '<div class="alert alert-fail">' + t(locale, 'cr_alert_void_fail') + ': ' + escQ(q.reason) + '</div>' : '';
-  if (q.deleted === '1') alertHtml += '<div class="alert alert-ok">목록에서 제거되었습니다. <a href="/admin/cancel-refund/void-deleted-list?env=' + encodeURIComponent(getEnvFromReq(req)) + '">삭제거래</a>에서 확인·복원할 수 있습니다.</div>';
+  if (q.deleted === '1') {
+    const deletedListLink = '<a href="/admin/cancel-refund/void-deleted-list?env=' + encodeURIComponent(getEnvFromReq(req)) + '">' + t(locale, 'cr_void_deleted_list') + '</a>';
+    alertHtml += '<div class="alert alert-ok">' + (t(locale, 'cr_removed_from_list_msg') || '').replace(/\{\{link\}\}/g, deletedListLink) + '</div>';
+  }
   if (q.sync === 'ok') {
     const sent = parseInt(q.sent, 10) || 0;
     const total = parseInt(q.total, 10) || 0;
@@ -6699,9 +6911,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cancel_refund'), 
   const voidList = reversed.filter((log) => {
     const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
     const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
-    const isSuccess = body.PaymentStatus === 0 || body.PaymentStatus === '0' || body.PaymentStatus === 1 || body.PaymentStatus === '1'
-      || (body.paymentStatus && String(body.paymentStatus).toLowerCase() === 'success')
-      || body.status === 1;
+    const isSuccess = isSuccessPaymentBody(body);
     if (!txId || !isSuccess || !log.merchantId || !MERCHANTS.get(log.merchantId)) return false;
     if (isVoidUiDeleted(txId, log.merchantId, env, voidUiDeleted)) return false;
     // 무효요청 가능 구간 판정: 화면에 보이는 노티 수신 시각(TH 기준)을 우선 사용
@@ -6751,24 +6961,21 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cancel_refund'), 
       // 전역 스크립트에서 data-confirm, data-confirm-second로 2단계 확인 처리
       voidHtml = `<form method="post" action="/admin/cancel-refund/void-request" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="env" value="${esc(env)}" /><button type="submit" class="btn-void" data-confirm="${confirmVoid2}" data-confirm-second="${confirmVoid}">${t(locale, 'cr_btn_void_request')}</button></form>`;
     } else {
-      // 이메일발송 비활성 스타일과 동일하게, 텍스트는 "무효요청"만 노출
+      // 자동 무효 가능 시간이 지났으므로 버튼 비활성
       voidHtml = '<span class="btn-email-disabled" title="자동 무효 가능 시간이 지나 무효 요청을 할 수 없습니다.">무효요청</span>';
     }
     // 관리 컬럼: 목록삭제만
     const manageHtml = '<a href="/admin/cancel-refund/void-delete-confirm?transactionId=' + encodeURIComponent(body.TransactionId ?? body.transactionId ?? '') + '&merchantId=' + encodeURIComponent(log.merchantId || '') + '&env=' + encodeURIComponent(env) + '&source=void" class="btn-delete-from-list" style="padding:4px 10px;font-size:12px;background:#9ca3af;color:#fff;border:none;border-radius:4px;cursor:pointer;text-decoration:none;margin-left:4px;">목록삭제</a>';
     let emailHtml = '';
-    if (windowType !== 'void_auto') {
-      const manualFrom = cfg.voidCutoffHour + ':' + String(cfg.voidCutoffMinute).padStart(2, '0');
-      const manualTo = cfg.refundStartHour + ':' + String(cfg.refundStartMinute).padStart(2, '0');
-      const manualWindowTip = (t(locale, 'cr_manual_email_window') || '') + ': ' + manualFrom + '~' + manualTo;
-      if (isCurrentTimeInVoidManualWindow()) {
-        const { subject, body: bodyText } = buildVoidEmailContent(log);
-        const emailTo = (cfg.emailTo || 'help@chillpay.co.th').trim();
-        const mailto = 'mailto:' + encodeURIComponent(emailTo) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(bodyText);
-        emailHtml = `<a href="${mailto}" class="btn-email">${t(locale, 'cr_btn_email_send')}</a>`;
-      } else {
-        emailHtml = `<span class="btn-email-disabled" title="${manualWindowTip}">${t(locale, 'cr_btn_email_disabled')}</span>`;
-      }
+    const manualFrom = cfg.voidCutoffHour + ':' + String(cfg.voidCutoffMinute).padStart(2, '0');
+    const manualTo = cfg.refundStartHour + ':' + String(cfg.refundStartMinute).padStart(2, '0');
+    const manualWindowTip = (t(locale, 'cr_manual_email_window') || '') + ': ' + manualFrom + '~' + manualTo;
+    if (windowType === 'void_manual') {
+      const emailUrl = '/admin/mail-logs/void-email?index=' + encodeURIComponent(realIndex) + '&env=' + encodeURIComponent(env);
+      emailHtml = `<a href="${emailUrl}" class="btn-email">${t(locale, 'cr_btn_email_send')}</a>`;
+    } else if (windowType !== 'void_auto') {
+      // 환불만 가능한 구간: 이메일도 비활성
+      emailHtml = `<span class="btn-email-disabled" title="${manualWindowTip}">${t(locale, 'cr_btn_email_disabled')}</span>`;
     }
     const sentDt = sentEntry ? formatDateAndTimeTHJP(sentEntry.sentAtIso || sentEntry.sentAt) : { date: '-', timeTh: '-', timeJp: '-' };
     return `<tr>
@@ -6793,15 +7000,226 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cancel_refund'), 
   res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_void') + ' (' + voidList.length + ')', tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
 });
 
+// 무효 수동 이메일 발송 트리거: 메일 로그 기록 후 mailto로 리다이렉트
+app.get('/admin/mail-logs/void-email', requireAuth, requirePage('cancel_refund'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const q = req.query || {};
+  const index = parseInt(q.index, 10);
+  const env = (q.env || 'live').toString();
+  if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
+    return res.redirect('/admin/cancel-refund/void?env=' + encodeURIComponent(env) + '&void=fail&reason=' + encodeURIComponent(t(locale, 'cr_err_invalid_index')));
+  }
+  const log = NOTI_LOGS[index];
+  const cfg = loadChillPayTransactionConfig();
+  const { subject, body } = buildVoidEmailContent(log);
+  const emailTo = (cfg.emailTo || 'help@chillpay.co.th').trim();
+  const mailto = 'mailto:' + encodeURIComponent(emailTo) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+  try {
+    const bodyObj = log.body && typeof log.body === 'object'
+      ? log.body
+      : (typeof log.body === 'string'
+          ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })()
+          : {});
+    const txId = bodyObj.TransactionId ?? bodyObj.transactionId ?? '';
+    const orderNo = bodyObj.OrderNo ?? bodyObj.orderNo ?? '';
+    const amount = bodyObj.Amount ?? bodyObj.amount ?? '';
+    const merchantId = log.merchantId || '';
+    const routeNo = (merchantId && MERCHANTS.get(merchantId) && MERCHANTS.get(merchantId).routeNo) || '';
+    appendMailLog({
+      type: 'void_manual_email',
+      env,
+      index,
+      adminUser,
+      merchantId,
+      routeNo,
+      transactionId: txId,
+      orderNo,
+      amount,
+      emailTo,
+      subject,
+    });
+  } catch {
+    // 로깅 실패는 메일 트리거에 영향 주지 않음
+  }
+  const backUrl = '/admin/cancel-refund/void?env=' + encodeURIComponent(env);
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${t(locale, 'cr_btn_email_send')}</title>
+</head>
+<body>
+  <p style="font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;">${t(locale, 'cr_btn_email_send')} : ${emailTo}</p>
+  <script>
+    (function() {
+      var mailto = ${JSON.stringify(mailto)};
+      var back = ${JSON.stringify(backUrl)};
+      window.location.href = mailto;
+      setTimeout(function(){ window.location.href = back; }, 1000);
+    })();
+  </script>
+</body>
+</html>`);
+});
+
+// 메일 로그 페이지 (무효 수동 이메일 등)
+app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const q = req.query || {};
+  const env = getEnvFromReq(req);
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const logs = (Array.isArray(MAIL_LOGS) ? MAIL_LOGS : []).filter((l) => {
+    const e = (l.env || 'live').toString().toLowerCase();
+    return env === 'sandbox' ? e === 'sandbox' : e !== 'sandbox';
+  }).slice().sort((a, b) => {
+    return (Date.parse(b.sentAtIso || '') || 0) - (Date.parse(a.sentAtIso || '') || 0);
+  });
+  const rows = logs.map((log) => {
+    const dt = formatDateAndTimeTHJP(log.sentAtIso || log.sentAt || '');
+    const typeLabel = log.type || 'void_manual_email';
+    const tx = log.transactionId || '';
+    const orderNo = log.orderNo || '';
+    const merchantId = log.merchantId || '';
+    const routeNo = log.routeNo || '';
+    const emailTo = log.emailTo || '';
+    const subject = log.subject || '';
+    return `<tr>
+      <td class="col-date">${esc(dt.date || '')}</td>
+      <td class="col-time">TH: ${esc(dt.timeTh || '')}<br><span class="time-jp">JP: ${esc(dt.timeJp || '')}</span></td>
+      <td class="col-narrow">${esc(typeLabel)}</td>
+      <td class="col-narrow">${esc(tx)}</td>
+      <td class="col-narrow">${esc(orderNo)}</td>
+      <td class="col-narrow">${esc(merchantId)}</td>
+      <td class="col-narrow">${esc(routeNo)}</td>
+      <td class="col-narrow">${esc(emailTo)}</td>
+      <td>${esc(subject)}</td>
+    </tr>`;
+  }).join('');
+  const thead = '<thead><tr>'
+    + '<th>' + t(locale, 'cr_th_sent_at') + '</th>'
+    + '<th>' + t(locale, 'cr_th_received_time') + '</th>'
+    + '<th>Type</th>'
+    + '<th>TransactionId</th>'
+    + '<th>OrderNo</th>'
+    + '<th>' + t(locale, 'cr_th_merchant') + '</th>'
+    + '<th>' + t(locale, 'cr_th_route_no') + '</th>'
+    + '<th>Email To</th>'
+    + '<th>Subject</th>'
+    + '</tr></thead>';
+  const mainContent = '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_mail_logs') || 'Mail logs', mainContent, '', req.originalUrl, req.session.member, req, undefined, env));
+});
+
+// 무효내역 요약: 자동무효/수동무효/이메일무효/자동환불/수동환불
+app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cancel_refund'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const env = getEnvFromReq(req);
+  const days = 30;
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const notiEntries = loadVoidRefundNotiLog(days).filter((e) => {
+    const eEnv = (e.env || 'live').toString().toLowerCase();
+    return env === 'sandbox' ? eEnv === 'sandbox' : eEnv !== 'sandbox';
+  });
+  const emailEntries = (Array.isArray(MAIL_LOGS) ? MAIL_LOGS : []).filter((e) => {
+    const eEnv = (e.env || 'live').toString().toLowerCase();
+    return env === 'sandbox' ? eEnv === 'sandbox' : eEnv !== 'sandbox';
+  });
+  const categorize = (type, mode) => {
+    if (type === 'void') {
+      return mode === 'auto' ? 'auto_void' : 'manual_void';
+    }
+    if (type === 'refund') {
+      return mode === 'auto' ? 'auto_refund' : 'manual_refund';
+    }
+    return 'other';
+  };
+  const categoryLabel = (cat) => {
+    if (cat === 'auto_void') return '자동무효';
+    if (cat === 'manual_void') return '수동무효';
+    if (cat === 'email_void') return '이메일무효';
+    if (cat === 'auto_refund') return '자동환불';
+    if (cat === 'manual_refund') return '수동환불';
+    return cat;
+  };
+  const rowsData = [];
+  for (const e of notiEntries) {
+    const cat = categorize(e.type, e.mode);
+    const dt = formatDateAndTimeTHJP(e.sentAtIso || e.sentAt || '');
+    rowsData.push({
+      sentAt: dt,
+      category: cat,
+      source: 'noti',
+      transactionId: e.transactionId || '',
+      orderNo: e.orderNo || '',
+      merchantId: e.merchantId || '',
+      routeNo: e.routeNo || '',
+      detail: e.type === 'void' ? 'Void noti' : (e.type === 'refund' ? 'Refund noti' : (e.type || '')),
+    });
+  }
+  for (const m of emailEntries) {
+    const dt = formatDateAndTimeTHJP(m.sentAtIso || m.sentAt || '');
+    const cat = m.type === 'void_manual_email' ? 'email_void' : 'other';
+    rowsData.push({
+      sentAt: dt,
+      category: cat,
+      source: 'email',
+      transactionId: m.transactionId || '',
+      orderNo: m.orderNo || '',
+      merchantId: m.merchantId || '',
+      routeNo: m.routeNo || '',
+      // 메일 제목 그대로 표시 (예: "무효 요청: 30151580")
+      detail: m.subject || '',
+    });
+  }
+  rowsData.sort((a, b) => {
+    const ta = Date.parse(a.sentAt && a.sentAt.date ? a.sentAt.date + ' ' + a.sentAt.timeTh : '') || 0;
+    const tb = Date.parse(b.sentAt && b.sentAt.date ? b.sentAt.date + ' ' + b.sentAt.timeTh : '') || 0;
+    return tb - ta;
+  });
+  const rows = rowsData.map((r) => {
+    const dt = r.sentAt || { date: '', timeTh: '', timeJp: '' };
+    return `<tr>
+      <td class="col-date">${esc(dt.date || '')}</td>
+      <td class="col-time">TH: ${esc(dt.timeTh || '')}<br><span class="time-jp">JP: ${esc(dt.timeJp || '')}</span></td>
+      <td class="col-narrow">${esc(categoryLabel(r.category))}</td>
+      <td class="col-narrow">${esc(r.source)}</td>
+      <td class="col-narrow">${esc(r.transactionId)}</td>
+      <td class="col-narrow">${esc(r.orderNo)}</td>
+      <td class="col-narrow">${esc(r.merchantId)}</td>
+      <td class="col-narrow">${esc(r.routeNo)}</td>
+      <td>${esc(r.detail)}</td>
+    </tr>`;
+  }).join('');
+  const thead = '<thead><tr>'
+    + '<th>' + t(locale, 'cr_th_sent_at') + '</th>'
+    + '<th>' + t(locale, 'cr_th_received_time') + '</th>'
+    + '<th>구분</th>'
+    + '<th>Source</th>'
+    + '<th>TransactionId</th>'
+    + '<th>OrderNo</th>'
+    + '<th>' + t(locale, 'cr_th_merchant') + '</th>'
+    + '<th>' + t(locale, 'cr_th_route_no') + '</th>'
+    + '<th>Detail</th>'
+    + '</tr></thead>';
+  const mainContent = '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_void_summary') || '무효내역', mainContent, '', req.originalUrl, req.session.member, req, undefined, env));
+});
+
 app.get('/admin/cancel-refund/force-void', requireAuth, requirePage('cancel_refund'), (req, res) => {
   const locale = getLocale(req);
   const adminUser = req.session.adminUser || '';
   const q = req.query || {};
   const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
-  const relayStatus = (r) => (r === 'ok' ? '성공' : r === 'fail' ? '실패' : r === 'skip' ? '미전송' : '');
-  const okDetail = (q.relay || q.internal) ? ' 가맹점: ' + relayStatus(q.relay) + ', 전산: ' + relayStatus(q.internal) : '';
-  let alertHtml = q.ok === '1' ? '<div class="alert alert-ok">' + t(locale, 'cr_alert_force_void_ok') + (okDetail ? '<br><span style="font-size:12px;">노티 전송 결과' + okDetail + '</span>' : '') + '</div>' : (q.fail === '1' && q.reason ? '<div class="alert alert-fail">' + escQ(q.reason) + '</div>' : '');
-  if (q.deleted === '1') alertHtml += '<div class="alert alert-ok">목록에서 제거되었습니다. <a href="/admin/cancel-refund/void-deleted-list?env=' + encodeURIComponent(getEnvFromReq(req)) + '">삭제거래</a>에서 확인·복원할 수 있습니다.</div>';
+  const relayStatus = (r) => (r === 'ok' ? t(locale, 'status_ok') : r === 'fail' ? t(locale, 'status_fail') : r === 'skip' ? t(locale, 'status_skip') : '');
+  const okDetail = (q.relay || q.internal) ? ' ' + t(locale, 'cr_detail_relay_prefix') + ' ' + relayStatus(q.relay) + ', ' + t(locale, 'cr_detail_internal_prefix') + ' ' + relayStatus(q.internal) : '';
+  let alertHtml = q.ok === '1' ? '<div class="alert alert-ok">' + t(locale, 'cr_alert_force_void_ok') + (okDetail ? '<br><span style="font-size:12px;">' + t(locale, 'cr_noti_send_result') + okDetail + '</span>' : '') + '</div>' : (q.fail === '1' && q.reason ? '<div class="alert alert-fail">' + escQ(q.reason) + '</div>' : '');
+  if (q.deleted === '1') {
+    const deletedListLink = '<a href="/admin/cancel-refund/void-deleted-list?env=' + encodeURIComponent(getEnvFromReq(req)) + '">' + t(locale, 'cr_void_deleted_list') + '</a>';
+    alertHtml += '<div class="alert alert-ok">' + (t(locale, 'cr_removed_from_list_msg') || '').replace(/\{\{link\}\}/g, deletedListLink) + '</div>';
+  }
   const { voidMap: voidSentMapForForce } = buildVoidRefundNotiSentMaps(90);
   const filteredLogs = getEnvFilteredLogs(req);
   const reversed = [...filteredLogs].slice().reverse();
@@ -6810,9 +7228,7 @@ app.get('/admin/cancel-refund/force-void', requireAuth, requirePage('cancel_refu
   const forceVoidList = reversed.filter((log) => {
     const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
     const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
-    const isSuccess = body.PaymentStatus === 0 || body.PaymentStatus === '0' || body.PaymentStatus === 1 || body.PaymentStatus === '1'
-      || (body.paymentStatus && String(body.paymentStatus).toLowerCase() === 'success')
-      || body.status === 1;
+    const isSuccess = isSuccessPaymentBody(body);
     if (!txId || !isSuccess || !log.merchantId || !MERCHANTS.get(log.merchantId)) return false;
     if (isVoidUiDeleted(txId, log.merchantId, forceVoidPageEnv, forceVoidDeleted)) return false;
     const baseDate = body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
@@ -6865,8 +7281,10 @@ app.get('/admin/cancel-refund/force-void', requireAuth, requirePage('cancel_refu
       <td class="col-action">${action}</td>
     </tr>`;
   }).join('');
-  const descHtml = '<p class="perm-legend" style="margin-bottom:12px;">' + (t(locale, 'cr_force_void_desc') || '').replace(/</g, '&lt;') + '</p><p class="hint" style="margin-bottom:12px;color:#6b7280;font-size:13px;">전산에 <strong>결제 내역이 없는</strong> 건은 무효 노티를 보내도 전산에서 반영되지 않거나 실패로 표시됩니다. 미들웨어에만 결제 성공 노티가 있고 전산에는 해당 결제가 없을 수 있으므로, <a href="/admin/internal-result">전산 결과</a>에서 해당 TransactionId의 결제 건 전달 여부를 확인하세요.</p>';
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th><th>Amount</th><th>금액</th><th>관리</th><th>강제무효</th></tr></thead>';
+  const internalResultLink = '<a href="/admin/internal-result">' + t(locale, 'nav_internal_result') + '</a>';
+  const forceVoidHint = (t(locale, 'cr_force_void_hint') || '').replace(/\{\{link\}\}/g, internalResultLink);
+  const descHtml = '<p class="page-desc" style="margin-bottom:10px;font-size:11px;color:#6b7280;line-height:1.45;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:6px 10px;">' + (t(locale, 'cr_force_void_desc') || '').replace(/</g, '&lt;') + '</p><p class="page-desc-hint" style="margin-bottom:12px;font-size:11px;color:#6b7280;line-height:1.45;">' + forceVoidHint + '</p>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_transaction_id') + '</th><th>' + t(locale, 'cr_th_order_no') + '</th><th>' + t(locale, 'cr_th_amount') + '</th><th>' + t(locale, 'cr_th_amount_display') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_btn_force_void') + '</th></tr></thead>';
   const tableContent = descHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
   res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_force_void') + ' (' + forceVoidList.length + ')', tableContent, alertHtml, req.originalUrl, req.session.member, req, undefined, forceVoidPageEnv));
 });
@@ -6883,22 +7301,22 @@ app.get('/admin/cancel-refund/void-delete-confirm', requireAuth, requirePage('ca
   if (!transactionId || !merchantId) {
     return res.redirect('/admin/cancel-refund/void?env=' + encodeURIComponent(env));
   }
-  const sourceLabel = source === 'force_void' ? '강제 무효' : '무효거래';
+  const sourceLabel = source === 'force_void' ? t(locale, 'cr_source_force_void') : t(locale, 'cr_source_void');
   const backUrl = source === 'force_void' ? '/admin/cancel-refund/force-void?env=' + encodeURIComponent(env) : '/admin/cancel-refund/void?env=' + encodeURIComponent(env);
-  const confirmBody = '<p class="hint" style="margin-bottom:12px;">이 건을 목록에서 제거합니다. 삭제한 관리자 아이디와 시각이 기록되며, <strong>삭제거래</strong>에 1달간 보관된 뒤 자동 삭제됩니다. 삭제거래에서 복원할 수 있습니다.</p>'
-    + '<p style="margin-bottom:12px;"><strong>TransactionId</strong>: ' + esc(transactionId) + ' / <strong>가맹점</strong>: ' + esc(merchantId) + ' (' + sourceLabel + ')</p>'
+  const confirmBody = '<p class="hint" style="margin-bottom:12px;font-size:12px;color:#6b7280;">' + (t(locale, 'cr_delete_confirm_body') || '') + '</p>'
+    + '<p style="margin-bottom:12px;font-size:12px;"><strong>' + t(locale, 'cr_th_transaction_id') + '</strong>: ' + esc(transactionId) + ' / <strong>' + t(locale, 'cr_th_merchant') + '</strong>: ' + esc(merchantId) + ' (' + esc(sourceLabel) + ')</p>'
     + '<form method="post" action="/admin/cancel-refund/void-delete" id="void-delete-form">'
     + '<input type="hidden" name="transactionId" value="' + esc(transactionId) + '" />'
     + '<input type="hidden" name="merchantId" value="' + esc(merchantId) + '" />'
     + '<input type="hidden" name="env" value="' + esc(env) + '" />'
     + '<input type="hidden" name="source" value="' + esc(source) + '" />'
-    + '<p style="margin-bottom:12px;"><label><input type="checkbox" id="void-delete-confirm-cb" name="confirm" value="1" /> 위 내용을 확인했으며, 목록에서 제거(삭제)합니다.</label></p>'
-    + '<button type="submit" id="void-delete-submit" style="padding:8px 16px;background:#9ca3af;color:#fff;border:none;border-radius:6px;cursor:not-allowed;" disabled>삭제 실행</button> '
-    + '<a href="' + esc(backUrl) + '" style="padding:8px 16px;background:#6b7280;color:#fff;border-radius:6px;text-decoration:none;">취소</a>'
+    + '<p style="margin-bottom:12px;font-size:12px;"><label><input type="checkbox" id="void-delete-confirm-cb" name="confirm" value="1" /> ' + esc(t(locale, 'cr_delete_confirm_label')) + '</label></p>'
+    + '<button type="submit" id="void-delete-submit" style="padding:8px 16px;background:#9ca3af;color:#fff;border:none;border-radius:6px;cursor:not-allowed;" disabled>' + esc(t(locale, 'cr_delete_execute')) + '</button> '
+    + '<a href="' + esc(backUrl) + '" style="padding:8px 16px;background:#6b7280;color:#fff;border-radius:6px;text-decoration:none;">' + esc(t(locale, 'common_cancel')) + '</a>'
     + '</form>'
     + '<script>document.getElementById("void-delete-confirm-cb").addEventListener("change", function(){ var btn = document.getElementById("void-delete-submit"); btn.disabled = !this.checked; btn.style.cursor = this.checked ? "pointer" : "not-allowed"; btn.style.background = this.checked ? "#dc2626" : "#9ca3af"; });</script>';
   const tableContent = '<div class="card" style="max-width:560px;">' + confirmBody + '</div>';
-  res.send(renderCancelRefundPage(locale, adminUser, '목록에서 제거 확인', tableContent, '', req.originalUrl, req.session.member, req, undefined, env));
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'cr_delete_confirm_title'), tableContent, '', req.originalUrl, req.session.member, req, undefined, env));
 });
 
 app.post('/admin/cancel-refund/void-delete', requireAuth, requirePage('cancel_refund'), (req, res) => {
@@ -6924,19 +7342,19 @@ app.get('/admin/cancel-refund/void-deleted-list', requireAuth, requirePage('canc
   const env = getEnvFromReq(req);
   const deletedList = loadVoidUiDeletedList();
   const filtered = deletedList.filter((d) => (String(d.env || 'live').toLowerCase() === (env === 'sandbox' ? 'sandbox' : 'live')));
-  const sourceLabel = (s) => (s === 'force_void' ? '강제 무효' : '무효거래');
+  const sourceLabel = (s) => (s === 'force_void' ? t(locale, 'cr_source_force_void') : t(locale, 'cr_source_void'));
   const rows = filtered.map((d) => {
     const deletedAtStr = d.deletedAtIso ? new Date(d.deletedAtIso).toLocaleString('ko-KR', { hour12: false }) : '-';
-    const restoreForm = '<form method="post" action="/admin/cancel-refund/void-deleted-restore" style="display:inline;"><input type="hidden" name="id" value="' + esc(d.id || '') + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><button type="submit" style="padding:4px 10px;font-size:12px;background:#16a34a;color:#fff;border:none;border-radius:4px;cursor:pointer;">복원</button></form>';
-    return '<tr><td class="col-narrow">' + esc(d.transactionId || '') + '</td><td class="col-narrow">' + esc(d.merchantId || '') + '</td><td class="col-narrow">' + sourceLabel(d.source) + '</td><td class="col-date">' + esc(deletedAtStr) + '</td><td class="col-narrow">' + esc(d.deletedBy || '') + '</td><td class="col-action">' + restoreForm + '</td></tr>';
+    const restoreForm = '<form method="post" action="/admin/cancel-refund/void-deleted-restore" style="display:inline;"><input type="hidden" name="id" value="' + esc(d.id || '') + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><button type="submit" style="padding:4px 10px;font-size:12px;background:#16a34a;color:#fff;border:none;border-radius:4px;cursor:pointer;">' + esc(t(locale, 'cr_restore')) + '</button></form>';
+    return '<tr><td class="col-narrow">' + esc(d.transactionId || '') + '</td><td class="col-narrow">' + esc(d.merchantId || '') + '</td><td class="col-narrow">' + esc(sourceLabel(d.source)) + '</td><td class="col-date">' + esc(deletedAtStr) + '</td><td class="col-narrow">' + esc(d.deletedBy || '') + '</td><td class="col-action">' + restoreForm + '</td></tr>';
   }).join('');
-  const thead = '<thead><tr><th>TransactionId</th><th>가맹점</th><th>출처</th><th>삭제 시각</th><th>삭제한 아이디</th><th>복원</th></tr></thead>';
-  const hint = '<p class="hint" style="margin-bottom:12px;color:#6b7280;">무효거래/강제 무효 목록에서 「목록에서 제거」한 건이 1달간 보관됩니다. 1달이 지나면 자동 삭제되어 다시 해당 목록에 노출됩니다. 복원 시 해당 목록에 다시 표시됩니다.</p>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_transaction_id') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_source_col') + '</th><th>' + t(locale, 'cr_deleted_at') + '</th><th>' + t(locale, 'cr_deleted_by') + '</th><th>' + t(locale, 'cr_restore') + '</th></tr></thead>';
+  const hint = '<p class="hint" style="margin-bottom:12px;font-size:11px;color:#6b7280;line-height:1.45;">' + esc(t(locale, 'cr_void_deleted_hint')) + '</p>';
   let listAlert = '';
-  if (q.restore === 'ok') listAlert = '<div class="alert alert-ok">복원되었습니다. 무효거래/강제 무효 목록에서 다시 확인할 수 있습니다.</div>';
-  if (q.restore === 'fail') listAlert = '<div class="alert alert-fail">복원 처리에 실패했거나 이미 삭제된 항목일 수 있습니다.</div>';
+  if (q.restore === 'ok') listAlert = '<div class="alert alert-ok">' + esc(t(locale, 'cr_restore_ok_msg')) + '</div>';
+  if (q.restore === 'fail') listAlert = '<div class="alert alert-fail">' + esc(t(locale, 'cr_restore_fail_msg')) + '</div>';
   const tableContent = listAlert + hint + '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
-  res.send(renderCancelRefundPage(locale, adminUser, '삭제거래 (' + filtered.length + ')', tableContent, '', req.originalUrl, req.session.member, req, undefined, env));
+  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'cr_void_deleted_list') + ' (' + filtered.length + ')', tableContent, '', req.originalUrl, req.session.member, req, undefined, env));
 });
 
 app.post('/admin/cancel-refund/void-deleted-restore', requireAuth, requirePage('cancel_refund'), (req, res) => {
@@ -7030,9 +7448,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cancel_refund')
   const refundList = reversed.filter((log) => {
     const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
     const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
-    const isSuccess = body.PaymentStatus === 0 || body.PaymentStatus === '0' || body.PaymentStatus === 1 || body.PaymentStatus === '1'
-      || (body.paymentStatus && String(body.paymentStatus).toLowerCase() === 'success')
-      || body.status === 1;
+    const isSuccess = isSuccessPaymentBody(body);
     if (!txId || !isSuccess || !log.merchantId || !MERCHANTS.get(log.merchantId)) return false;
     const payDate = body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
     // 환불거래 목록: 환불 가능 기간 내인 건만 노출 (PaymentDate 기준)
@@ -7131,7 +7547,7 @@ app.post('/admin/cancel-refund/force-void-request', requireAuth, requirePage('ca
   const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
   const forceVoidEnv = (String(log.env || '').toLowerCase().trim() === 'sandbox' ? 'sandbox' : 'live');
   if (!txId) return res.redirect('/admin/cancel-refund/force-void?fail=1&reason=' + encodeURIComponent(t(locale, 'cr_err_no_transaction_id')) + '&env=' + encodeURIComponent(forceVoidEnv));
-  const sendResult = await sendVoidOrRefundNoti(log, 'void');
+  const sendResult = await sendVoidOrRefundNoti(log, 'void', 'manual');
   markVoidNotiSent(txId);
   const relay = sendResult.success ? 'ok' : (sendResult.error && sendResult.error.indexOf('가맹점') !== -1 ? 'skip' : 'fail');
   const internal = sendResult.internalOk === true ? 'ok' : (sendResult.internalOk === false ? 'fail' : 'skip');
@@ -7154,7 +7570,7 @@ app.post('/admin/cancel-refund/void-request', requireAuth, requirePage('cancel_r
   const voidEnv = (String(log.env || '').toLowerCase().trim() === 'sandbox' ? 'sandbox' : 'live');
   if (!result.success) return res.redirect('/admin/cancel-refund/void?void=fail&reason=' + encodeURIComponent(result.error || t(locale, 'cr_alert_void_fail')) + '&env=' + encodeURIComponent(voidEnv));
   if (!hasVoidNotiSent(txId)) {
-    await sendVoidOrRefundNoti(log, 'void');
+    await sendVoidOrRefundNoti(log, 'void', 'manual');
     markVoidNotiSent(txId);
   }
   return res.redirect('/admin/cancel-refund/void?void=ok&env=' + encodeURIComponent(voidEnv));
@@ -7175,7 +7591,7 @@ app.post('/admin/cancel-refund/refund-request', requireAuth, requirePage('cancel
   const result = await chillPayRequestRefund(txId, false);
   const refundEnv = (String(log.env || '').toLowerCase().trim() === 'sandbox' ? 'sandbox' : 'live');
   if (!result.success) return res.redirect('/admin/cancel-refund/refund?refund=fail&reason=' + encodeURIComponent(result.error || t(locale, 'cr_alert_refund_fail')) + '&env=' + encodeURIComponent(refundEnv));
-  await sendVoidOrRefundNoti(log, 'refund');
+  await sendVoidOrRefundNoti(log, 'refund', 'manual');
   markRefundNotiSent(txId);
   return res.redirect('/admin/cancel-refund/refund?refund=ok&env=' + encodeURIComponent(refundEnv));
 });
@@ -7250,17 +7666,17 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
   const q = req.query || {};
   const txFilter = (q.txId || '').toString().trim();
   const resendKind = (q.resendKind || 'payment').toString().toLowerCase();
-  const resendOkLabel = resendKind === 'cancel' ? '취소 재전송이 완료되었습니다.' : '결제 재전송이 완료되었습니다.';
-  const resendFailLabel = resendKind === 'cancel' ? '취소 재전송 실패' : '결제 재전송 실패';
+  const resendOkLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_ok') : t(locale, 'pg_logs_resend_pay_ok');
+  const resendFailLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_fail') : t(locale, 'pg_logs_resend_pay_fail');
   const resendMsg =
     q.resend === 'ok'
       ? '<div class="alert alert-ok">' + resendOkLabel + '</div>'
       : q.resend === 'fail' && q.reason
       ? '<div class="alert alert-fail">' + resendFailLabel + ': ' + String(q.reason).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>'
       : q.err === 'invalid'
-      ? '<div class="alert alert-fail">잘못된 요청입니다.</div>'
+      ? '<div class="alert alert-fail">' + t(locale, 'err_bad_request') + '</div>'
       : q.err === 'no_target' || q.err === 'no_body'
-      ? '<div class="alert alert-fail">' + (q.reason ? String(q.reason).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : (q.err === 'no_target' ? '가맹점 URL 없음' : '노티 본문 없음')) + '</div>'
+      ? '<div class="alert alert-fail">' + (q.reason ? String(q.reason).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : (q.err === 'no_target' ? t(locale, 'relay_no_url') : t(locale, 'relay_no_body'))) + '</div>'
       : '';
   const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
   const adminUser = req.session.adminUser || '';
@@ -7284,16 +7700,16 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       const envLabel = (log.env && String(log.env).toLowerCase()) === 'sandbox' ? 'sandbox' : 'live';
       const routeNo = (log.routeKey && (log.routeKey.match(/\/(\d+)$/) || [null, log.routeKey])[1]) || log.routeKey || '-';
       const relayStatus = log.relayStatus || '-';
-      const relayLabel = relayStatus === 'ok' ? '성공' : relayStatus === 'fail' ? '실패' : relayStatus === 'skip' ? '미전송' : relayStatus;
+      const relayLabel = relayStatus === 'ok' ? t(locale, 'status_ok') : relayStatus === 'fail' ? t(locale, 'status_fail') : relayStatus === 'skip' ? t(locale, 'status_skip') : relayStatus;
       const formatUsed = log.relayFormatUsed || (log.relaySentAsJson === true ? 'json' : 'raw');
       const relayClass = relayStatus === 'ok' ? (formatUsed === 'json' ? 'status-ok' : formatUsed === 'form' ? 'status-ok-form' : 'status-ok-normal') : relayStatus === 'fail' ? 'status-fail' : '';
       const failReason = (log.relayFailReason || '').trim();
       const canResend = (relayStatus === 'fail' || relayStatus === 'ok') && (log.targetUrl || findMerchantByRouteKey(log.routeKey)) && (log.body || log.rawBody);
       const body = parseNotiBody(log);
       const resendKindVal = isCancelNotiBody(body) ? 'cancel' : 'payment';
-      const resendKindLabel = resendKindVal === 'cancel' ? '취소' : '결제';
+      const resendKindLabel = resendKindVal === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
       const resendBtn = canResend
-        ? `<div class="resend-wrap" style="display:inline-flex;flex-direction:row;gap:6px;align-items:center;flex-wrap:nowrap;"><span class="resend-kind-label" style="font-size:11px;color:#6b7280;margin-right:4px;">${resendKindLabel}</span><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><button type="submit" class="btn-resend" onclick="return confirm('일반(원문) 형식으로 다시 전송하시겠습니까?');">일반</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json" onclick="return confirm('JSON 형식으로 다시 전송하시겠습니까?');">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form" onclick="return confirm('FORM 형식으로 다시 전송하시겠습니까?');">FORM</button></form></div>`
+        ? `<div class="resend-wrap" style="display:inline-flex;flex-direction:row;gap:6px;align-items:center;flex-wrap:nowrap;"><span class="resend-kind-label" style="font-size:11px;color:#6b7280;margin-right:4px;">${resendKindLabel}</span><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_plain') || '').replace(/'/g, "\\'")}');">${t(locale, 'pg_logs_btn_plain')}</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_json') || '').replace(/'/g, "\\'")}');">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_form') || '').replace(/'/g, "\\'")}');">FORM</button></form></div>`
         : '-';
       const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : '-');
       const orderNo = body.OrderNo != null ? body.OrderNo : (body.orderNo != null ? body.orderNo : '-');
@@ -7505,7 +7921,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       <h1>${t(locale, 'internal_targets_title')}</h1>
-      <p style="font-size:13px;color:#555;">${t(locale, 'internal_targets_desc')}</p>
+      <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'internal_targets_desc')}</p>
       <h2>${t(locale, 'internal_targets_register')}</h2>
       <form method="post" action="/admin/internal-targets" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
         <label>${t(locale, 'internal_targets_id')}<input type="text" name="id" required /></label>
@@ -7679,7 +8095,7 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'internal_noti_title')}</h1>
-        <p style="font-size:13px;color:#555;">${t(locale, 'internal_noti_desc')}</p>
+        <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'internal_noti_desc')}</p>
         <ul style="font-size:13px;color:#374151;margin:8px 0;">
           <li><strong>X 100</strong>: ${t(locale, 'internal_noti_rule_x')} · <strong>/ 100</strong>: ${t(locale, 'internal_noti_rule_div')} · <strong>=</strong>: ${t(locale, 'internal_noti_rule_eq')}</li>
           <li><strong>RouteNo 삭제</strong>: 해당 구문과 값을 전산 전송에서 제외. 기본은 현재 전산용 루트번호(가맹점 설정).</li>
@@ -7847,7 +8263,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'nav_dev_internal_noti_settings') || '개발 환경설정'}</h1>
-        <p style="font-size:13px;color:#555;">${t(locale, 'internal_noti_desc')}</p>
+        <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'internal_noti_desc')}</p>
         <ul style="font-size:13px;color:#374151;margin:8px 0;">
           <li><strong>X 100</strong>: ${t(locale, 'internal_noti_rule_x')} · <strong>/ 100</strong>: ${t(locale, 'internal_noti_rule_div')} · <strong>=</strong>: ${t(locale, 'internal_noti_rule_eq')}</li>
           <li><strong>RouteNo 삭제</strong>: 해당 구문과 값을 전산 전송에서 제외. 기본은 현재 전산용 루트번호(가맹점 설정).</li>
@@ -8156,7 +8572,7 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'test_config_title')}</h1>
-        <p style="font-size:13px;color:#555;">${t(locale, 'test_config_desc')}</p>
+        <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'test_config_desc')}</p>
         <h2>등록/수정</h2>
         <form method="post" action="/admin/test-configs" id="test-config-form" onsubmit="return (function(){ var dup=document.getElementById('test-config-id-dup'); if(dup&&dup.style.display!=='none'){ alert('동일한 이름이 있습니다. 설정 ID를 다른 값으로 변경해 주세요.'); return false; } return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}'); })();">
           ${editingConfig ? `<input type="hidden" name="originalId" value="${editingConfig.id}" />` : ''}
@@ -8447,7 +8863,7 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'test_run_title')}</h1>
-        <p style="font-size:13px;color:#555;">${t(locale, 'test_config_desc')}</p>
+        <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'test_config_desc')}</p>
         <form method="post" action="/admin/test-pay/start">
           <label>
             테스트 환경 선택
@@ -8954,12 +9370,48 @@ app.get('/admin/test-pay/return', requireAuth, requirePage('test_run'), (req, re
   const nowDate = new Date();
   const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const logs = Array.isArray(NOTI_LOGS) ? NOTI_LOGS : [];
+  // 테스트 기준: ChillPay URL Result 가 /noti/result/20 인 노티만 대상으로 삼는다.
+  const latestTestLog = [...logs].slice().reverse().find((log) => {
+    return log && log.kind === 'result' && (log.routeKey === 'result/20' || log.routeKey === '20');
+  });
+  let resultTitle = '테스트 결제 대기 중';
+  let resultMessage = '최근 7일 이내에 수신된 테스트 Result 노티가 없습니다. 결제를 진행한 뒤 다시 열어 보세요.';
+  let detailHtml = '';
+  if (latestTestLog) {
+    const body = latestTestLog.body && typeof latestTestLog.body === 'object'
+      ? latestTestLog.body
+      : (typeof latestTestLog.body === 'string'
+        ? (() => { try { return JSON.parse(latestTestLog.body); } catch { return {}; } })()
+        : {});
+    const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+    const isSuccess = isSuccessPaymentBody(body);
+    const relayOk = latestTestLog.relayStatus === 'ok';
+    if (isSuccess && relayOk) {
+      resultTitle = '테스트 결제 완료';
+      resultMessage = '테스트는 정상적으로 완료되었습니다. 축하합니다.';
+    } else if (relayOk && !isSuccess) {
+      resultTitle = '테스트 결제 실패';
+      resultMessage = 'PG에서 실패/취소 상태로 Result 노티가 도착했습니다. 상세 내역을 확인하세요.';
+    } else if (!relayOk) {
+      resultTitle = '테스트 결과 노티 전송 실패';
+      resultMessage = '우리 미들웨어에서 테스트 결과 페이지로 Result 노티를 전송하는 데 실패했습니다. URL 및 방화벽 설정을 확인하세요.';
+    }
+    const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    detailHtml =
+      '<div style="margin-top:16px;font-size:13px;color:#4b5563;">' +
+      '<div><strong>routeKey</strong>: ' + esc(latestTestLog.routeKey || '') + '</div>' +
+      '<div><strong>merchantId</strong>: ' + esc(latestTestLog.merchantId || '') + '</div>' +
+      '<div><strong>relayStatus</strong>: ' + esc(latestTestLog.relayStatus || '-') + '</div>' +
+      '<div><strong>PaymentStatus</strong>: ' + esc(ps ?? '-') + '</div>' +
+      '</div>';
+  }
 
   res.send(`<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <title>테스트 결제 완료</title>
+  <title>${resultTitle}</title>
   <style>
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
@@ -8987,9 +9439,10 @@ app.get('/admin/test-pay/return', requireAuth, requirePage('test_run'), (req, re
         <span>아이디: ${adminUser || '-'}</span>
       </div>
       <div class="card">
-        <h1>테스트 결제 완료</h1>
-        <p class="success-msg">테스트는 정상적으로 완료 되었습니다. 축하합니다.</p>
-        <p style="font-size:13px;color:#555;">PG 결제 완료 후 ReturnUrl 로 이동한 페이지입니다.</p>
+        <h1>${resultTitle}</h1>
+        <p class="success-msg">${resultMessage}</p>
+        <p style="font-size:13px;color:#555;">이 페이지는 칠페이 Result 노티가 우리 미들웨어를 거쳐 테스트 결과 페이지로 전송되었는지 확인하기 위한 화면입니다.</p>
+        ${detailHtml}
         <a href="/admin/test-pay" style="display:inline-block;margin-top:12px;padding:8px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-size:14px;">테스트 실행으로 돌아가기</a>
       </div>
     </main>
@@ -9060,9 +9513,7 @@ app.get('/admin/test-logs', requireAuth, requirePage('test_history'), (req, res)
     .nav-group-summary { font-size:14px; font-weight:600; color:#e5e7eb; padding:6px 8px; cursor:pointer; list-style:none; text-transform:uppercase; letter-spacing:0.06em; display:flex; align-items:center; justify-content:space-between; border-radius:6px; }
     .nav-group-summary::-webkit-details-marker { display:none; }
     .nav-group-summary::marker { content:""; }
-    .nav-group { margin-bottom:2px; border:1px solid transparent; border-radius:6px; }
-    .nav-group-summary { font-size:11px; font-weight:600; color:#6b7280; padding:4px 6px 2px; text-transform:uppercase; letter-spacing:0.08em; }
-    .nav-group-items { padding-left:0; padding-bottom:4px; }
+    .nav-group-items { padding-left:4px; padding-bottom:4px; }
     .nav-group-items a { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:13px; border-radius:6px; }
     .nav a,
     .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
@@ -9081,7 +9532,7 @@ app.get('/admin/test-logs', requireAuth, requirePage('test_history'), (req, res)
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
         <h1>${t(locale, 'test_history_title')}</h1>
-        <p style="font-size:13px;color:#555;">${t(locale, 'test_history_desc')}</p>
+        <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'test_history_desc')}</p>
         <table>
           <thead>
             <tr>
@@ -9180,14 +9631,14 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       const jsonHeader = Object.keys(payload).join(', ');
       const jsonValue = JSON.stringify(payload, null, 2);
       const internalStatus = log.internalDeliveryStatus || '-';
-      const internalLabel = internalStatus === 'ok' ? '성공' : internalStatus === 'fail' ? '실패' : internalStatus === 'skip' ? '미전송' : internalStatus;
+      const internalLabel = internalStatus === 'ok' ? t(locale, 'status_ok') : internalStatus === 'fail' ? t(locale, 'status_fail') : internalStatus === 'skip' ? t(locale, 'status_skip') : internalStatus;
       const internalClass = internalStatus === 'ok' ? 'status-ok' : internalStatus === 'fail' ? 'status-fail' : '';
       const canResend = log.internalTargetUrl && log.payload;
       const internalResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
-      const internalResendLabel = internalResendKind === 'cancel' ? '취소 재전송' : '결제 재전송';
+      const internalResendLabel = internalResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/internal/resend" style="display:inline;" onsubmit="return confirm('해당 노티를 전산으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${internalResendKind}" /><button type="submit" class="btn-resend">${internalResendLabel}</button></form>`
-        : '<span class="label-none">노티없음</span>';
+        ? `<form method="post" action="/admin/internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${internalResendKind}" /><button type="submit" class="btn-resend">${internalResendLabel}</button></form>`
+        : '<span class="label-none">' + t(locale, 'status_noti_none') + '</span>';
       const internalTargetName = getInternalTargetName(log.internalTargetId);
       return `<tr>
         <td class="col-date">${esc(dt.date)}</td>
@@ -9250,7 +9701,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       <h1>${t(locale, 'internal_logs_title')} (${INTERNAL_LOGS.length})</h1>
-      <p style="font-size:13px;color:#555;">${t(locale, 'internal_logs_desc')}</p>
+      <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'internal_logs_desc')}</p>
       <table>
         <colgroup><col style="width:7%;" /><col style="width:9%;" /><col style="width:12%;" /><col style="width:5%;" /><col style="width:20%;" /><col style="width:43%;" /><col style="width:6%;" /></colgroup>
         <thead>
@@ -9304,14 +9755,14 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
   const locale = getLocale(req);
   const q = req.query || {};
   const resendKind = (q.resendKind || 'payment').toString().toLowerCase();
-  const resendOkLabel = resendKind === 'cancel' ? '취소 재전송이 완료되었습니다.' : '결제 재전송이 완료되었습니다.';
-  const resendFailLabel = resendKind === 'cancel' ? '취소 재전송 실패' : '결제 재전송 실패';
+  const resendOkLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_ok') : t(locale, 'pg_logs_resend_pay_ok');
+  const resendFailLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_fail') : t(locale, 'pg_logs_resend_pay_fail');
   const resendMsg =
     q.resend === 'ok'
       ? '<div class="alert alert-ok">' + resendOkLabel + '</div>'
       : q.resend === 'fail'
       ? '<div class="alert alert-fail">' + resendFailLabel + (q.reason ? ': ' + String(q.reason).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '') + '</div>'
-      : q.err ? '<div class="alert alert-fail">' + (q.err === 'invalid' ? '잘못된 요청입니다.' : '대상 URL 없음') + '</div>'
+      : q.err ? '<div class="alert alert-fail">' + (q.err === 'invalid' ? t(locale, 'err_bad_request') : t(locale, 'relay_no_url')) + '</div>'
       : '';
   const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
   const adminUser = req.session.adminUser || '';
@@ -9325,18 +9776,18 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       const realIndex = INTERNAL_LOGS.length - 1 - i;
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
       const status = log.internalDeliveryStatus || '-';
-      const label = status === 'ok' ? '성공' : status === 'fail' ? '실패' : status === 'skip' ? '미전송' : status;
+      const label = status === 'ok' ? t(locale, 'status_ok') : status === 'fail' ? t(locale, 'status_fail') : status === 'skip' ? t(locale, 'status_skip') : status;
       const statusClass = status === 'ok' ? 'status-ok' : status === 'fail' ? 'status-fail' : '';
       const canResend = log.internalTargetUrl && log.payload;
       const payload = log.payload || {};
       const internalResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
-      const internalResendLabel = internalResendKind === 'cancel' ? '취소 재전송' : '결제 재전송';
+      const internalResendLabel = internalResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="internal-result" /><input type="hidden" name="resendKind" value="${internalResendKind}" /><button type="submit" class="btn-resend" onclick="return confirm('해당 노티를 전산으로 다시 전송하시겠습니까?');">${internalResendLabel}</button></form>`
+        ? `<form method="post" action="/admin/internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="internal-result" /><input type="hidden" name="resendKind" value="${internalResendKind}" /><button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${internalResendLabel}</button></form>`
         : '-';
       const txId = payload.TransactionId != null ? payload.TransactionId : (payload.transactionId != null ? payload.transactionId : '-');
       const payStatus = payload.PaymentStatus != null ? payload.PaymentStatus : '-';
-      const statusDesc = payStatus === '2' || payStatus === 2 ? '무효' : payStatus === '9' || payStatus === 9 ? '환불' : payStatus === '1' || payStatus === 1 ? '결제' : payStatus;
+      const statusDesc = payStatus === '2' || payStatus === 2 ? t(locale, 'status_void') : payStatus === '9' || payStatus === 9 ? t(locale, 'status_refund') : payStatus === '1' || payStatus === 1 ? t(locale, 'status_payment') : payStatus;
       const internalTargetName = getInternalTargetName(log.internalTargetId);
       return `<tr>
         <td>${esc(dt.date)}</td>
@@ -9454,19 +9905,19 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       const internalStatus = log.internalDeliveryStatus || '-';
       const internalLabel =
         internalStatus === 'ok'
-          ? '성공'
+          ? t(locale, 'status_ok')
           : internalStatus === 'fail'
-          ? '실패'
+          ? t(locale, 'status_fail')
           : internalStatus === 'skip'
-          ? '미전송'
+          ? t(locale, 'status_skip')
           : internalStatus;
       const internalClass = internalStatus === 'ok' ? 'status-ok' : internalStatus === 'fail' ? 'status-fail' : '';
       const canResend = log.internalTargetUrl && log.payload;
       const devResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
-      const devResendLabel = devResendKind === 'cancel' ? '취소 재전송' : '결제 재전송';
+      const devResendLabel = devResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('해당 노티를 개발 전산으로 다시 전송하시겠습니까?');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${devResendKind}" /><button type="submit" class="btn-resend">${devResendLabel}</button></form>`
-        : '<span class="label-none">노티없음</span>';
+        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${devResendKind}" /><button type="submit" class="btn-resend">${devResendLabel}</button></form>`
+        : '<span class="label-none">' + t(locale, 'status_noti_none') + '</span>';
       return `<tr>
         <td class="col-date">${esc(dt.date)}</td>
         <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
@@ -9527,7 +9978,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       <h1>${t(locale, 'nav_dev_internal_noti_log') || '개발 노티 로그'} (${DEV_INTERNAL_LOGS.length})</h1>
-      <p style="font-size:13px;color:#555;">${t(locale, 'internal_logs_desc')}</p>
+      <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'internal_logs_desc')}</p>
       <table>
         <colgroup><col style="width:8%;" /><col style="width:10%;" /><col style="width:6%;" /><col style="width:22%;" /><col style="width:46%;" /><col style="width:6%;" /></colgroup>
         <thead>
@@ -9580,14 +10031,14 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   const locale = getLocale(req);
   const q = req.query || {};
   const resendKind = (q.resendKind || 'payment').toString().toLowerCase();
-  const resendOkLabel = resendKind === 'cancel' ? '취소 재전송이 완료되었습니다.' : '결제 재전송이 완료되었습니다.';
-  const resendFailLabel = resendKind === 'cancel' ? '취소 재전송 실패' : '결제 재전송 실패';
+  const resendOkLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_ok') : t(locale, 'pg_logs_resend_pay_ok');
+  const resendFailLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_fail') : t(locale, 'pg_logs_resend_pay_fail');
   const resendMsg =
     q.resend === 'ok'
       ? '<div class="alert alert-ok">' + resendOkLabel + '</div>'
       : q.resend === 'fail'
       ? '<div class="alert alert-fail">' + resendFailLabel + (q.reason ? ': ' + String(q.reason).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '') + '</div>'
-      : q.err ? '<div class="alert alert-fail">' + (q.err === 'invalid' ? '잘못된 요청입니다.' : '대상 URL 없음') + '</div>'
+      : q.err ? '<div class="alert alert-fail">' + (q.err === 'invalid' ? t(locale, 'err_bad_request') : t(locale, 'relay_no_url')) + '</div>'
       : '';
   const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
   const adminUser = req.session.adminUser || '';
@@ -9601,14 +10052,14 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       const realIndex = DEV_INTERNAL_LOGS.length - 1 - i;
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
       const status = log.internalDeliveryStatus || '-';
-      const label = status === 'ok' ? '성공' : status === 'fail' ? '실패' : status === 'skip' ? '미전송' : status;
+      const label = status === 'ok' ? t(locale, 'status_ok') : status === 'fail' ? t(locale, 'status_fail') : status === 'skip' ? t(locale, 'status_skip') : status;
       const statusClass = status === 'ok' ? 'status-ok' : status === 'fail' ? 'status-fail' : '';
       const canResend = log.internalTargetUrl && log.payload;
       const payload = log.payload || {};
       const devResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
-      const devResendLabel = devResendKind === 'cancel' ? '취소 재전송' : '결제 재전송';
+      const devResendLabel = devResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="dev-internal-result" /><input type="hidden" name="resendKind" value="${devResendKind}" /><button type="submit" class="btn-resend" onclick="return confirm('해당 노티를 개발 전산으로 다시 전송하시겠습니까?');">${devResendLabel}</button></form>`
+        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="dev-internal-result" /><input type="hidden" name="resendKind" value="${devResendKind}" /><button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${devResendLabel}</button></form>`
         : '-';
       return `<tr>
         <td>${esc(dt.date)}</td>

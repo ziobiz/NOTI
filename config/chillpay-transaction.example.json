@@ -25,5 +25,5 @@
   "companyName": "",
   "contactName": "",
   "emailTo": "help@chillpay.co.th",
-  "emailBodyTemplate": "아래 거래에 대해 취소를 요청합니다.\\n\\nTransactionId(transNo): {{transNo}}\\nOrderNo: {{orderNo}}\\nAmount: {{amount}}\\nRoute No. {{routeNo}}\\nPaymentDate: {{paymentDate}}\\nMID: {{mid}}\\n"
+  "emailBodyTemplate": "안녕하세요. 아래의 거래에 대해 무효 처리를 요청합니다 감사합니다.\\n\\nTransactionId(transNo): {{transNo}}\\nOrderNo: {{orderNo}}\\nAmount: {{amount}}\\nRoute No. {{routeNo}}\\nPaymentDate: {{paymentDate}}\\nMID: {{mid}}\\n"
 }
