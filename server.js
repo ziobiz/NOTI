@@ -227,6 +227,7 @@ function loadChillPayTransactionConfig() {
       smtpSecure: !!(o && o.smtpSecure === true),
       smtpUser: (o && o.smtpUser != null) ? String(o.smtpUser).trim() : '',
       smtpPass: (o && o.smtpPass != null) ? String(o.smtpPass) : '',
+      smtpTestTo: (o && o.smtpTestTo != null) ? String(o.smtpTestTo).trim() : '',
     };
   } catch (e) {
     return {
@@ -252,6 +253,7 @@ function loadChillPayTransactionConfig() {
       smtpSecure: false,
       smtpUser: '',
       smtpPass: '',
+      smtpTestTo: '',
     };
   }
 }
@@ -284,6 +286,7 @@ function saveChillPayTransactionConfig(o) {
     smtpSecure: o && typeof o.smtpSecure === 'boolean' ? o.smtpSecure : cur.smtpSecure,
     smtpUser: (o && o.smtpUser != null) ? String(o.smtpUser).trim() : cur.smtpUser,
     smtpPass: (o && o.smtpPass != null && String(o.smtpPass).trim() !== '') ? String(o.smtpPass) : cur.smtpPass,
+    smtpTestTo: (o && o.smtpTestTo != null) ? String(o.smtpTestTo).trim() : cur.smtpTestTo,
   };
   fs.writeFileSync(CHILLPAY_TRANSACTION_CONFIG_PATH, JSON.stringify(toSave, null, 2));
   return toSave;
@@ -2093,6 +2096,8 @@ function buildVoidEmailContent(log) {
   const amount = body.Amount != null ? body.Amount : (body.amount != null ? body.amount : '');
   const routeNo = getRouteNoDisplay(merchant, log.routeKey);
   const paymentDate = body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt || '';
+  const companyName = cfg.companyName || '';
+  const contactName = cfg.contactName || '';
   const defaultTemplate = '안녕하세요. 아래의 거래에 대해 무효 처리를 요청합니다 감사합니다.\n\nTransactionId(transNo): {{transNo}}\nOrderNo: {{orderNo}}\nAmount: {{amount}}\nRoute No. {{routeNo}}\nPaymentDate: {{paymentDate}}\nMID: {{mid}}\n';
   const template = (cfg.emailBodyTemplate || '').trim() || defaultTemplate;
   const bodyText = template
@@ -2101,7 +2106,9 @@ function buildVoidEmailContent(log) {
     .replace(/\{\{amount\}\}/g, String(amount))
     .replace(/\{\{routeNo\}\}/g, String(routeNo))
     .replace(/\{\{paymentDate\}\}/g, String(paymentDate))
-    .replace(/\{\{mid\}\}/g, String(mid || ''));
+    .replace(/\{\{mid\}\}/g, String(mid || ''))
+    .replace(/\{\{companyName\}\}/g, String(companyName || ''))
+    .replace(/\{\{contactName\}\}/g, String(contactName || ''));
   // 이메일은 무효 요청용이므로 제목도 "무효 요청"으로 통일
   return { subject: '무효 요청: ' + (transNo || orderNo || ''), body: bodyText };
 }
@@ -2182,6 +2189,38 @@ async function sendVoidOrRefundNoti(log, type, mode) {
     env: log.env || 'live',
   });
   return { success: relayOk, internalOk };
+}
+
+async function sendSmtpTextMail({ to, subject, text }) {
+  const cfg = loadChillPayTransactionConfig();
+  if (!cfg.smtpHost || !cfg.smtpPort) {
+    throw new Error('SMTP 설정이 필요합니다 (host/port).');
+  }
+  if (!to) throw new Error('수신 이메일(to)이 필요합니다.');
+  const transport = nodemailer.createTransport({
+    host: cfg.smtpHost,
+    port: cfg.smtpPort || DEFAULT_SMTP_PORT,
+    secure: !!cfg.smtpSecure,
+    auth: cfg.smtpUser ? { user: cfg.smtpUser, pass: cfg.smtpPass || '' } : undefined,
+  });
+  // From 표시: 가능한 한 "회사명 <smtpUser>" 형태로 노출
+  const baseFrom = (cfg.smtpUser && cfg.smtpUser.trim())
+    ? cfg.smtpUser.trim()
+    : ((cfg.emailFrom && cfg.emailFrom.trim()) ? cfg.emailFrom.trim() : to);
+  const displayName = (cfg.companyName && cfg.companyName.trim()) ? cfg.companyName.trim() : '';
+  const fromAddr = displayName ? `${displayName} <${baseFrom}>` : baseFrom;
+  const info = await transport.sendMail({
+    from: fromAddr,
+    to,
+    subject: subject || '',
+    text: text || '',
+  });
+  return {
+    messageId: info && info.messageId ? String(info.messageId) : '',
+    accepted: Array.isArray(info && info.accepted) ? info.accepted.map(String) : [],
+    rejected: Array.isArray(info && info.rejected) ? info.rejected.map(String) : [],
+    response: info && info.response ? String(info.response) : '',
+  };
 }
 
 /**
@@ -2357,6 +2396,20 @@ function findMerchantByRouteKey(routeKey) {
   return null;
 }
 
+function isOurTestReturnUrl(url, reqHost) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const u = new URL(url.trim());
+    const path = (u.pathname || '').replace(/\/+$/, '');
+    if (path !== '/admin/test-pay/return') return false;
+    const h = (reqHost || '').toLowerCase().split(':')[0];
+    const uh = (u.hostname || '').toLowerCase();
+    return uh === h || uh === (reqHost || '').toLowerCase();
+  } catch (e) {
+    return false;
+  }
+}
+
 // 테스트 결제 환경 중 useTestResultPage 인 config 의 Result 노티용 routeKey: test_<configId>
 function findTestResultByRouteKey(routeKey) {
   if (typeof routeKey !== 'string') return null;
@@ -2389,6 +2442,31 @@ async function handleNotiRequest(routeKey, req, res) {
 
   console.log('[수신] routeKey=', routeKey, 'Content-Type=', incomingContentType, 'body=', JSON.stringify(body));
 
+  // POST로 들어온 요청이 브라우저(고객 리다이렉트)인지 판단. 브라우저면 결과 페이지로 302 리다이렉트.
+  // 칠페이 서버 노티는 Api-Key를 보내고, 브라우저 폼 전송은 보내지 않음. Accept가 없어도 User-Agent로 보완.
+  function isLikelyBrowserResultReturn(req) {
+    const accept = (req.get && req.get('Accept')) || (req.headers && req.headers.accept) || '';
+    const ua = (req.get && req.get('User-Agent')) || (req.headers && req.headers['user-agent']) || '';
+    const hasApiKey = (apiKeyHeader && String(apiKeyHeader).trim().length > 0);
+    if (hasApiKey) return false;
+    if (typeof accept === 'string' && accept.toLowerCase().includes('text/html')) return true;
+    const uaLower = String(ua).toLowerCase();
+    if (/mozilla|chrome|safari|msie|edge|opera|firefox/i.test(uaLower)) return true;
+    return false;
+  }
+  function redirectResultToUrl(res, targetUrl, body) {
+    try {
+      const url = new URL(targetUrl.trim());
+      if (body && typeof body === 'object') {
+        for (const [k, v] of Object.entries(body)) {
+          if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+        }
+      }
+      return res.redirect(302, url.toString());
+    } catch (e) {
+      return res.redirect(302, targetUrl.trim());
+    }
+  }
   let match = findMerchantByRouteKey(routeKey);
   let testResultMatch = null;
   if (!match) {
@@ -2397,6 +2475,7 @@ async function handleNotiRequest(routeKey, req, res) {
       // 테스트 결제 Result 노티: 우리 테스트 결과 페이지로 릴레이 (가맹점 연동과 동일 방식)
       const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
       const targetUrl = baseUrl + '/admin/test-pay/return';
+      const testResultPublicUrl = baseUrl + '/noti/test-result';
       let relaySuccess = false;
       let relayFailReason = '';
       try {
@@ -2412,6 +2491,8 @@ async function handleNotiRequest(routeKey, req, res) {
         console.error('[테스트 결과 페이지 릴레이 실패]', err.message);
       }
       const formatUsed = (incomingContentType || '').toLowerCase().includes('application/json') ? 'json' : 'raw';
+      const reqAccept = (req.get && req.get('Accept')) || (req.headers && req.headers.accept) || '';
+      const reqUserAgent = (req.get && req.get('User-Agent')) || (req.headers && req.headers['user-agent']) || '';
       appendPgNotiLog({
         routeKey,
         merchantId: 'test_' + testResultMatch.configId,
@@ -2424,7 +2505,13 @@ async function handleNotiRequest(routeKey, req, res) {
         relayStatus: relaySuccess ? 'ok' : 'fail',
         relayFailReason: relaySuccess ? '' : relayFailReason,
         relayFormatUsed: relaySuccess ? formatUsed : undefined,
+        _reqAccept: reqAccept,
+        _reqUserAgent: (reqUserAgent || '').slice(0, 300),
+        _apiKeyPresent: !!(apiKeyHeader && String(apiKeyHeader).trim()),
       });
+      if (isLikelyBrowserResultReturn(req)) {
+        return redirectResultToUrl(res, testResultPublicUrl, body);
+      }
       return res.status(200).json({ ok: true, relay: relaySuccess });
     }
   }
@@ -2490,8 +2577,9 @@ async function handleNotiRequest(routeKey, req, res) {
     console.log('[포워딩 스킵] enableRelay=false 또는 targetUrl 없음');
   }
 
-  // 로그 적재 (가맹점 수신 여부 포함, 최근 100건)
-  // relayFormatUsed: 'raw' | 'json' | 'form' (성공 시에만 기록, 표시 색: 파란/녹/노랑)
+  // 로그 적재 (가맹점 수신 여부 포함, 최근 100건). 노티 수신 분석용 헤더도 저장.
+  const reqAccept = (req.get && req.get('Accept')) || (req.headers && req.headers.accept) || '';
+  const reqUserAgent = (req.get && req.get('User-Agent')) || (req.headers && req.headers['user-agent']) || '';
   const formatUsed = enableRelay && relaySuccess ? relayFormat : undefined;
   appendPgNotiLog({
     routeKey,
@@ -2505,6 +2593,9 @@ async function handleNotiRequest(routeKey, req, res) {
     relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
     relayFailReason: relaySuccess ? '' : (relayFailReason || ''),
     relayFormatUsed: formatUsed,
+    _reqAccept: reqAccept,
+    _reqUserAgent: (reqUserAgent || '').slice(0, 300),
+    _apiKeyPresent: !!(apiKeyHeader && String(apiKeyHeader).trim()),
   });
 
   let internalDeliverySuccess = false;
@@ -2637,6 +2728,15 @@ async function handleNotiRequest(routeKey, req, res) {
     console.log('[개발 전산 전송 스킵] enableDevInternal=false');
   }
 
+  if (kind === 'result' && isLikelyBrowserResultReturn(req)) {
+    const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
+    const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
+    let redirectTo = routeKey === 'result/20' ? baseUrl + '/noti/test-result' : targetUrl;
+    if (redirectTo && isOurTestReturnUrl(redirectTo, reqHost)) {
+      redirectTo = baseUrl + '/noti/test-result' + (redirectTo.includes('?') ? redirectTo.slice(redirectTo.indexOf('?')) : '');
+    }
+    if (redirectTo) return redirectResultToUrl(res, redirectTo, body);
+  }
   res.status(200).json({ ok: true, relay: relaySuccess });
 }
 
@@ -2647,11 +2747,130 @@ app.post('/noti/:routeKey', async (req, res) => {
   await handleNotiRequest(routeKey, req, res);
 });
 
+// ========== GET /noti/test-result (로그인 없이 보는 테스트 결제 완료 페이지) — :routeKey 보다 먼저 등록 ==========
+function sendTestResultPage(req, res) {
+  const orderNo = (req.query && (req.query.orderNo || req.query.OrderNo)) || '';
+  const status = (req.query && (req.query.status || req.query.respCode || req.query.Status)) || '';
+  const isSuccess = String(status).toLowerCase() === 'complete' || status === '0' || status === 0;
+  const msg = isSuccess
+    ? '테스트결제가 완료 되었습니다. 감사합니다.'
+    : status
+    ? '결제가 완료되지 않았거나 취소되었습니다.'
+    : '결제 결과를 확인할 수 없습니다.';
+  res.send(`<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>테스트 결제 완료</title>
+<style>
+  body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:#edf2f7;display:flex;align-items:center;justify-content:center;min-height:100vh;}
+  .card{background:#fff;padding:32px 40px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.08);border:1px solid #e5e7eb;max-width:420px;text-align:center;}
+  h1{font-size:20px;margin:0 0 12px;color:#111827;}
+  .msg{font-size:16px;color:#166534;font-weight:600;margin:16px 0;}
+  .msg.fail{color:#b91c1c;}
+  .order{font-size:13px;color:#6b7280;margin-top:12px;}
+  a{display:inline-block;margin-top:20px;padding:10px 20px;background:#2563eb;color:#fff;text-decoration:none;border-radius:8px;font-size:14px;}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>테스트 결제 결과</h1>
+    <p class="msg ${isSuccess ? '' : 'fail'}">${msg}</p>
+    ${orderNo ? `<p class="order">주문번호: ${orderNo}</p>` : ''}
+    <p style="font-size:12px;color:#9ca3af;margin-top:16px;">이 페이지는 로그인 없이 확인할 수 있는 테스트 완료 화면입니다.</p>
+    <a href="/admin/test-pay">테스트 실행으로 돌아가기</a>
+  </div>
+</body>
+</html>`);
+}
+app.get('/noti/test-result', sendTestResultPage);
+app.get('/noti/test-result/', sendTestResultPage);
+
+// GET /noti/:routeKey — 칠페이가 Result URL 하나로 고객 리다이렉트할 때 (기존 routeKey 형식)
+app.get('/noti/:routeKey', (req, res) => {
+  const routeKey = req.params.routeKey;
+  if (routeKey === 'test-result' || routeKey === 'test-result/') {
+    return sendTestResultPage(req, res);
+  }
+  let targetUrl = null;
+  const match = findMerchantByRouteKey(routeKey);
+  const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
+  const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
+  if (match && match.kind === 'result') {
+    let u = match.targetUrl || '';
+    if (u && isOurTestReturnUrl(u, reqHost)) {
+      u = baseUrl + '/noti/test-result' + (u.includes('?') ? u.slice(u.indexOf('?')) : '');
+    }
+    targetUrl = u;
+  }
+  if (!targetUrl || typeof targetUrl !== 'string' || !targetUrl.trim()) {
+    return res.status(404).send('Not found');
+  }
+  try {
+    const url = new URL(targetUrl.trim());
+    const q = req.query || {};
+    for (const [k, v] of Object.entries(q)) {
+      if (v !== undefined && v !== null && v !== '') {
+        url.searchParams.set(k, String(v));
+      }
+    }
+    return res.redirect(302, url.toString());
+  } catch (e) {
+    return res.redirect(302, targetUrl.trim());
+  }
+});
+
 // ========== POST /noti/:kind/:no (신규: /noti/callback/1, /noti/result/1) ==========
 app.post('/noti/:kind/:no', async (req, res) => {
   const { kind, no } = req.params;
   const routeKey = `${kind}/${no}`;
   await handleNotiRequest(routeKey, req, res);
+});
+
+// ========== GET /noti/:kind/:no (칠페이 Result URL 하나로 운영: 고객 리다이렉트 처리) ==========
+// 칠페이는 Return URL 없이 Result URL 하나로 서버 노티(POST) + 고객 리다이렉트(GET)를 모두 사용.
+// GET으로 접근 시 해당 route의 가맹점 Origin Reurl(resultUrl)로 쿼리스트링 유지하여 리다이렉트.
+app.get('/noti/:kind/:no', (req, res) => {
+  const { kind, no } = req.params;
+  const routeKey = `${kind}/${no}`;
+
+  let targetUrl = null;
+  const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
+  const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
+  if ((kind === 'result' && no === '20') || routeKey === 'result/20') {
+    targetUrl = baseUrl + '/noti/test-result';
+  }
+  if (!targetUrl) {
+  let match = findMerchantByRouteKey(routeKey);
+  if (match && match.kind === 'result') {
+    let u = match.targetUrl || '';
+    if (u && isOurTestReturnUrl(u, reqHost)) {
+      u = baseUrl + '/noti/test-result' + (u.includes('?') ? u.slice(u.indexOf('?')) : '');
+    }
+    targetUrl = u;
+  }
+  }
+  if (!targetUrl) {
+    const testResultMatch = findTestResultByRouteKey(routeKey);
+    if (testResultMatch) {
+      targetUrl = baseUrl + '/noti/test-result';
+    }
+  }
+
+  if (!targetUrl || typeof targetUrl !== 'string' || !targetUrl.trim()) {
+    return res.status(404).send('Not found');
+  }
+
+  try {
+    const url = new URL(targetUrl.trim());
+    const q = req.query || {};
+    for (const [k, v] of Object.entries(q)) {
+      if (v !== undefined && v !== null && v !== '') {
+        url.searchParams.set(k, String(v));
+      }
+    }
+    return res.redirect(302, url.toString());
+  } catch (e) {
+    return res.redirect(302, targetUrl.trim());
+  }
 });
 
 // ========== 간단한 웹 관리 페이지 ==========
@@ -2708,19 +2927,19 @@ function getAdminSidebar(locale, adminUser, member, currentPath) {
     if (can('traffic_analysis')) logItems.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis') || '트래픽분석'));
     nav.push(navGroup(t(locale, 'nav_logs'), logPaths, logItems.join('')));
   }
-  if (can('internal_targets') || can('internal_noti_settings') || can('dev_internal_noti_settings')) {
-    const internalPaths = ['/admin/internal-targets', '/admin/internal-noti-settings', '/admin/dev-internal-noti-settings'];
+  if (can('internal_targets') || can('internal_noti_settings') || can('dev_internal_noti_settings') || can('test_run')) {
+    const internalPaths = ['/admin/internal-targets', '/admin/internal-noti-settings', '/admin/dev-internal-noti-settings', '/admin/noti-analysis'];
     const internalItems = [];
     if (can('internal_targets')) internalItems.push(link('/admin/internal-targets', t(locale, 'nav_internal_targets')));
     if (can('internal_noti_settings')) internalItems.push(link('/admin/internal-noti-settings', t(locale, 'nav_internal_noti_settings')));
     if (can('dev_internal_noti_settings')) internalItems.push(link('/admin/dev-internal-noti-settings', t(locale, 'nav_dev_internal_noti_settings')));
+    if (can('test_run')) internalItems.push(link('/admin/noti-analysis', t(locale, 'nav_noti_analysis') || '노티분석'));
     nav.push(navGroup(t(locale, 'nav_internal'), internalPaths, internalItems.join('')));
   }
   if (can('cancel_refund')) {
     const crPaths = ['/admin/transactions', '/admin/pg-transactions', '/admin/cancel-refund/cancel', '/admin/cancel-refund/void', '/admin/cancel-refund/void-summary', '/admin/cancel-refund/force-void', '/admin/cancel-refund/refund', '/admin/cancel-refund/noti', '/admin/cancel-refund/void-deleted-list'];
     const crItems = [
       link('/admin/transactions', t(locale, 'nav_transaction_list')),
-      // 피지거래내역은 기본 진입 시 항상 "당일"이 선택되도록 sort=today를 기본으로 붙인다.
       link('/admin/pg-transactions?sort=today', t(locale, 'nav_pg_transaction_list')),
       link('/admin/cancel-refund/cancel', t(locale, 'nav_cancel_refund_cancel')),
       link('/admin/cancel-refund/void', t(locale, 'nav_cancel_refund_void')),
@@ -3481,19 +3700,55 @@ app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
           + '</label></div></section>'
           + '<section class="chillpay-section"><h3>' + t(locale, 'smtp_title') + '</h3>'
           + '<p class="chillpay-hint">' + t(locale, 'smtp_desc') + '</p>'
-          + '<div class="chillpay-row" style="flex-direction:column;gap:6px;">'
-          + '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">'
-          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:0 0 auto;display:flex;align-items:center;gap:6px;margin-top:0;"><span class="chillpay-label" style="margin-bottom:0;">' + t(locale, 'smtp_preset_label') + '</span><select name="smtpPreset" id="smtpPreset"><option value="gmail"' + (c.smtpHost && c.smtpHost.indexOf('smtp.gmail.com') !== -1 ? ' selected' : '') + '>' + t(locale, 'smtp_preset_gmail') + '</option><option value="naver"' + (c.smtpHost && c.smtpHost.indexOf('smtp.naver.com') !== -1 ? ' selected' : '') + '>' + t(locale, 'smtp_preset_naver') + '</option><option value="other"' + (!c.smtpHost || (c.smtpHost.indexOf('smtp.gmail.com') === -1 && c.smtpHost.indexOf('smtp.naver.com') === -1) ? ' selected' : '') + '>' + t(locale, 'smtp_preset_other') + '</option></select></label>'
-          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:1 1 auto;display:flex;align-items:center;gap:6px;margin-top:0;min-width:220px;"><span class="chillpay-label" style="margin-bottom:0;white-space:nowrap;">' + t(locale, 'smtp_label_host') + '</span><input type="text" name="smtpHost" value="' + q(c.smtpHost || '') + '" placeholder="smtp.gmail.com" style="flex:1 1 auto;min-width:160px;" /></label>'
-          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:0 0 auto;display:flex;align-items:center;gap:6px;margin-top:0;"><span class="chillpay-label" style="margin-bottom:0;">' + t(locale, 'smtp_label_port') + '</span><div style="display:flex;align-items:center;gap:8px;"><input type="number" name="smtpPort" value="' + (Number.isFinite(c.smtpPort) ? c.smtpPort : DEFAULT_SMTP_PORT) + '" min="1" max="65535" style="max-width:80px;" /><label style="display:inline-flex;align-items:center;font-size:11px;font-weight:400;color:#374151;margin-top:0;white-space:nowrap;"><input type="checkbox" name="smtpSecure" ' + (c.smtpSecure ? 'checked' : '') + ' style="margin-right:4px;" />' + t(locale, 'smtp_label_secure') + ' · ' + t(locale, 'smtp_label_secure_hint') + '</label></div></label>'
+          + '<style>'
+          + '  .smtp-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px 14px;align-items:end;margin-top:10px;}'
+          + '  .smtp-grid .chillpay-cell{margin-top:0;}'
+          + '  .smtp-grid label{display:flex;flex-direction:column;gap:6px;}'
+          + '  .smtp-grid select,.smtp-grid input{width:70%;max-width:520px;}'
+          + '  .smtp-port-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}'
+          + '  .smtp-port-row input[type="number"]{max-width:110px;}'
+          + '  .smtp-actions{margin-top:12px;display:flex;justify-content:flex-start;gap:10px;flex-wrap:wrap;}'
+          + '  @media (max-width: 980px){.smtp-grid{grid-template-columns:1fr;} .smtp-grid select,.smtp-grid input{width:100%;max-width:none;}}'
+          + '</style>'
+          + '<div class="smtp-grid">'
+          +   '<label class="chillpay-cell">'
+          +     '<span class="chillpay-label">' + t(locale, 'smtp_preset_label') + '</span>'
+          +     '<select name="smtpPreset" id="smtpPreset">'
+          +       '<option value="gmail"' + (c.smtpHost && c.smtpHost.indexOf('smtp.gmail.com') !== -1 ? ' selected' : '') + '>' + t(locale, 'smtp_preset_gmail') + '</option>'
+          +       '<option value="naver"' + (c.smtpHost && c.smtpHost.indexOf('smtp.naver.com') !== -1 ? ' selected' : '') + '>' + t(locale, 'smtp_preset_naver') + '</option>'
+          +       '<option value="other"' + (!c.smtpHost || (c.smtpHost.indexOf('smtp.gmail.com') === -1 && c.smtpHost.indexOf('smtp.naver.com') === -1) ? ' selected' : '') + '>' + t(locale, 'smtp_preset_other') + '</option>'
+          +     '</select>'
+          +   '</label>'
+          +   '<label class="chillpay-cell">'
+          +     '<span class="chillpay-label">' + t(locale, 'smtp_label_host') + '</span>'
+          +     '<input type="text" name="smtpHost" value="' + q(c.smtpHost || '') + '" placeholder="smtp.gmail.com" />'
+          +   '</label>'
+          +   '<label class="chillpay-cell">'
+          +     '<span class="chillpay-label">' + t(locale, 'smtp_label_port') + '</span>'
+          +     '<div class="smtp-port-row">'
+          +       '<input type="number" name="smtpPort" value="' + (Number.isFinite(c.smtpPort) ? c.smtpPort : DEFAULT_SMTP_PORT) + '" min="1" max="65535" />'
+          +       '<label style="display:inline-flex;align-items:center;font-size:12px;font-weight:400;color:#374151;gap:6px;margin:0;">'
+          +         '<input type="checkbox" name="smtpSecure" ' + (c.smtpSecure ? 'checked' : '') + ' />'
+          +         '<span>' + t(locale, 'smtp_label_secure') + ' · ' + t(locale, 'smtp_label_secure_hint') + '</span>'
+          +       '</label>'
+          +     '</div>'
+          +   '</label>'
+          +   '<label class="chillpay-cell">'
+          +     '<span class="chillpay-label">' + t(locale, 'smtp_label_user') + '</span>'
+          +     '<input type="text" name="smtpUser" value="' + q(c.smtpUser || '') + '" placeholder="user@example.com" />'
+          +   '</label>'
+          +   '<label class="chillpay-cell">'
+          +     '<span class="chillpay-label">' + t(locale, 'smtp_label_pass') + '</span>'
+          +     '<input type="password" name="smtpPass" value="' + (c.smtpPass ? SMTP_PASSWORD_DUMMY : '') + '" autocomplete="off" />'
+          +   '</label>'
+          +   '<label class="chillpay-cell">'
+          +     '<span class="chillpay-label">' + t(locale, 'smtp_label_test_to') + '</span>'
+          +     '<input type="email" name="testEmailTo" value="' + q(c.smtpTestTo || c.emailFrom || '') + '" placeholder="test@example.com" />'
+          +   '</label>'
           + '</div>'
-          + '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:4px;">'
-          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:0 0 auto;display:flex;align-items:center;gap:6px;margin-top:0;min-width:240px;"><span class="chillpay-label" style="margin-bottom:0;white-space:nowrap;">' + t(locale, 'smtp_label_user') + '</span><input type="text" name="smtpUser" value="' + q(c.smtpUser || '') + '" placeholder="user@example.com" style="flex:1 1 auto;min-width:160px;" /></label>'
-          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:0 0 auto;display:flex;align-items:center;gap:6px;margin-top:0;min-width:240px;"><span class="chillpay-label" style="margin-bottom:0;white-space:nowrap;">' + t(locale, 'smtp_label_pass') + '</span><input type="password" name="smtpPass" value="' + (c.smtpPass ? SMTP_PASSWORD_DUMMY : '') + '" autocomplete="off" style="flex:1 1 auto;min-width:160px;" /></label>'
-          + '<label class="chillpay-cell chillpay-email-sender-cell" style="flex:0 0 auto;display:flex;align-items:center;gap:6px;margin-top:0;min-width:260px;"><span class="chillpay-label" style="margin-bottom:0;white-space:nowrap;">' + t(locale, 'smtp_label_test_to') + '</span><input type="email" name="testEmailTo" value="' + q(c.emailFrom || '') + '" placeholder="test@example.com" style="flex:1 1 auto;min-width:160px;" /></label>'
+          + '<div class="smtp-actions">'
+          +   '<button type="submit" name="action" value="save_and_test" style="margin-left:0;">' + t(locale, 'smtp_btn_test') + '</button>'
           + '</div>'
-          + '</div><div class="chillpay-row" style="margin-top:8px;"><div class="chillpay-cell" style="margin-top:0;"><button type="submit" name="action" value="save_and_test" style="margin-left:0;">' + t(locale, 'smtp_btn_test') + '</button></div></div>'
-          + '<div class="chillpay-cell" style="margin-top:18px;"><button type="submit" name="action" value="save_and_test" style="margin-left:0;">' + t(locale, 'smtp_btn_test') + '</button></div></div>'
           + '</section>'
           + '<section class="chillpay-section chillpay-sandbox-check"><label class="chillpay-checkbox-wrap"><input type="checkbox" name="useSandbox" ' + (c.useSandbox ? 'checked' : '') + ' /><span>API 호출 시 Sandbox 사용 (테스트 시 체크)</span></label>'
           + '<p class="chillpay-checkbox-desc">' + t(locale, 'chillpay_checkbox_sandbox') + '</p></section>'
@@ -3563,6 +3818,7 @@ app.post('/admin/settings/chillpay-email', requireAuth, requirePage('settings'),
   const smtpUser = (req.body && req.body.smtpUser != null) ? String(req.body.smtpUser).trim() : '';
   const smtpPassRaw = (req.body && req.body.smtpPass != null) ? String(req.body.smtpPass) : '';
   const action = (req.body && req.body.action != null) ? String(req.body.action) : '';
+  const testEmailTo = (req.body && req.body.testEmailTo != null) ? String(req.body.testEmailTo).trim() : '';
   const smtpPassToSave = (smtpPassRaw && smtpPassRaw.trim() && smtpPassRaw !== SMTP_PASSWORD_DUMMY) ? smtpPassRaw : undefined;
   const cfg = saveChillPayTransactionConfig({
     useSandbox,
@@ -3576,9 +3832,9 @@ app.post('/admin/settings/chillpay-email', requireAuth, requirePage('settings'),
     smtpSecure,
     smtpUser,
     smtpPass: smtpPassToSave,
+    smtpTestTo: testEmailTo || undefined,
   });
   if (action === 'save_and_test') {
-    const testEmailTo = (req.body && req.body.testEmailTo != null) ? String(req.body.testEmailTo).trim() : '';
     const backBase = '/admin/settings';
     if (!cfg.smtpHost || !cfg.smtpPort) {
       return res.redirect(backBase + '?testEmail=fail&reason=' + encodeURIComponent('SMTP 설정이 필요합니다 (host/port).'));
@@ -3593,7 +3849,11 @@ app.post('/admin/settings/chillpay-email', requireAuth, requirePage('settings'),
         secure: !!cfg.smtpSecure,
         auth: cfg.smtpUser ? { user: cfg.smtpUser, pass: cfg.smtpPass || '' } : undefined,
       });
-      const fromAddr = cfg.emailFrom && cfg.emailFrom.trim() ? cfg.emailFrom.trim() : cfg.smtpUser || testEmailTo;
+      const baseFrom = (cfg.smtpUser && cfg.smtpUser.trim())
+        ? cfg.smtpUser.trim()
+        : ((cfg.emailFrom && cfg.emailFrom.trim()) ? cfg.emailFrom.trim() : testEmailTo);
+      const displayName = (cfg.companyName && cfg.companyName.trim()) ? cfg.companyName.trim() : '';
+      const fromAddr = displayName ? `${displayName} <${baseFrom}>` : baseFrom;
       await transport.sendMail({
         from: fromAddr,
         to: testEmailTo,
@@ -4535,7 +4795,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <tbody>
           ${
             rows ||
-            `<tr><td colspan="12" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
+            `<tr><td colspan="11" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
           }
         </tbody>
       </table>
@@ -6860,6 +7120,11 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cancel_refund'), 
   const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   let alertHtml = q.void === 'ok' ? '<div class="alert alert-ok">' + t(locale, 'cr_alert_void_ok') + '</div>' : q.void === 'fail' && q.reason ? '<div class="alert alert-fail">' + t(locale, 'cr_alert_void_fail') + ': ' + escQ(q.reason) + '</div>' : '';
+  if (q.email === 'ok') {
+    alertHtml += '<div class="alert alert-ok">이메일 발송이 완료되었습니다. (SMTP Accepted 여부는 <a href="/admin/mail-logs">메일 로그</a>에서 확인하세요.)</div>';
+  } else if (q.email === 'fail' && q.reason) {
+    alertHtml += '<div class="alert alert-fail">이메일 발송 실패: ' + escQ(q.reason) + ' (<a href="/admin/mail-logs">메일 로그</a>)</div>';
+  }
   if (q.deleted === '1') {
     const deletedListLink = '<a href="/admin/cancel-refund/void-deleted-list?env=' + encodeURIComponent(getEnvFromReq(req)) + '">' + t(locale, 'cr_void_deleted_list') + '</a>';
     alertHtml += '<div class="alert alert-ok">' + (t(locale, 'cr_removed_from_list_msg') || '').replace(/\{\{link\}\}/g, deletedListLink) + '</div>';
@@ -6970,12 +7235,29 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cancel_refund'), 
     const manualFrom = cfg.voidCutoffHour + ':' + String(cfg.voidCutoffMinute).padStart(2, '0');
     const manualTo = cfg.refundStartHour + ':' + String(cfg.refundStartMinute).padStart(2, '0');
     const manualWindowTip = (t(locale, 'cr_manual_email_window') || '') + ': ' + manualFrom + '~' + manualTo;
+    const emailUrl = '/admin/mail-logs/void-email?index=' + encodeURIComponent(realIndex) + '&env=' + encodeURIComponent(env);
+    const emailTestUrl = emailUrl + '&mode=test';
     if (windowType === 'void_manual') {
-      const emailUrl = '/admin/mail-logs/void-email?index=' + encodeURIComponent(realIndex) + '&env=' + encodeURIComponent(env);
-      emailHtml = `<a href="${emailUrl}" class="btn-email">${t(locale, 'cr_btn_email_send')}</a>`;
-    } else if (windowType !== 'void_auto') {
-      // 환불만 가능한 구간: 이메일도 비활성
-      emailHtml = `<span class="btn-email-disabled" title="${manualWindowTip}">${t(locale, 'cr_btn_email_disabled')}</span>`;
+      // 수동 무효 가능 구간: 실발송 + 테스트발송 모두 활성
+      emailHtml =
+        `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;">`
+        + `<a href="${emailUrl}" class="btn-email">${t(locale, 'cr_btn_email_send')}</a>`
+        + `<a href="${emailTestUrl}" class="btn-email" style="background:#0ea5e9;">테스트발송</a>`
+        + `</div>`;
+    } else if (windowType === 'void_auto') {
+      // 자동 무효 구간: 이메일은 비활성, 대신 테스트발송만 허용
+      emailHtml =
+        `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;">`
+        + `<span class="btn-email-disabled" title="${manualWindowTip}">${t(locale, 'cr_btn_email_disabled')}</span>`
+        + `<a href="${emailTestUrl}" class="btn-email" style="background:#0ea5e9;">테스트발송</a>`
+        + `</div>`;
+    } else {
+      // 환불만 가능한 구간: 실제 메일은 비활성, 테스트발송만 허용
+      emailHtml =
+        `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;">`
+        + `<span class="btn-email-disabled" title="${manualWindowTip}">${t(locale, 'cr_btn_email_disabled')}</span>`
+        + `<a href="${emailTestUrl}" class="btn-email" style="background:#0ea5e9;">테스트발송</a>`
+        + `</div>`;
     }
     const sentDt = sentEntry ? formatDateAndTimeTHJP(sentEntry.sentAtIso || sentEntry.sentAt) : { date: '-', timeTh: '-', timeJp: '-' };
     return `<tr>
@@ -7001,21 +7283,30 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cancel_refund'), 
 });
 
 // 무효 수동 이메일 발송 트리거: 메일 로그 기록 후 mailto로 리다이렉트
-app.get('/admin/mail-logs/void-email', requireAuth, requirePage('cancel_refund'), (req, res) => {
+app.get('/admin/mail-logs/void-email', requireAuth, requirePage('cancel_refund'), async (req, res) => {
   const locale = getLocale(req);
   const adminUser = req.session.adminUser || '';
   const q = req.query || {};
   const index = parseInt(q.index, 10);
   const env = (q.env || 'live').toString();
+  const mode = (q.mode || 'real').toString(); // real | test
   if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
     return res.redirect('/admin/cancel-refund/void?env=' + encodeURIComponent(env) + '&void=fail&reason=' + encodeURIComponent(t(locale, 'cr_err_invalid_index')));
   }
   const log = NOTI_LOGS[index];
   const cfg = loadChillPayTransactionConfig();
   const { subject, body } = buildVoidEmailContent(log);
-  const emailTo = (cfg.emailTo || 'help@chillpay.co.th').trim();
-  const mailto = 'mailto:' + encodeURIComponent(emailTo) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+  const emailToReal = (cfg.emailTo || 'help@chillpay.co.th').trim();
+  const emailToTest = (cfg.smtpTestTo || '').trim();
+  const emailTo = mode === 'test' ? emailToTest : emailToReal;
+  let deliveryStatus = 'ok';
+  let deliveryError = '';
+  let deliveryInfo = null;
   try {
+    if (!emailTo) {
+      throw new Error(mode === 'test' ? '테스트 수신 이메일이 비어 있습니다. (환경설정에서 테스트 수신 이메일을 입력 후 테스트메일 발송을 한 번 실행해 주세요.)' : '수신 이메일(emailTo)이 비어 있습니다.');
+    }
+    deliveryInfo = await sendSmtpTextMail({ to: emailTo, subject, text: body });
     const bodyObj = log.body && typeof log.body === 'object'
       ? log.body
       : (typeof log.body === 'string'
@@ -7038,29 +7329,45 @@ app.get('/admin/mail-logs/void-email', requireAuth, requirePage('cancel_refund')
       amount,
       emailTo,
       subject,
+      deliveryStatus: 'ok',
+      messageId: deliveryInfo && deliveryInfo.messageId ? deliveryInfo.messageId : '',
+      accepted: deliveryInfo && Array.isArray(deliveryInfo.accepted) ? deliveryInfo.accepted : [],
+      rejected: deliveryInfo && Array.isArray(deliveryInfo.rejected) ? deliveryInfo.rejected : [],
+      smtpResponse: deliveryInfo && deliveryInfo.response ? deliveryInfo.response : '',
     });
-  } catch {
-    // 로깅 실패는 메일 트리거에 영향 주지 않음
+  } catch (e) {
+    deliveryStatus = 'fail';
+    deliveryError = (e && e.message ? String(e.message) : 'mail error').slice(0, 200);
+    try {
+      appendMailLog({
+        type: 'void_manual_email',
+        env,
+        index,
+        adminUser,
+        merchantId: log.merchantId || '',
+        routeNo: (log.merchantId && MERCHANTS.get(log.merchantId) && MERCHANTS.get(log.merchantId).routeNo) || '',
+        transactionId: '',
+        orderNo: '',
+        amount: '',
+        emailTo,
+        subject,
+        deliveryStatus: 'fail',
+        error: deliveryError,
+        messageId: deliveryInfo && deliveryInfo.messageId ? deliveryInfo.messageId : '',
+        accepted: deliveryInfo && Array.isArray(deliveryInfo.accepted) ? deliveryInfo.accepted : [],
+        rejected: deliveryInfo && Array.isArray(deliveryInfo.rejected) ? deliveryInfo.rejected : [],
+        smtpResponse: deliveryInfo && deliveryInfo.response ? deliveryInfo.response : '',
+      });
+    } catch {
+      // ignore
+    }
   }
-  const backUrl = '/admin/cancel-refund/void?env=' + encodeURIComponent(env);
-  res.send(`<!DOCTYPE html>
-<html lang="${locale}">
-<head>
-  <meta charset="UTF-8" />
-  <title>${t(locale, 'cr_btn_email_send')}</title>
-</head>
-<body>
-  <p style="font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;">${t(locale, 'cr_btn_email_send')} : ${emailTo}</p>
-  <script>
-    (function() {
-      var mailto = ${JSON.stringify(mailto)};
-      var back = ${JSON.stringify(backUrl)};
-      window.location.href = mailto;
-      setTimeout(function(){ window.location.href = back; }, 1000);
-    })();
-  </script>
-</body>
-</html>`);
+  const backUrl =
+    '/admin/cancel-refund/void?env=' + encodeURIComponent(env)
+    + (deliveryStatus === 'ok'
+        ? '&email=ok'
+        : '&email=fail&reason=' + encodeURIComponent(deliveryError || '메일 발송 실패'));
+  return res.redirect(backUrl);
 });
 
 // 메일 로그 페이지 (무효 수동 이메일 등)
@@ -7085,6 +7392,12 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
     const routeNo = log.routeNo || '';
     const emailTo = log.emailTo || '';
     const subject = log.subject || '';
+    const status = log.deliveryStatus || '';
+    const accepted = Array.isArray(log.accepted) ? log.accepted.join(', ') : '';
+    const rejected = Array.isArray(log.rejected) ? log.rejected.join(', ') : '';
+    const msgId = log.messageId || '';
+    const resp = log.smtpResponse || '';
+    const err = log.error || '';
     return `<tr>
       <td class="col-date">${esc(dt.date || '')}</td>
       <td class="col-time">TH: ${esc(dt.timeTh || '')}<br><span class="time-jp">JP: ${esc(dt.timeJp || '')}</span></td>
@@ -7094,6 +7407,11 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
       <td class="col-narrow">${esc(merchantId)}</td>
       <td class="col-narrow">${esc(routeNo)}</td>
       <td class="col-narrow">${esc(emailTo)}</td>
+      <td class="col-narrow">${esc(status)}</td>
+      <td style="max-width:160px;word-break:break-all;">${esc(accepted)}</td>
+      <td style="max-width:160px;word-break:break-all;">${esc(rejected)}</td>
+      <td style="max-width:180px;word-break:break-all;font-size:11px;">${esc(msgId)}</td>
+      <td style="max-width:220px;word-break:break-all;font-size:11px;">${esc(resp || err)}</td>
       <td>${esc(subject)}</td>
     </tr>`;
   }).join('');
@@ -7106,6 +7424,11 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
     + '<th>' + t(locale, 'cr_th_merchant') + '</th>'
     + '<th>' + t(locale, 'cr_th_route_no') + '</th>'
     + '<th>Email To</th>'
+    + '<th>Send</th>'
+    + '<th>Accepted</th>'
+    + '<th>Rejected</th>'
+    + '<th>MessageId</th>'
+    + '<th>SMTP/Err</th>'
     + '<th>Subject</th>'
     + '</tr></thead>';
   const mainContent = '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
@@ -7162,6 +7485,11 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cancel_re
   for (const m of emailEntries) {
     const dt = formatDateAndTimeTHJP(m.sentAtIso || m.sentAt || '');
     const cat = m.type === 'void_manual_email' ? 'email_void' : 'other';
+    // 이메일무효 건은 "취소 요청"이 아닌 "무효 요청"으로 표시
+    let detail = m.subject || '';
+    if (cat === 'email_void' && detail) {
+      detail = detail.replace(/^취소 요청/, '무효 요청');
+    }
     rowsData.push({
       sentAt: dt,
       category: cat,
@@ -7170,8 +7498,7 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cancel_re
       orderNo: m.orderNo || '',
       merchantId: m.merchantId || '',
       routeNo: m.routeNo || '',
-      // 메일 제목 그대로 표시 (예: "무효 요청: 30151580")
-      detail: m.subject || '',
+      detail,
     });
   }
   rowsData.sort((a, b) => {
@@ -7658,6 +7985,152 @@ app.post('/admin/logs/resend', requireAuth, requirePageAny(['pg_logs', 'pg_resul
     const resendKind = (req.body.resendKind || '').toString().toLowerCase() || 'payment';
     return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason) + '&resendKind=' + encodeURIComponent(resendKind));
   }
+});
+
+// 노티 수신 분석 (고객 리다이렉트 디버깅: Accept, User-Agent, Api-Key 및 리다이렉트 여부)
+function wouldRedirectFromNotiLog(log) {
+  if ((log.kind || '') !== 'result') return false;
+  const apiKey = !!(log._apiKeyPresent);
+  if (apiKey) return false;
+  const accept = String(log._reqAccept || '').toLowerCase();
+  if (accept.includes('text/html')) return true;
+  const ua = String(log._reqUserAgent || '').toLowerCase();
+  if (/mozilla|chrome|safari|msie|edge|opera|firefox/i.test(ua)) return true;
+  return false;
+}
+app.get('/admin/noti-analysis', requireAuth, requirePage('test_run'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const logs = [...NOTI_LOGS].reverse().slice(0, 30);
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const pickFirst = (...vals) => {
+    for (const v of vals) {
+      if (v !== undefined && v !== null && String(v).trim() !== '') return v;
+    }
+    return '';
+  };
+  const extractFromRaw = (raw, key) => {
+    if (!raw || typeof raw !== 'string') return '';
+    // JSON-like: "MerchantCode":"M000001"
+    const jsonRe = new RegExp('"' + key + '"\\s*:\\s*"?([^"\\s,}]+)"?', 'i');
+    const m1 = raw.match(jsonRe);
+    if (m1 && m1[1] != null) return m1[1];
+    // Form-like: MerchantCode=M000001&RouteNo=2
+    const formRe = new RegExp('(?:^|[?&])' + key + '=([^&]+)', 'i');
+    const m2 = raw.match(formRe);
+    if (m2 && m2[1] != null) {
+      try { return decodeURIComponent(m2[1].replace(/\+/g, '%20')); } catch { return m2[1]; }
+    }
+    return '';
+  };
+  const rows = logs.map((log) => {
+    const redirect = wouldRedirectFromNotiLog(log);
+    const at = log.receivedAtIso || log.receivedAt || '';
+    const body = parseNotiBody(log) || {};
+    const rawStr = (typeof log.body === 'string' ? log.body : '') || (typeof log.rawBody === 'string' ? log.rawBody : '');
+    const mid = pickFirst(
+      body.MerchantCode, body.merchantCode, body.MerchantId, body.merchantId, body.MID, body.mid,
+      extractFromRaw(rawStr, 'MerchantCode'),
+      extractFromRaw(rawStr, 'MerchantId'),
+      extractFromRaw(rawStr, 'MID'),
+    );
+    const routeNo = pickFirst(
+      body.RouteNo, body.routeNo, body.Route, body.route,
+      extractFromRaw(rawStr, 'RouteNo'),
+      extractFromRaw(rawStr, 'routeNo'),
+    );
+    const rawPreview = rawStr ? rawStr.slice(0, 220) : '';
+    const responseBadge = redirect
+      ? '<span class="badge badge-redirect">리다이렉트</span>'
+      : '<span class="badge badge-json">JSON</span>';
+    return `<tr>
+      <td>${esc(at)}</td>
+      <td>${esc(log.routeKey || '')}</td>
+      <td>${esc(log.kind || '')}</td>
+      <td>${esc(log.merchantId || '')}</td>
+      <td>${esc(mid != null ? String(mid) : '')}</td>
+      <td>${esc(routeNo != null ? String(routeNo) : '')}</td>
+      <td class="col-raw">${esc(rawPreview)}${rawStr && rawStr.length > 220 ? '…' : ''}</td>
+      <td class="col-accept">${esc((log._reqAccept || '').slice(0, 120))}</td>
+      <td class="col-ua">${esc((log._reqUserAgent || '').slice(0, 100))}</td>
+      <td>${log._apiKeyPresent ? 'Y' : '-'}</td>
+      <td>${responseBadge}</td>
+    </tr>`;
+  }).join('');
+  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${t(locale, 'nav_noti_analysis') || '노티분석'}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; color:#111827; }
+    h1 { margin-bottom: 8px; }
+    table { border-collapse: collapse; width: 100%; background:#ffffff; border-radius:8px; overflow:hidden; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; text-align: center; vertical-align: middle; }
+    th { background: #e5f0ff; color:#1f2937; text-align: center; }
+    tr:nth-child(even) { background:#f9fafb; }
+    a { color:#2563eb; text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav-group { margin-bottom:2px; border:1px solid transparent; border-radius:6px; }
+    .nav-group-summary { font-size:14px; font-weight:600; color:#e5e7eb; padding:6px 8px; cursor:pointer; list-style:none; text-transform:uppercase; letter-spacing:0.06em; display:flex; align-items:center; justify-content:space-between; border-radius:6px; }
+    .nav-group-summary::-webkit-details-marker { display:none; }
+    .nav-group-summary::marker { content:""; }
+    .nav-group-summary::after { content:"\\25BC"; font-size:14px; opacity:0.7; transition:transform 0.15s ease; flex-shrink:0; }
+    .nav-group[open] .nav-group-summary::after { transform:rotate(-180deg); }
+    .nav-group-items { padding-left:4px; padding-bottom:4px; }
+    .nav-group-items a { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:13px; border-radius:6px; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(59, 130, 246, 0.35); color:#dbeafe; }
+    .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
+    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
+    .topbar span { margin-right:12px; }
+    .content { display:flex; flex-direction:column; gap:16px; }
+    .card { background:#ffffff; padding:18px 22px; border-radius:10px; box-shadow:0 10px 25px rgba(15,23,42,0.06); margin-bottom:8px; border:1px solid #e5e7eb; }
+    .note { font-size:12px; color:#4b5563; line-height:1.45; margin:8px 0 0; }
+    .table-wrap { overflow-x:auto; }
+    .col-raw { max-width: 320px; word-break: break-all; font-size: 11px; color:#111827; text-align:left; }
+    .col-ua { max-width: 240px; word-break: break-all; font-size: 11px; text-align:left; }
+    .col-accept { max-width: 220px; word-break: break-all; font-size: 11px; text-align:left; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid #e5e7eb; background:#f9fafb; }
+    .badge-redirect { background:#eff6ff; border-color:#bfdbfe; color:#1d4ed8; font-weight:600; }
+    .badge-json { background:#ecfdf5; border-color:#bbf7d0; color:#166534; font-weight:600; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser, req.originalUrl)}
+      <div class="content">
+        <div class="card">
+          <h1>${t(locale, 'nav_noti_analysis') || '노티분석'}</h1>
+          <p class="note">최근 노티 수신 시 헤더와 브라우저 판별 결과입니다. result 노티에서 Api-Key 없음 + (Accept:text/html 또는 브라우저 User-Agent) 이면 리다이렉트로 처리됩니다.</p>
+          <p class="note" style="margin-top:10px;"><a href="/admin/test-pay">${t(locale, 'nav_test_run') || '테스트 실행'}</a> &nbsp; <a href="/admin/logs-result">${t(locale, 'nav_pg_result') || '피지 결과'}</a></p>
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead><tr>
+              <th>수신 시각</th><th>routeKey</th><th>kind</th><th>merchantId</th><th>MID</th><th>RouteNo</th><th>Raw(일부)</th>
+              <th>Accept</th><th>User-Agent</th><th>ApiKey</th><th>응답</th>
+            </tr></thead>
+            <tbody>${rows || '<tr><td colspan="11">수신 노티 없음 (테스트 결제 후 다시 확인)</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
 });
 
 // 피지결과 (요약) 페이지
@@ -8809,6 +9282,14 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
 
   const locale = getLocale(req);
   const selectedId = (req.query.configId || '').toString();
+  const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
+  const testResultLinks = Array.from(TEST_CONFIGS.values())
+    .filter((c) => c.useTestResultPage)
+    .map(
+      (c) =>
+        `<a href="${baseUrl}/noti/result/test_${c.id}?OrderNo=TEST-${Date.now()}&PaymentStatus=0" target="_blank" rel="noopener" style="display:inline-block;margin:4px 8px 4px 0;padding:8px 14px;background:#0ea5e9;color:#fff;text-decoration:none;border-radius:6px;font-size:13px;">${c.id} (고객 리다이렉트 테스트)</a>`,
+    )
+    .join('');
 
   const options = Array.from(TEST_CONFIGS.values())
     .map(
@@ -8892,6 +9373,35 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
           </label>
           <button type="submit">테스트 결제 페이지로 이동</button>
         </form>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <h2 style="margin-top:0;font-size:16px;">고객 리다이렉트(GET) 테스트</h2>
+        <p style="font-size:12px;color:#555;margin-bottom:8px;">칠페이가 Result URL 하나로 고객 브라우저를 보낼 때, 우리 미들웨어가 가맹점 결과 페이지(또는 테스트 결과 페이지)로 리다이렉트하는 동작을 확인할 수 있습니다. 아래 링크를 새 창에서 열어 보세요.</p>
+        <p style="font-size:12px;margin-bottom:12px;"><a href="/admin/noti-analysis" target="_blank">노티 수신 분석</a> — 최근 노티의 Accept / User-Agent / Api-Key와 리다이렉트 여부를 확인할 수 있습니다. 테스트 결제 후 여기서 실제 수신 내용을 확인하세요.</p>
+        ${testResultLinks ? `<p style="font-size:13px;margin-bottom:8px;"><strong>테스트 환경별:</strong></p><p>${testResultLinks}</p>` : '<p style="font-size:12px;color:#6b7280;">테스트 환경 설정에서 "테스트 결과 페이지 사용"을 켠 config가 있으면 여기에 링크가 표시됩니다.</p>'}
+        <p style="font-size:13px;margin-top:16px;margin-bottom:6px;"><strong>가맹점 Result 번호(1~50)로 테스트:</strong></p>
+        <p style="font-size:12px;color:#555;">가맹점 목록에 등록된 PG Reurl 번호를 넣으면, 해당 가맹점의 Origin Reurl로 리다이렉트됩니다.</p>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;" id="result-redirect-test-form">
+          <input type="number" id="result-redirect-no" min="1" max="50" value="20" style="width:80px;padding:6px 10px;border-radius:6px;border:1px solid #d1d5db;" />
+          <button type="button" id="result-redirect-go" style="padding:8px 14px;background:#0ea5e9;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;">새 창에서 열기</button>
+        </div>
+        <script>
+          (function(){
+            var form = document.getElementById('result-redirect-test-form');
+            var noInput = document.getElementById('result-redirect-no');
+            var goBtn = document.getElementById('result-redirect-go');
+            if (form && noInput && goBtn) {
+              function openResultRedirect() {
+                var no = (noInput && noInput.value) ? parseInt(noInput.value, 10) : 20;
+                if (isNaN(no) || no < 1 || no > 50) no = 20;
+                var base = '${baseUrl.replace(/'/g, "\\'")}';
+                var url = base + '/noti/result/' + no + '?OrderNo=TEST-REDIRECT&PaymentStatus=0';
+                window.open(url, '_blank', 'noopener');
+              }
+              goBtn.addEventListener('click', openResultRedirect);
+            }
+          })();
+        </script>
       </div>
     </main>
   </div>
@@ -9389,7 +9899,7 @@ app.get('/admin/test-pay/return', requireAuth, requirePage('test_run'), (req, re
     const relayOk = latestTestLog.relayStatus === 'ok';
     if (isSuccess && relayOk) {
       resultTitle = '테스트 결제 완료';
-      resultMessage = '테스트는 정상적으로 완료되었습니다. 축하합니다.';
+      resultMessage = '테스트결제가 완료 되었습니다. 감사합니다.';
     } else if (relayOk && !isSuccess) {
       resultTitle = '테스트 결제 실패';
       resultMessage = 'PG에서 실패/취소 상태로 Result 노티가 도착했습니다. 상세 내역을 확인하세요.';
@@ -9446,6 +9956,86 @@ app.get('/admin/test-pay/return', requireAuth, requirePage('test_run'), (req, re
         <a href="/admin/test-pay" style="display:inline-block;margin-top:12px;padding:8px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-size:14px;">테스트 실행으로 돌아가기</a>
       </div>
     </main>
+  </div>
+</body>
+</html>`);
+});
+
+// ========== 가맹점 결과 페이지(고객용) 뷰: PG Return URL로 사용 ==========
+// 예: ChillPay Return URL 에 https://noti.icopay.net/merchant/merchant_test/result-view 등록
+// - 결과 로그(NOTI_LOGS)에서 해당 merchantId 의 최신 result 노티를 조회
+// - 가맹점 Origin Reurl(resultUrl)이 있으면 status/orderNo 등을 쿼리로 붙여 리다이렉트
+// - resultUrl 이 없으면 우리 공통 결과 화면을 간단히 보여준다.
+app.get('/merchant/:merchantId/result-view', async (req, res) => {
+  const merchantId = (req.params.merchantId || '').toString();
+  const merchant = MERCHANTS.get(merchantId);
+  if (!merchant) {
+    return res.status(404).send('Unknown merchantId');
+  }
+
+  const logs = Array.isArray(NOTI_LOGS) ? NOTI_LOGS : [];
+  const latestLog = [...logs].slice().reverse().find((log) => {
+    return log && log.kind === 'result' && log.merchantId === merchantId;
+  });
+
+  let status = 'unknown';
+  let orderNo = '';
+  let reason = '';
+
+  if (latestLog && latestLog.body) {
+    const body = typeof latestLog.body === 'object'
+      ? latestLog.body
+      : (() => { try { return JSON.parse(String(latestLog.body)); } catch { return {}; } })();
+    const isSuccess = isSuccessPaymentBody(body);
+    status = isSuccess ? 'success' : 'fail';
+    orderNo = body.OrderNo || body.orderNo || body.MerchantOrder || body.merchantOrder || '';
+    const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+    reason = isSuccess ? '' : (ps != null ? String(ps) : '');
+  }
+
+  const viewUrl = (merchant.resultUrl || '').trim();
+  if (viewUrl) {
+    const hasQuery = viewUrl.includes('?');
+    const qp = [
+      'status=' + encodeURIComponent(status),
+      orderNo ? 'orderNo=' + encodeURIComponent(orderNo) : '',
+      reason ? 'reason=' + encodeURIComponent(reason) : '',
+    ].filter(Boolean).join('&');
+    const redirectTo = viewUrl + (qp ? (hasQuery ? '&' : '?') + qp : '');
+    return res.redirect(302, redirectTo);
+  }
+
+  // resultUrl(Origin Reurl)이 설정되지 않은 경우: 우리 쪽에서 최소한의 안내 화면 노출
+  res.send(`<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>결제 결과 안내</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+    .wrap { max-width:520px; margin:60px auto; background:#fff; border-radius:10px; padding:24px 28px; box-shadow:0 10px 30px rgba(15,23,42,0.15); border:1px solid #e5e7eb; }
+    h1 { font-size:20px; margin-bottom:8px; }
+    p { font-size:14px; color:#374151; margin:4px 0; }
+    .status-success { color:#166534; font-weight:600; }
+    .status-fail { color:#b91c1c; font-weight:600; }
+    .status-unknown { color:#6b7280; font-weight:600; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>결제 결과 안내</h1>
+    <p class="status-${status === 'success' ? 'success' : status === 'fail' ? 'fail' : 'unknown'}">
+      ${
+        status === 'success'
+          ? '결제가 정상적으로 완료되었습니다. 감사합니다.'
+          : status === 'fail'
+          ? '결제가 완료되지 않았습니다. 다시 시도해 주세요.'
+          : '최근 결제 결과를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.'
+      }
+    </p>
+    ${orderNo ? `<p>주문번호: ${orderNo}</p>` : ''}
+    ${reason ? `<p>상태 코드: ${reason}</p>` : ''}
+    <p style="font-size:12px;color:#6b7280;margin-top:12px;">이 페이지는 PG 노티 미들웨어에서 기본 제공하는 안내 화면입니다. 가맹점에서 별도의 결과 페이지 URL을 등록하면 해당 페이지로 자동 이동합니다.</p>
   </div>
 </body>
 </html>`);
