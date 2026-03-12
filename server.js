@@ -70,6 +70,9 @@ const staticDir = path.join(__dirname, 'static');
 if (!fs.existsSync(staticDir)) fs.mkdirSync(staticDir, { recursive: true });
 app.use('/static', express.static(staticDir));
 
+// 루트(/) 접속 시 관리자 로그인으로 이동
+app.get('/', (req, res) => res.redirect('/admin/login'));
+
 // 브라우저 기본 파비콘 경로(/favicon.ico) 지원
 // - 환경설정(site-settings.json)의 favicon 값이 있으면 그 URL로 리다이렉트
 // - 없으면 static/favicon.ico 파일이 있으면 그 파일 제공
@@ -180,6 +183,7 @@ const DEFAULT_CHILLPAY_TIMEZONE = 'Asia/Bangkok';
 const DEFAULT_SYNC_RESULT_DISPLAY_MINUTES = 30;
 const DEFAULT_REFUND_WINDOW_DAYS = 7;
 const DEFAULT_PG_TRANSACTION_SYNC_INTERVAL_MINUTES = 30;
+const DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS = 2;
 const DEFAULT_PG_TRANSACTION_INITIAL_SYNC_MONTHS = 3;
 const DEFAULT_AMOUNT_DISPLAY_OP = '/'; // '*', '/', '+', '-'
 const DEFAULT_AMOUNT_DISPLAY_VALUE = 100;
@@ -215,6 +219,7 @@ function loadChillPayTransactionConfig() {
       syncResultDisplayMinutes: Number.isFinite(o && o.syncResultDisplayMinutes) && o.syncResultDisplayMinutes > 0 ? o.syncResultDisplayMinutes : DEFAULT_SYNC_RESULT_DISPLAY_MINUTES,
       pgTransactionSyncIntervalMinutes: Number.isFinite(o && o.pgTransactionSyncIntervalMinutes) && o.pgTransactionSyncIntervalMinutes > 0 ? Math.min(1440, o.pgTransactionSyncIntervalMinutes) : DEFAULT_PG_TRANSACTION_SYNC_INTERVAL_MINUTES,
       pgTransactionInitialSyncMonths: Number.isFinite(o && o.pgTransactionInitialSyncMonths) && o.pgTransactionInitialSyncMonths > 0 ? Math.min(60, o.pgTransactionInitialSyncMonths) : DEFAULT_PG_TRANSACTION_INITIAL_SYNC_MONTHS,
+      pgTransactionIncrementalDays: Number.isFinite(o && o.pgTransactionIncrementalDays) && o.pgTransactionIncrementalDays > 0 ? Math.min(365, o.pgTransactionIncrementalDays) : DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
       timezone: (o && o.timezone && String(o.timezone).trim()) ? String(o.timezone).trim() : DEFAULT_CHILLPAY_TIMEZONE,
       useSandbox: !!(o && o.useSandbox === true),
       emailFrom: (o && o.emailFrom != null) ? String(o.emailFrom).trim() : '',
@@ -241,6 +246,7 @@ function loadChillPayTransactionConfig() {
       syncResultDisplayMinutes: DEFAULT_SYNC_RESULT_DISPLAY_MINUTES,
       pgTransactionSyncIntervalMinutes: DEFAULT_PG_TRANSACTION_SYNC_INTERVAL_MINUTES,
       pgTransactionInitialSyncMonths: DEFAULT_PG_TRANSACTION_INITIAL_SYNC_MONTHS,
+      pgTransactionIncrementalDays: DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
       timezone: DEFAULT_CHILLPAY_TIMEZONE,
       useSandbox: APP_ENV === 'test',
       emailFrom: '',
@@ -272,6 +278,7 @@ function saveChillPayTransactionConfig(o) {
     syncResultDisplayMinutes: o && Number.isFinite(o.syncResultDisplayMinutes) && o.syncResultDisplayMinutes > 0 ? o.syncResultDisplayMinutes : cur.syncResultDisplayMinutes,
     pgTransactionSyncIntervalMinutes: o && Number.isFinite(o.pgTransactionSyncIntervalMinutes) && o.pgTransactionSyncIntervalMinutes > 0 ? Math.min(1440, o.pgTransactionSyncIntervalMinutes) : cur.pgTransactionSyncIntervalMinutes,
     pgTransactionInitialSyncMonths: o && Number.isFinite(o.pgTransactionInitialSyncMonths) && o.pgTransactionInitialSyncMonths > 0 ? Math.min(60, o.pgTransactionInitialSyncMonths) : cur.pgTransactionInitialSyncMonths,
+    pgTransactionIncrementalDays: o && Number.isFinite(o.pgTransactionIncrementalDays) && o.pgTransactionIncrementalDays > 0 ? Math.min(365, o.pgTransactionIncrementalDays) : cur.pgTransactionIncrementalDays || DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
     timezone: (o && o.timezone != null && String(o.timezone).trim()) ? String(o.timezone).trim() : cur.timezone,
     amountDisplayOp: (o && typeof o.amountDisplayOp === 'string' && ['*', '/', '+', '-'].includes(o.amountDisplayOp)) ? o.amountDisplayOp : cur.amountDisplayOp || DEFAULT_AMOUNT_DISPLAY_OP,
     amountDisplayValue: o && Number.isFinite(o.amountDisplayValue) ? o.amountDisplayValue : cur.amountDisplayValue,
@@ -583,12 +590,13 @@ function getInternalTargetName(internalTargetId) {
   return (t && t.name) ? t.name : (internalTargetId || '-');
 }
 
-// ========== 전산 노티 설정 (통화별: 금액 가공, RouteNo, CustomerId, 오리지널) ==========
+// ========== 전산 노티 설정 (통화별: 금액 가공, RouteNo, CustomerId, CustomerName 가공, 오리지널) ==========
 const CURRENCY_CODES = ['392', '840', '410', '764'];
 const DEFAULT_AMOUNT_RULES = { '392': '/100', '840': '/100', '410': '=', '764': '=' };
 const DEFAULT_ROUTE_NO_MODE = { '392': 'current', '840': 'current', '410': 'current', '764': 'current' };
 const DEFAULT_CUSTOMER_ID_MODE = { '392': 'current', '840': 'current', '410': 'current', '764': 'current' };
 const DEFAULT_ORIGINAL = { '392': false, '840': false, '410': false, '764': false };
+const DEFAULT_CUSTOMER_NAME_MODE = { '392': 'format', '840': 'format', '410': 'format', '764': 'format' }; // 'format' | 'none'
 
 function loadInternalNotiSettingsFull() {
   const loaded = loadJsonConfig(INTERNAL_NOTI_SETTINGS_PATH, null);
@@ -601,10 +609,13 @@ function loadInternalNotiSettingsFull() {
   const customerIdMode = loaded && loaded.customerIdMode && typeof loaded.customerIdMode === 'object'
     ? { ...DEFAULT_CUSTOMER_ID_MODE, ...loaded.customerIdMode }
     : DEFAULT_CUSTOMER_ID_MODE;
+  const customerNameMode = loaded && loaded.customerNameMode && typeof loaded.customerNameMode === 'object'
+    ? { ...DEFAULT_CUSTOMER_NAME_MODE, ...loaded.customerNameMode }
+    : DEFAULT_CUSTOMER_NAME_MODE;
   const original = loaded && loaded.original && typeof loaded.original === 'object'
     ? { ...DEFAULT_ORIGINAL, ...loaded.original }
     : DEFAULT_ORIGINAL;
-  return { amountRules, routeNoMode, customerIdMode, original };
+  return { amountRules, routeNoMode, customerIdMode, customerNameMode, original };
 }
 
 function loadInternalNotiSettings() {
@@ -623,6 +634,7 @@ function saveInternalNotiSettings(fullOrAmountRules) {
     amountRules: full.amountRules || current.amountRules,
     routeNoMode: full.routeNoMode || current.routeNoMode,
     customerIdMode: full.customerIdMode || current.customerIdMode,
+    customerNameMode: full.customerNameMode || current.customerNameMode,
     original: full.original !== undefined ? full.original : current.original,
   };
   saveJsonConfig(INTERNAL_NOTI_SETTINGS_PATH, toSave);
@@ -657,7 +669,11 @@ function loadDevInternalNotiSettingsFull() {
     loaded && loaded.original && typeof loaded.original === 'object'
       ? { ...DEFAULT_ORIGINAL, ...loaded.original }
       : DEFAULT_ORIGINAL;
-  return { amountRules, routeNoMode, customerIdMode, original };
+  const customerNameMode =
+    loaded && loaded.customerNameMode && typeof loaded.customerNameMode === 'object'
+      ? { ...DEFAULT_CUSTOMER_NAME_MODE, ...loaded.customerNameMode }
+      : DEFAULT_CUSTOMER_NAME_MODE;
+  return { amountRules, routeNoMode, customerIdMode, customerNameMode, original };
 }
 
 function loadDevInternalNotiSettings() {
@@ -677,6 +693,7 @@ function saveDevInternalNotiSettings(fullOrAmountRules) {
     amountRules: full.amountRules || current.amountRules,
     routeNoMode: full.routeNoMode || current.routeNoMode,
     customerIdMode: full.customerIdMode || current.customerIdMode,
+    customerNameMode: full.customerNameMode || current.customerNameMode,
     original: full.original !== undefined ? full.original : current.original,
   };
   saveJsonConfig(DEV_INTERNAL_NOTI_SETTINGS_PATH, toSave);
@@ -913,6 +930,14 @@ function loadJsonLogFile(filePath, isoKey) {
 
 // ===== PG 노티 로그 (최근 7일 메모리 + 파일에도 기록) =====
 let NOTI_LOGS = loadJsonLogFile(PG_NOTI_LOG_PATH, 'receivedAtIso');
+
+function loadPgNotiLogsSafe() {
+  try {
+    return Array.isArray(NOTI_LOGS) ? NOTI_LOGS : [];
+  } catch {
+    return [];
+  }
+}
 
 function appendPgNotiLog(entry) {
   const nowIso = new Date().toISOString();
@@ -1521,7 +1546,7 @@ function normalizeChillPayTransactionRow(row) {
     settled: (row.Settled != null ? row.Settled : row.settled),
   });
 }
-const PG_TRANSACTIONS_INCREMENTAL_DAYS = 2;
+const PG_TRANSACTIONS_INCREMENTAL_DAYS = DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS;
 const PG_TRANSACTIONS_PAGE_SIZE = 100;
 /** 최초 동기화 시 과거 거래를 가져올 때 한 번에 조회할 일수 */
 const PG_TRANSACTIONS_INITIAL_CHUNK_DAYS = 30;
@@ -1554,8 +1579,14 @@ async function fetchChillPayPgTransactionsDateRange(useSandbox, transactionDateF
       const ymd = parseChillPayTransactionDateToYmd(normalized.transactionDate);
       if (!ymd) continue;
       if (!intoByDate[ymd]) intoByDate[ymd] = [];
-      const existing = intoByDate[ymd].find((r) => r.transactionId === normalized.transactionId);
-      if (!existing) intoByDate[ymd].push(normalized);
+      const list = intoByDate[ymd];
+      const idx = list.findIndex((r) => r.transactionId === normalized.transactionId);
+      if (idx >= 0) {
+        // 상태(Status)·금액 등 변경이 있을 수 있으므로 전체 레코드를 최신 값으로 덮어쓴다.
+        list[idx] = normalized;
+      } else {
+        list.push(normalized);
+      }
     }
     const total = result.totalRecord != null ? result.totalRecord : 0;
     const fetched = (result.data || []).length;
@@ -1575,8 +1606,11 @@ async function fetchChillPayPgTransactionsForEnv(useSandbox, options) {
   const byDate = incremental ? JSON.parse(JSON.stringify(existingByDate || {})) : {};
 
   if (incremental) {
+    const incrementalDays = Number.isFinite(cfg.pgTransactionIncrementalDays) && cfg.pgTransactionIncrementalDays > 0
+      ? Math.min(365, cfg.pgTransactionIncrementalDays)
+      : PG_TRANSACTIONS_INCREMENTAL_DAYS;
     const fromDate = new Date(toDate);
-    fromDate.setDate(fromDate.getDate() - (PG_TRANSACTIONS_INCREMENTAL_DAYS - 1));
+    fromDate.setDate(fromDate.getDate() - (incrementalDays - 1));
     const transactionDateFrom = formatPgTransactionDateForApi(fromDate, '00:00:00');
     const transactionDateTo = formatPgTransactionDateForApi(toDate, '23:59:59');
     await fetchChillPayPgTransactionsDateRange(useSandbox, transactionDateFrom, transactionDateTo, byDate);
@@ -1778,6 +1812,16 @@ function buildVoidRefundNotiMap(days) {
   for (const e of entries) {
     const tid = e.transactionId && String(e.transactionId).trim();
     if (tid) map[tid] = e;
+  }
+  return map;
+}
+// orderNo별 최근 무효/환불 로그 맵 (TransactionId가 비어있는 테스트/특이 케이스 대응)
+function buildVoidRefundNotiOrderNoMap(days) {
+  const entries = loadVoidRefundNotiLog(days || 30);
+  const map = {};
+  for (const e of entries) {
+    const on = e.orderNo && String(e.orderNo).trim();
+    if (on) map[on] = e;
   }
   return map;
 }
@@ -2244,6 +2288,14 @@ function transformForInternal(original, merchant) {
   const processed = applyAmountRule(amountRaw, currency);
   const amount = Number.isInteger(processed) ? String(Math.round(processed)) : String(Number(processed).toFixed(2));
 
+  const origOrderNo = original.OrderNo != null ? String(original.OrderNo) : (original.orderNo != null ? String(original.orderNo) : '');
+  const origCustomerId = original.CustomerId != null ? String(original.CustomerId) : (original.customerId != null ? String(original.customerId) : '');
+  let customerName = original.CustomerName || original.customerName || '';
+  const customerNameMode = (settings.customerNameMode && settings.customerNameMode[currency]) || 'format';
+  if (customerNameMode === 'format' && (origOrderNo || origCustomerId)) {
+    customerName = `ON:${origOrderNo} / ID:${origCustomerId}`;
+  }
+
   const payload = {
     TransactionId: original.TransactionId,
     Amount: amount,
@@ -2257,7 +2309,7 @@ function transformForInternal(original, merchant) {
     PaymentDescription: original.PaymentDescription || '',
     CreditCardToken: original.CreditCardToken || '',
     Currency: original.Currency,
-    CustomerName: original.CustomerName || '',
+    CustomerName: customerName,
     CardNumber: '000000000000',
     CheckSum: original.CheckSum || '',
   };
@@ -2286,6 +2338,14 @@ function transformForDevInternal(original, merchant) {
   const amountRaw = Number(original.Amount) || 0;
   const processed = applyDevAmountRule(amountRaw, currency);
   const amount = Number.isInteger(processed) ? String(Math.round(processed)) : String(Number(processed).toFixed(2));
+
+  const origOrderNo = original.OrderNo != null ? String(original.OrderNo) : (original.orderNo != null ? String(original.orderNo) : '');
+  const origCustomerId = original.CustomerId != null ? String(original.CustomerId) : (original.customerId != null ? String(original.customerId) : '');
+  let customerName = original.CustomerName || original.customerName || '';
+  const customerNameMode = (settings.customerNameMode && settings.customerNameMode[currency]) || 'format';
+  if (customerNameMode === 'format' && (origOrderNo || origCustomerId)) {
+    customerName = `ON:${origOrderNo} / ID:${origCustomerId}`;
+  }
 
   const payload = {
     TransactionId: original.TransactionId,
@@ -2749,6 +2809,16 @@ app.post('/noti/:routeKey', async (req, res) => {
 
 // ========== GET /noti/test-result (로그인 없이 보는 테스트 결제 완료 페이지) — :routeKey 보다 먼저 등록 ==========
 function sendTestResultPage(req, res) {
+  const locale = getLocale(req);
+  const clientIp =
+    (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
+    req.ip ||
+    '';
+  const adminUser = req.session && req.session.adminUser ? req.session.adminUser : '';
+  const nowDate = new Date();
+  const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+
   const orderNo = (req.query && (req.query.orderNo || req.query.OrderNo)) || '';
   const status = (req.query && (req.query.status || req.query.respCode || req.query.Status)) || '';
   const isSuccess = String(status).toLowerCase() === 'complete' || status === '0' || status === 0;
@@ -2757,26 +2827,41 @@ function sendTestResultPage(req, res) {
     : status
     ? '결제가 완료되지 않았거나 취소되었습니다.'
     : '결제 결과를 확인할 수 없습니다.';
+
   res.send(`<!DOCTYPE html>
-<html lang="ko">
-<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>테스트 결제 완료</title>
-<style>
-  body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:#edf2f7;display:flex;align-items:center;justify-content:center;min-height:100vh;}
-  .card{background:#fff;padding:32px 40px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.08);border:1px solid #e5e7eb;max-width:420px;text-align:center;}
-  h1{font-size:20px;margin:0 0 12px;color:#111827;}
-  .msg{font-size:16px;color:#166534;font-weight:600;margin:16px 0;}
-  .msg.fail{color:#b91c1c;}
-  .order{font-size:13px;color:#6b7280;margin-top:12px;}
-  a{display:inline-block;margin-top:20px;padding:10px 20px;background:#2563eb;color:#fff;text-decoration:none;border-radius:8px;font-size:14px;}
-</style>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>테스트 결제 완료</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+    h1 { margin-bottom: 8px; }
+    .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
+    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
+    .topbar span { margin-right:12px; }
+    .card { background:#fff; padding:32px 40px; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.08); border:1px solid #e5e7eb; max-width:520px; margin:24px auto; text-align:center; }
+    .msg { font-size:16px; color:#166534; font-weight:600; margin:16px 0; }
+    .msg.fail { color:#b91c1c; }
+    .order { font-size:13px; color:#6b7280; margin-top:12px; }
+    a.btn-back { display:inline-block; margin-top:20px; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:8px; font-size:14px; }
+  </style>
 </head>
 <body>
-  <div class="card">
-    <h1>테스트 결제 결과</h1>
-    <p class="msg ${isSuccess ? '' : 'fail'}">${msg}</p>
-    ${orderNo ? `<p class="order">주문번호: ${orderNo}</p>` : ''}
-    <p style="font-size:12px;color:#9ca3af;margin-top:16px;">이 페이지는 로그인 없이 확인할 수 있는 테스트 완료 화면입니다.</p>
-    <a href="/admin/test-pay">테스트 실행으로 돌아가기</a>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session && req.session.member, req.originalUrl || '/noti/test-result')}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowKr, nowTh, adminUser || '-', req.originalUrl || '/noti/test-result')}
+      <div class="card">
+        <h1>테스트 결제 결과</h1>
+        <p class="msg ${isSuccess ? '' : 'fail'}">${msg}</p>
+        ${orderNo ? `<p class="order">주문번호: ${orderNo}</p>` : ''}
+        <p style="font-size:12px;color:#9ca3af;margin-top:16px;">이 페이지는 로그인 없이 확인할 수 있는 테스트 완료 화면입니다.</p>
+        <a href="/admin/test-pay" class="btn-back">테스트 실행으로 돌아가기</a>
+      </div>
+    </main>
   </div>
 </body>
 </html>`);
@@ -3505,7 +3590,7 @@ app.post('/admin/account', requireAuth, requirePage('account'), async (req, res)
 });
 
 // ----- 환경설정 (왼쪽 상단 노출 이름 / 추가 노출 문구) -----
-app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
+app.get('/admin/settings', requireAuth, requireRole(ROLES.SUPER_ADMIN), requirePage('settings'), (req, res) => {
   const locale = getLocale(req);
   const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
   const adminUser = req.session.adminUser || '';
@@ -3671,19 +3756,21 @@ app.get('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
           + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_amount_formula').replace(/<br \/>/g, '<br />') + '</td>'
           + '</tr>'
           + '</tbody></table>'
-          + '<table class="chillpay-time-table" style="margin-top:10px;"><thead><tr>'
-          + '<th>' + t(locale, 'chillpay_th_sync_interval') + '</th><th>' + t(locale, 'chillpay_th_sync_display') + '</th><th>' + t(locale, 'chillpay_th_refund_days') + '</th><th>' + t(locale, 'chillpay_th_reset_months') + '</th>'
-          + '</tr></thead><tbody><tr>'
-          + '<td><input type="number" name="pgTransactionSyncIntervalMinutes" min="1" max="1440" value="' + c.pgTransactionSyncIntervalMinutes + '" style="text-align:center;" /> 분</td>'
-          + '<td><input type="number" name="syncResultDisplayMinutes" min="1" max="1440" value="' + c.syncResultDisplayMinutes + '" style="text-align:center;" /> 분</td>'
-          + '<td><input type="number" name="refundWindowDays" min="1" max="365" value="' + (c.refundWindowDays || '7') + '" style="text-align:center;" /> 일</td>'
-          + '<td><input type="number" name="pgTransactionInitialSyncMonths" min="1" max="60" value="' + c.pgTransactionInitialSyncMonths + '" style="text-align:center;" /> 개월</td>'
-          + '</tr><tr>'
-          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_sync_interval') + '</td>'
-          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_sync_display') + '</td>'
-          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_refund_days') + '</td>'
-          + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_reset_months') + '</td>'
-          + '</tr></tbody></table>'
+        + '<table class="chillpay-time-table" style="margin-top:10px;"><thead><tr>'
+        + '<th>' + t(locale, 'chillpay_th_sync_interval') + '</th><th>' + t(locale, 'chillpay_th_sync_display') + '</th><th>' + t(locale, 'chillpay_th_refund_days') + '</th><th>' + t(locale, 'chillpay_th_reset_months') + '</th><th>' + t(locale, 'chillpay_th_pg_incremental_days') + '</th>'
+        + '</tr></thead><tbody><tr>'
+        + '<td><input type="number" name="pgTransactionSyncIntervalMinutes" min="1" max="1440" value="' + c.pgTransactionSyncIntervalMinutes + '" style="text-align:center;" /> 분</td>'
+        + '<td><input type="number" name="syncResultDisplayMinutes" min="1" max="1440" value="' + c.syncResultDisplayMinutes + '" style="text-align:center;" /> 분</td>'
+        + '<td><input type="number" name="refundWindowDays" min="1" max="365" value="' + (c.refundWindowDays || '7') + '" style="text-align:center;" /> 일</td>'
+        + '<td><input type="number" name="pgTransactionInitialSyncMonths" min="1" max="60" value="' + c.pgTransactionInitialSyncMonths + '" style="text-align:center;" /> 개월</td>'
+        + '<td><input type="number" name="pgTransactionIncrementalDays" min="1" max="365" value="' + (c.pgTransactionIncrementalDays || DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS) + '" style="text-align:center;" /> 일</td>'
+        + '</tr><tr>'
+        + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_sync_interval') + '</td>'
+        + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_sync_display') + '</td>'
+        + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_refund_days') + '</td>'
+        + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_reset_months') + '</td>'
+        + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_pg_incremental_days') + '</td>'
+        + '</tr></tbody></table>'
           + '</section>'
           + '<input type="hidden" name="timezone" value="Asia/Bangkok" />'
           + '<div class="chillpay-submit"><button type="submit">' + t(locale, 'common_save') + '</button></div></form></div>'
@@ -3767,7 +3854,7 @@ function keepIfNotEmpty(currentVal, submittedVal) {
   return sub === '' ? cur : sub;
 }
 
-app.post('/admin/settings/chillpay-credentials', requireAuth, requirePage('settings'), (req, res) => {
+app.post('/admin/settings/chillpay-credentials', requireAuth, requireRole(ROLES.SUPER_ADMIN), requirePage('settings'), (req, res) => {
   const cur = loadChillPayTransactionConfig();
   const sandboxMid = keepIfNotEmpty(cur.sandbox.mid, req.body && req.body.sandboxMid);
   const sandboxApiKey = keepIfNotEmpty(cur.sandbox.apiKey, req.body && req.body.sandboxApiKey);
@@ -3782,7 +3869,7 @@ app.post('/admin/settings/chillpay-credentials', requireAuth, requirePage('setti
   return res.redirect('/admin/settings');
 });
 
-app.post('/admin/settings/chillpay-time', requireAuth, requirePage('settings'), (req, res) => {
+app.post('/admin/settings/chillpay-time', requireAuth, requireRole(ROLES.SUPER_ADMIN), requirePage('settings'), (req, res) => {
   const voidCutoffHour = parseInt(req.body.voidCutoffHour, 10);
   const voidCutoffMinute = parseInt(req.body.voidCutoffMinute, 10);
   const refundStartHour = parseInt(req.body.refundStartHour, 10);
@@ -3791,6 +3878,7 @@ app.post('/admin/settings/chillpay-time', requireAuth, requirePage('settings'), 
   const pgTransactionSyncIntervalMinutes = parseInt(req.body.pgTransactionSyncIntervalMinutes, 10);
   const pgTransactionInitialSyncMonths = parseInt(req.body.pgTransactionInitialSyncMonths, 10);
   const refundWindowDays = parseInt(req.body.refundWindowDays, 10);
+  const pgTransactionIncrementalDays = parseInt(req.body.pgTransactionIncrementalDays, 10);
   saveChillPayTransactionConfig({
     voidCutoffHour: Number.isFinite(voidCutoffHour) ? voidCutoffHour : DEFAULT_VOID_CUTOFF_HOUR,
     voidCutoffMinute: Number.isFinite(voidCutoffMinute) ? voidCutoffMinute : DEFAULT_VOID_CUTOFF_MINUTE,
@@ -3800,12 +3888,13 @@ app.post('/admin/settings/chillpay-time', requireAuth, requirePage('settings'), 
     syncResultDisplayMinutes: Number.isFinite(syncResultDisplayMinutes) && syncResultDisplayMinutes > 0 ? syncResultDisplayMinutes : 30,
     pgTransactionSyncIntervalMinutes: Number.isFinite(pgTransactionSyncIntervalMinutes) && pgTransactionSyncIntervalMinutes > 0 ? Math.min(1440, pgTransactionSyncIntervalMinutes) : 30,
     pgTransactionInitialSyncMonths: Number.isFinite(pgTransactionInitialSyncMonths) && pgTransactionInitialSyncMonths > 0 ? Math.min(60, pgTransactionInitialSyncMonths) : 3,
+    pgTransactionIncrementalDays: Number.isFinite(pgTransactionIncrementalDays) && pgTransactionIncrementalDays > 0 ? Math.min(365, pgTransactionIncrementalDays) : DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
     timezone: (req.body && req.body.timezone != null) ? String(req.body.timezone).trim() : 'Asia/Tokyo',
   });
   return res.redirect('/admin/settings');
 });
 
-app.post('/admin/settings/chillpay-email', requireAuth, requirePage('settings'), async (req, res) => {
+app.post('/admin/settings/chillpay-email', requireAuth, requireRole(ROLES.SUPER_ADMIN), requirePage('settings'), async (req, res) => {
   const useSandbox = req.body.useSandbox === 'on' || req.body.useSandbox === true;
   const emailFrom = (req.body && req.body.emailFrom != null) ? String(req.body.emailFrom).trim() : '';
   const companyName = (req.body && req.body.companyName != null) ? String(req.body.companyName).trim() : '';
@@ -3869,7 +3958,7 @@ app.post('/admin/settings/chillpay-email', requireAuth, requirePage('settings'),
   return res.redirect('/admin/settings');
 });
 
-app.post('/admin/settings', requireAuth, requirePage('settings'), (req, res) => {
+app.post('/admin/settings', requireAuth, requireRole(ROLES.SUPER_ADMIN), requirePage('settings'), (req, res) => {
   const sidebarTitle = (req.body && req.body.sidebarTitle != null) ? String(req.body.sidebarTitle).trim() : '';
   const sidebarSub = (req.body && req.body.sidebarSub != null) ? String(req.body.sidebarSub).trim() : '';
   const pageTitle = (req.body && req.body.pageTitle != null) ? String(req.body.pageTitle).trim() : '';
@@ -5618,7 +5707,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
   const searchField = (q.searchField || 'all').toString();
   let dateFrom = (q.dateFrom || '').toString().trim();
   let dateTo = (q.dateTo || '').toString().trim();
-  const period = (q.period || '').toString();
+  const period = (q.period || 'today').toString();
   const statusFilter = (q.statusFilter || '').toString();
   const perPage = Math.max(10, Math.min(200, parseInt(q.perPage, 10) || 25));
   const page = Math.max(1, parseInt(q.page, 10) || 1);
@@ -5678,18 +5767,50 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
       return !Number.isNaN(t) && t >= fromTs && t < toTs;
     });
   }
+  const voidRefundByTxIdForFilter = buildVoidRefundNotiMap(30);
+  const voidRefundByOrderNoForFilter = buildVoidRefundNotiOrderNoMap(30);
+  function getNotiFilterKind(log) {
+    const body = parseNotiBody(log);
+    const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+    const isSuccess = isSuccessPaymentBody(body);
+    const isCancel = isDefinitelyCancelPaymentStatus(ps);
+    const txId = body.TransactionId ?? body.transactionId ?? '';
+    const orderNo = body.OrderNo ?? body.orderNo ?? '';
+    const entry = (txId && voidRefundByTxIdForFilter[txId]) || (orderNo && voidRefundByOrderNoForFilter[String(orderNo).trim()]) || null;
+    const hasVoid = !!((txId && hasVoidNotiSent(txId)) || (entry && (entry.type === 'void' || entry.type === 'void_manual_email')));
+    const hasRefund = !!((txId && hasRefundNotiSent(txId)) || (entry && entry.type === 'refund'));
+    if (!isSuccess && !isCancel) return 'fail';
+    if (isCancel) return 'cancel';
+    if (isSuccess && !hasVoid && !hasRefund) return 'paid';
+    if (hasVoid) {
+      if (entry && entry.type === 'void_manual_email') return 'force_void';
+      const baseDate = body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
+      const window = entry && entry.sentAtIso ? getVoidRefundWindow(baseDate, entry.sentAtIso) : getVoidRefundWindow(baseDate);
+      if (window === 'void_auto') return 'void_auto';
+      if (window === 'void_manual') return 'void_manual';
+      return 'void_manual';
+    }
+    if (hasRefund) {
+      if (entry && entry.mode === 'manual') return 'refund_manual';
+      return 'refund_auto';
+    }
+    return 'paid';
+  }
   if (statusFilter) {
     list = list.filter((log) => {
-      const body = parseNotiBody(log);
-      const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
-      const isSuccess = isSuccessPaymentBody(body);
-      const isCancel = isDefinitelyCancelPaymentStatus(ps);
-      const txId = body.TransactionId ?? body.transactionId ?? '';
-      const isVoidOrRefunded = txId && (hasVoidNotiSent(txId) || hasRefundNotiSent(txId));
-      if (statusFilter === 'success') return !!isSuccess;
-      if (statusFilter === 'fail') return !isSuccess && !isCancel && !isVoidOrRefunded;
-      if (statusFilter === 'void') return !!isVoidOrRefunded;
-      if (statusFilter === 'other') return !!isCancel || (!isSuccess && !isVoidOrRefunded && !isCancel);
+      const kind = getNotiFilterKind(log);
+      if (statusFilter === 'fail') return kind === 'fail';
+      if (statusFilter === 'paid') return kind === 'paid';
+      if (statusFilter === 'cancel') return kind === 'cancel';
+      if (statusFilter === 'void_all') return kind === 'void_auto' || kind === 'void_manual' || kind === 'force_void';
+      if (statusFilter === 'void_auto') return kind === 'void_auto';
+      if (statusFilter === 'void_manual') return kind === 'void_manual';
+      if (statusFilter === 'force_void') return kind === 'force_void';
+      if (statusFilter === 'refund_all') return kind === 'refund_auto' || kind === 'refund_manual' || kind === 'force_refund';
+      if (statusFilter === 'refund_auto') return kind === 'refund_auto';
+      if (statusFilter === 'refund_manual') return kind === 'refund_manual';
+      if (statusFilter === 'force_refund') return kind === 'refund_auto' || kind === 'refund_manual';
+      if (statusFilter === 'exclude_paid') return kind !== 'paid';
       return true;
     });
   }
@@ -5773,11 +5894,59 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
     // 기본: 시간별 (노티 수신 시각 전체)
     list.sort((a, b) => (getReceivedTime(a) - getReceivedTime(b)) * rev);
   }
+  // 요약: 성공/실패/무효/환불/기타 건수·금액 (색상 블록용) — slice 전 전체 목록 기준
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const notiSummary = { success: { count: 0, byCurr: {} }, fail: { count: 0, byCurr: {} }, void: { count: 0, byCurr: {} }, refund: { count: 0, byCurr: {} }, other: { count: 0, byCurr: {} } };
+  const getNotiStatusKind = (log) => {
+    const body = parseNotiBody(log);
+    const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+    const isSuccess = isSuccessPaymentBody(body);
+    const txId = body.TransactionId ?? body.transactionId ?? '';
+    const orderNo = body.OrderNo ?? body.orderNo ?? '';
+    const e = (txId && voidRefundByTxIdForFilter[txId]) || (orderNo && voidRefundByOrderNoForFilter[String(orderNo).trim()]) || null;
+    if (isSuccess) {
+      if ((txId && hasVoidNotiSent(txId)) || (e && (e.type === 'void' || e.type === 'void_manual_email'))) return 'void';
+      if ((txId && hasRefundNotiSent(txId)) || (e && e.type === 'refund')) return 'refund';
+      return 'success';
+    }
+    if (isDefinitelyCancelPaymentStatus(ps)) return 'other';
+    return 'fail';
+  };
+  for (const log of list) {
+    const body = parseNotiBody(log);
+    const amt = (body.Amount != null || body.amount != null) ? (Number(body.Amount || body.amount) || 0) : 0;
+    const curr = formatCurrencyForDisplay(body.Currency || body.currency) || '(기타)';
+    const k = getNotiStatusKind(log);
+    notiSummary[k].count++;
+    if (!notiSummary[k].byCurr[curr]) notiSummary[k].byCurr[curr] = 0;
+    notiSummary[k].byCurr[curr] += amt / 100;
+  }
+  const notiCurrencyKeys = [...new Set([].concat(...Object.values(notiSummary).map((b) => Object.keys(b.byCurr))))].sort((a, b) => { if (a === 'JPY') return -1; if (b === 'JPY') return 1; if (a === 'USD') return -1; if (b === 'USD') return 1; return String(a).localeCompare(b); });
+  const notiFmtIco = (n) => formatAmountWithSeparator(n);
+  const notiFmtByCurrency = (getVal) => notiCurrencyKeys.length ? notiCurrencyKeys.map((c) => c + ' ' + notiFmtIco(getVal(c))).join(' | ') : '0';
+  const notiTotalByCurr = {};
+  for (const c of notiCurrencyKeys) notiTotalByCurr[c] = Object.values(notiSummary).reduce((sum, b) => sum + (b.byCurr[c] || 0), 0);
+  const notiSummaryStyles = { total: 'color:#374151;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;background:#f3f4f6;', success: 'background:#dcfce7;color:#166534;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', fail: 'background:#fecaca;color:#991b1b;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', void: 'background:#fed7aa;color:#9a3412;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', refund: 'background:#bfdbfe;color:#1e40af;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', other: 'background:#e5e7eb;color:#4b5563;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;' };
+  const notiStyleEmpty = 'background:#e5e7eb;color:#6b7280;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;';
+  const notiCount = list.length;
+  const nStyle = (notiCount === 0) ? notiStyleEmpty : notiSummaryStyles.total;
+  const nStyleS = (notiSummary.success.count === 0) ? notiStyleEmpty : notiSummaryStyles.success;
+  const nStyleF = (notiSummary.fail.count === 0) ? notiStyleEmpty : notiSummaryStyles.fail;
+  const nStyleV = (notiSummary.void.count === 0) ? notiStyleEmpty : notiSummaryStyles.void;
+  const nStyleR = (notiSummary.refund.count === 0) ? notiStyleEmpty : notiSummaryStyles.refund;
+  const nStyleO = (notiSummary.other.count === 0) ? notiStyleEmpty : notiSummaryStyles.other;
+  const notiSummaryLine1 = '총거래 (' + notiCount + '건) ' + '<span style="' + nStyle + '">총금액 [' + esc(notiCurrencyKeys.length ? notiCurrencyKeys.map((c) => c + ' ' + notiFmtIco(notiTotalByCurr[c])).join(' | ') : '0') + ']</span>';
+  const notiSummaryLine2 = ''
+    + '<span style="' + nStyleS + '">성공 [' + notiSummary.success.count + '건] [' + esc(notiFmtByCurrency((c) => notiSummary.success.byCurr[c] || 0)) + ']</span> '
+    + '<span style="' + nStyleF + '">실패 [' + notiSummary.fail.count + '건] [' + esc(notiFmtByCurrency((c) => notiSummary.fail.byCurr[c] || 0)) + ']</span> '
+    + '<span style="' + nStyleV + '">무효 [' + notiSummary.void.count + '건] [' + esc(notiFmtByCurrency((c) => notiSummary.void.byCurr[c] || 0)) + ']</span> '
+    + '<span style="' + nStyleR + '">환불 [' + notiSummary.refund.count + '건] [' + esc(notiFmtByCurrency((c) => notiSummary.refund.byCurr[c] || 0)) + ']</span> '
+    + '<span style="' + nStyleO + '">기타 [' + notiSummary.other.count + '건] [' + esc(notiFmtByCurrency((c) => notiSummary.other.byCurr[c] || 0)) + ']</span>';
+
   const totalCount = list.length;
   const totalPages = Math.max(1, Math.ceil(totalCount / perPage));
   const pageNum = Math.min(page, totalPages);
   list = list.slice((pageNum - 1) * perPage, pageNum * perPage);
-  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const formatVal = (v) => {
     if (v == null || v === '') return '-';
     if (typeof v === 'object' || Array.isArray(v)) return esc(JSON.stringify(v));
@@ -5802,6 +5971,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
     t(locale, 'tx_th_detail_reason'),
   ];
   const voidRefundByTxId = buildVoidRefundNotiMap(30);
+  const voidRefundByOrderNo = buildVoidRefundNotiOrderNoMap(30);
   const formatVoidRefundSentAt = (iso) => {
     if (!iso) return '';
     const d = new Date(iso);
@@ -5859,30 +6029,45 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
   }).join('');
 
   const transactionSearchFieldsWithLocale = [
-    { key: 'all', label: t(locale, 'tx_filter_all') },
-    { key: 'OrderNo', label: 'OrderNo' },
-    { key: 'CustomerId', label: 'CustomerId' },
-    { key: 'TransactionId', label: 'TransactionId' },
-    { key: 'Amount', label: 'Amount' },
-    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
-    { key: 'Route', label: 'Route' },
-    { key: 'Currency', label: 'Currency' },
-    { key: 'Description', label: 'Description' },
+    { key: 'all', label: t(locale, 'tx_search_all') || t(locale, 'tx_filter_all') || '전체' },
+    { key: 'OrderNo', label: t(locale, 'tx_search_orderno') || 'OrderNo' },
+    { key: 'CustomerId', label: t(locale, 'tx_search_customerid') || 'CustomerId' },
+    { key: 'TransactionId', label: t(locale, 'tx_search_transactionid') || 'TransactionId' },
+    { key: 'Amount', label: t(locale, 'tx_search_amount') || 'Amount' },
+    { key: 'merchant', label: t(locale, 'tx_search_merchant') || t(locale, 'cr_th_merchant') || '가맹점' },
+    { key: 'Route', label: t(locale, 'tx_search_route') || 'Route' },
+    { key: 'Currency', label: t(locale, 'tx_search_currency') || 'Currency' },
+    { key: 'Description', label: t(locale, 'tx_search_description') || 'Description' },
   ];
   const searchFieldOptions = transactionSearchFieldsWithLocale.map((f) => '<option value="' + esc(f.key) + '"' + (searchField === f.key ? ' selected' : '') + '>' + esc(f.label) + '</option>').join('');
+  const notiFilterLabel = (key) => {
+    const msgKey = key ? 'tx_filter_noti_' + key : 'tx_filter_status_all';
+    const out = key ? t(locale, msgKey) : t(locale, 'tx_filter_status_all');
+    if (out && out !== msgKey) return out;
+    const fallback = { '': '전체', fail: '실패', paid: '결제', cancel: '취소', void_all: '총무효', void_auto: '무효자동', void_manual: '무효수동', force_void: '강제무효', refund_all: '총환불', refund_auto: '환불자동', refund_manual: '환불수동', force_refund: '강제환불', exclude_paid: '결제제외' };
+    return fallback[key] != null ? fallback[key] : (key || '전체');
+  };
   const statusFilterOptions = [
-    { key: '', label: t(locale, 'tx_filter_status_all') },
-    { key: 'success', label: t(locale, 'tx_filter_status_success') },
-    { key: 'fail', label: t(locale, 'tx_filter_status_fail') },
-    { key: 'void', label: t(locale, 'tx_filter_status_void') },
-    { key: 'other', label: t(locale, 'tx_filter_status_other') },
+    { key: '', label: notiFilterLabel('') },
+    { key: 'fail', label: notiFilterLabel('fail') },
+    { key: 'paid', label: notiFilterLabel('paid') },
+    { key: 'cancel', label: notiFilterLabel('cancel') },
+    { key: 'void_all', label: notiFilterLabel('void_all') },
+    { key: 'void_auto', label: notiFilterLabel('void_auto') },
+    { key: 'void_manual', label: notiFilterLabel('void_manual') },
+    { key: 'force_void', label: notiFilterLabel('force_void') },
+    { key: 'refund_all', label: notiFilterLabel('refund_all') },
+    { key: 'refund_auto', label: notiFilterLabel('refund_auto') },
+    { key: 'refund_manual', label: notiFilterLabel('refund_manual') },
+    { key: 'force_refund', label: notiFilterLabel('force_refund') },
+    { key: 'exclude_paid', label: notiFilterLabel('exclude_paid') },
   ].map((o) => '<option value="' + esc(o.key) + '"' + (statusFilter === o.key ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('');
   const searchForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:8px;"><input type="hidden" name="sort" value="' + esc(sortBy) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="dateFrom" value="' + esc(dateFrom) + '" /><input type="hidden" name="dateTo" value="' + esc(dateTo) + '" /><input type="hidden" name="perPage" value="' + esc(perPage) + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="period" value="' + esc(period) + '" /><select name="searchField" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;">' + searchFieldOptions + '</select><input type="text" name="search" value="' + esc(searchKw) + '" placeholder="' + esc(t(locale, 'common_search')) + '" style="padding:4px 8px;font-size:12px;width:140px;border:1px solid #d1d5db;border-radius:4px;margin-left:4px;" /><select name="statusFilter" style="margin-left:6px;padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;">' + statusFilterOptions + '</select><button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:4px;">' + esc(t(locale, 'common_search')) + '</button></form>';
 
   const dateForm = '<form method="get" action="' + baseUrl + '" class="tx-date-form"><input type="hidden" name="sort" value="' + esc(sortBy) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="search" value="' + esc(searchKw) + '" /><input type="hidden" name="searchField" value="' + esc(searchField) + '" /><input type="hidden" name="perPage" value="' + esc(perPage) + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="period" value="' + esc(period) + '" /><input type="hidden" name="statusFilter" value="' + esc(statusFilter) + '" /><input type="date" name="dateFrom" value="' + esc(dateFrom) + '" class="tx-date-input" /><span class="tx-date-sep">~</span><input type="date" name="dateTo" value="' + esc(dateTo) + '" class="tx-date-input" /><button type="submit" class="tx-date-btn">' + esc(t(locale, 'tx_apply')) + '</button></form>';
   const exportUrl = baseUrl + '/export' + qs({ page: 1 });
   const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:6px 12px;font-size:12px;background:#0d9488;color:#fff;border-radius:4px;text-decoration:none;">' + esc(t(locale, 'tx_export_excel')) + '</a>';
-  const toolbarHtml = '<div style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:nowrap;align-items:center;gap:6px;overflow-x:auto;white-space:nowrap;">' + sortLinks + sortDirLinks + '<span style="margin:0 6px;color:#9ca3af;">|</span>' + periodLinks + dateForm + '<span style="margin:0 6px;color:#9ca3af;">|</span>' + searchForm + excelBtn + '</div>';
+  const toolbarHtml = '<div style="margin-bottom:20px;font-size:12px;display:flex;flex-wrap:nowrap;align-items:center;gap:6px;overflow-x:auto;white-space:nowrap;">' + sortLinks + sortDirLinks + '<span style="margin:0 6px;color:#9ca3af;">|</span>' + periodLinks + dateForm + '<span style="margin:0 6px;color:#9ca3af;">|</span>' + searchForm + excelBtn + '</div>';
   const LEGEND_MAX_DESC = 80;
   const truncDesc = (s) => { const t = String(s || '').trim(); return t.length <= LEGEND_MAX_DESC ? t : t.slice(0, LEGEND_MAX_DESC - 1) + '…'; };
   const legendItems = [
@@ -5904,6 +6089,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
     return parts.join('');
   })();
   const legendHtml = '<div class="card tx-legend" style="margin-bottom:16px;"><div class="tx-legend-grid">' + legendCells + '</div></div>';
+  const notiRowStatusStyles = { success: { rowBg: '#f0fdf4', cellBg: '#dcfce7', color: '#166534' }, fail: { rowBg: '#fef2f2', cellBg: '#fecaca', color: '#991b1b' }, void: { rowBg: '#fff7ed', cellBg: '#fed7aa', color: '#9a3412' }, refund: { rowBg: '#eff6ff', cellBg: '#bfdbfe', color: '#1e40af' }, other: { rowBg: '#f9fafb', cellBg: '#e5e7eb', color: '#4b5563' } };
   const txColDefaults = [40, 72, 95, 52, 95, 100, 120, 80, 78, 58, 88, 42, 98, 68, 52, 200];
   const colgroupHtml = '<colgroup>' + thLabels.map((_, i) => '<col id="tx-col-' + i + '" style="width:' + (txColDefaults[i] || 80) + 'px;min-width:40px;">').join('') + '</colgroup>';
   const thead = '<thead><tr>' + thLabels.map((l, i) => '<th class="col-body-key">' + esc(l) + '<div class="tx-col-resizer" data-col="' + i + '" title="' + esc(t(locale, 'tx_col_resize_title')) + '"></div></th>').join('') + '</tr></thead>';
@@ -5913,9 +6099,18 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
     const isCancel = isDefinitelyCancelPaymentStatus(ps);
     const isSuccess = isSuccessPaymentBody(body);
     const isError = isErrorPaymentStatus(ps);
+    const rowStatusKind = getNotiStatusKind(log);
+    const rowSt = notiRowStatusStyles[rowStatusKind] || notiRowStatusStyles.other;
+    const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : '');
     let statusKey = 'tx_status_fail';
     let statusClass = 'tx-status-fail';
-    if (isCancel) {
+    if (rowStatusKind === 'void') {
+      statusKey = 'cr_type_void';
+      statusClass = 'tx-status-void';
+    } else if (rowStatusKind === 'refund') {
+      statusKey = 'cr_type_refund';
+      statusClass = 'tx-status-refund';
+    } else if (isCancel) {
       statusKey = 'tx_status_cancel';
       statusClass = 'tx-status-cancel';
     } else if (isSuccess) {
@@ -5924,14 +6119,18 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
     } else if (isError) {
       statusKey = 'tx_status_error';
       statusClass = 'tx-status-fail';
+    } else {
+      statusKey = 'tx_status_fail';
+      statusClass = 'tx-status-fail';
     }
-    const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : '');
     let notiLabel = '-';
-    if (txId) {
-      if (hasVoidNotiSent(txId)) notiLabel = t(locale, 'cr_type_void');      // 무효(자동/수동/강제 구분 없이)
-      else if (hasRefundNotiSent(txId)) notiLabel = t(locale, 'cr_type_refund');  // 환불
-    }
-    const isVoidedOrRefunded = isSuccess && txId && (hasVoidNotiSent(txId) || hasRefundNotiSent(txId));
+    const orderNo = body.OrderNo ?? body.orderNo ?? '';
+    const vrEntry = (txId && voidRefundByTxId[txId]) || (orderNo && voidRefundByOrderNoForFilter[String(orderNo).trim()]) || null;
+    const hasVoidLike = !!((txId && hasVoidNotiSent(txId)) || (vrEntry && (vrEntry.type === 'void' || vrEntry.type === 'void_manual_email')));
+    const hasRefundLike = !!((txId && hasRefundNotiSent(txId)) || (vrEntry && vrEntry.type === 'refund'));
+    if (hasVoidLike) notiLabel = t(locale, 'cr_type_void');
+    else if (hasRefundLike) notiLabel = t(locale, 'cr_type_refund');
+    const isVoidedOrRefunded = isSuccess && (hasVoidLike || hasRefundLike);
     const rowClass = isVoidedOrRefunded ? ' tx-row-voided-refunded' : '';
     const badgeClass = statusClass.replace('tx-status-', 'tx-badge-');
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
@@ -5949,13 +6148,13 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
           const amt = getBodyVal(body, ['Amount', 'amount']);
           const internalAmt = (amt != null && amt !== '' && !isVoidedOrRefunded) ? (Number(amt) / 100) : null;
           cells.push('<td class="col-internal-amount">' + esc(formatAmountWithSeparator(internalAmt)) + '</td>');
-        } else if (col.id === 'status') cells.push('<td class="col-narrow"><span class="tx-badge ' + esc(badgeClass) + '">' + esc(t(locale, statusKey)) + '</span></td>');
+        } else if (col.id === 'status') cells.push('<td class="col-narrow" style="background:' + rowSt.cellBg + ';color:' + rowSt.color + ';font-weight:600;"><span class="tx-badge ' + esc(badgeClass) + '">' + esc(t(locale, statusKey)) + '</span></td>');
         else if (col.id === 'noti') cells.push('<td class="col-narrow"><span class="tx-badge tx-badge-noti">' + esc(notiLabel) + '</span></td>');
         else if (col.id === 'void_refund_detail') {
           let detailHtml = '-';
-          if (isVoidedOrRefunded && txId) {
-            const entry = voidRefundByTxId[txId];
-            const isVoid = hasVoidNotiSent(txId);
+          if (isVoidedOrRefunded) {
+            const entry = vrEntry || (txId ? voidRefundByTxId[txId] : null) || (orderNo ? voidRefundByOrderNo[String(orderNo).trim()] : null);
+            const isVoid = !!(hasVoidLike || (entry && (entry.type === 'void' || entry.type === 'void_manual_email')));
             const kindLabel = isVoid ? t(locale, 'cr_type_void') : t(locale, 'cr_type_refund');
             const defaultReason = isVoid ? t(locale, 'tx_detail_void_reason') : t(locale, 'tx_detail_refund_reason');
             const reason = (entry && entry.reason) ? entry.reason : defaultReason;
@@ -5981,7 +6180,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
         cells.push('<td class="' + cellClass + '" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + formatVal(v) + '</td>');
       }
     }
-    return '<tr' + (rowClass ? ' class="' + rowClass.trim() + '"' : '') + '>' + cells.join('') + '</tr>';
+    return '<tr style="background:' + rowSt.rowBg + ';"' + (rowClass ? ' class="' + rowClass.trim() + '"' : '') + '>' + cells.join('') + '</tr>';
   }).join('');
   const pageLinks = [];
   for (let i = 1; i <= totalPages; i++) {
@@ -5996,7 +6195,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cancel_refund'), (req, 
   const emptyStateHtml = totalCount === 0
     ? '<div class="alert" style="margin-bottom:14px;padding:12px 16px;background:#eff6ff;border:1px solid #93c5fd;border-radius:8px;color:#1e40af;font-size:13px;"><strong>표시할 노티 거래가 없습니다.</strong> 최근 7일 이내에 PG에서 수신한 노티만 표시됩니다. <a href="/admin/logs">로그분석(피지 노티)</a>에서 수신 건이 있는지 확인하고, 위에서 env(PRODUCTION/SANDBOX)를 선택해 보세요.</div>'
     : '';
-  const tableContent = emptyStateHtml + txHint + legendHtml + toolbarHtml + '<table class="tx-list-table">' + colgroupHtml + thead + '<tbody>' + rows + '</tbody></table>' + txResizeScript + paginationCenter + perPageBar;
+  const tableContent = emptyStateHtml + txHint + legendHtml + toolbarHtml + '<div style="margin-bottom:8px;font-size:12px;"><div style="margin:0 0 20px 0;">' + notiSummaryLine1 + '</div><div style="margin:0 0 20px 0;">' + notiSummaryLine2 + '</div></div><table class="tx-list-table">' + colgroupHtml + thead + '<tbody>' + rows + '</tbody></table>' + txResizeScript + paginationCenter + perPageBar;
   res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_transaction_list') + ' (' + totalCount + ')', tableContent, '', req.originalUrl, req.session.member, req, undefined, getEnvFromReq(req)));
 });
 
@@ -6225,11 +6424,13 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
   const statusFilter = (q.statusFilter || '').toString();
   const periodSort = (q.sort || 'today').toString();
   const sortDir = (q.sortDir || 'desc').toString().toLowerCase() === 'asc' ? 'asc' : 'desc';
-  const orderBy = (q.orderBy || 'date').toString();
+  const orderBy = (q.orderBy || 'time').toString();
   const searchKw = (q.search || '').toString().trim();
   const searchField = (q.searchField || 'all').toString();
   let dateFrom = (q.dateFrom || '').toString().trim();
   let dateTo = (q.dateTo || '').toString().trim();
+  const perPage = Math.max(10, Math.min(200, parseInt(q.perPage, 10) || 25));
+  const page = Math.max(1, parseInt(q.page, 10) || 1);
   let store = loadPgTransactionStore();
   let block = env === 'sandbox' ? store.sandbox : store.production;
   let byDate = block.byDate || {};
@@ -6308,17 +6509,19 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const baseUrl = '/admin/pg-transactions';
   const qs = (overrides) => {
-    const o = { env, sort: periodSort, sortDir, orderBy, search: searchKw, searchField, dateFrom, dateTo, statusFilter: (q.statusFilter || '').toString(), ...overrides };
+    const o = { env, sort: periodSort, sortDir, orderBy, search: searchKw, searchField, dateFrom, dateTo, statusFilter: (q.statusFilter || '').toString(), perPage, page: 1, ...overrides };
     const parts = [];
     if (o.env) parts.push('env=' + encodeURIComponent(o.env));
     if (o.sort && o.sort !== 'today') parts.push('sort=' + encodeURIComponent(o.sort));
     if (o.sortDir && o.sortDir !== 'desc') parts.push('sortDir=' + encodeURIComponent(o.sortDir));
-    if (o.orderBy && o.orderBy !== 'date') parts.push('orderBy=' + encodeURIComponent(o.orderBy));
+    if (o.orderBy && o.orderBy !== 'time') parts.push('orderBy=' + encodeURIComponent(o.orderBy));
     if (o.search) parts.push('search=' + encodeURIComponent(o.search));
     if (o.searchField && o.searchField !== 'all') parts.push('searchField=' + encodeURIComponent(o.searchField));
     if (o.dateFrom) parts.push('dateFrom=' + encodeURIComponent(o.dateFrom));
     if (o.dateTo) parts.push('dateTo=' + encodeURIComponent(o.dateTo));
     if (o.statusFilter) parts.push('statusFilter=' + encodeURIComponent(o.statusFilter));
+    if (o.perPage != null && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.page != null && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     return parts.length ? '?' + parts.join('&') : '';
   };
   const syncBtnHtml = '<form method="post" action="' + baseUrl + '/sync" style="display:inline;"><input type="hidden" name="env" value="' + esc(env) + '" /><button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;">동기화</button></form>'
@@ -6337,8 +6540,8 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
     }
   }
   const lastFetchedHtml = lastFetchedAt
-    ? '<p style="font-size:10px;color:#6b7280;margin-bottom:8px;">마지막 조회: ' + esc(new Date(lastFetchedAt).toLocaleString('ko-KR', { hour12: false })) + ' (' + syncIntervalMin + '분마다 자동 조회)</p>'
-    : '<p style="font-size:10px;color:#6b7280;margin-bottom:8px;">아직 조회된 내역이 없습니다. ' + syncIntervalMin + '분마다 자동 조회됩니다.</p>';
+    ? '<p style="font-size:12px;color:#6b7280;margin-bottom:8px;">마지막 조회: ' + esc(new Date(lastFetchedAt).toLocaleString('ko-KR', { hour12: false })) + ' (' + syncIntervalMin + '분마다 자동 조회)</p>'
+    : '<p style="font-size:12px;color:#6b7280;margin-bottom:8px;">아직 조회된 내역이 없습니다. ' + syncIntervalMin + '분마다 자동 조회됩니다.</p>';
   const orderByOptions = [
     { key: 'time', label: t(locale, 'tx_filter_time') },
     { key: 'date', label: t(locale, 'tx_filter_date') },
@@ -6349,9 +6552,9 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
   const orderByLinks = orderByOptions.map((o) => {
     const url = baseUrl + qs({ orderBy: o.key });
     const active = orderBy === o.key;
-    return '<a href="' + url + '" style="padding:2px 8px;font-size:10px;border-radius:4px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-right:2px;">' + esc(o.label) + '</a>';
+    return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-right:2px;">' + esc(o.label) + '</a>';
   }).join('');
-  const sortDirLinks = '<a href="' + baseUrl + qs({ sortDir: 'asc' }) + '" style="padding:2px 6px;font-size:10px;border-radius:4px;text-decoration:none;background:' + (sortDir === 'asc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'asc' ? '#fff' : '#374151') + ';">오름차순</a><a href="' + baseUrl + qs({ sortDir: 'desc' }) + '" style="padding:2px 6px;font-size:10px;border-radius:4px;text-decoration:none;margin-left:2px;background:' + (sortDir === 'desc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'desc' ? '#fff' : '#374151') + ';">내림차순</a>';
+  const sortDirLinks = '<a href="' + baseUrl + qs({ sortDir: 'asc' }) + '" style="padding:4px 6px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (sortDir === 'asc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'asc' ? '#fff' : '#374151') + ';">오름차순</a><a href="' + baseUrl + qs({ sortDir: 'desc' }) + '" style="padding:4px 6px;font-size:12px;border-radius:4px;text-decoration:none;margin-left:2px;background:' + (sortDir === 'desc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'desc' ? '#fff' : '#374151') + ';">내림차순</a>';
   const periodOptions = [
     { key: 'today', label: '당일' },
     { key: 'yesterday', label: '전일' },
@@ -6364,46 +6567,218 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
   const periodLinks = periodOptions.map((o) => {
     const url = baseUrl + qs({ sort: o.key, dateFrom: '', dateTo: '' });
     const active = periodSort === o.key;
-    return '<a class="pg-period-link" data-period="' + esc(o.key) + '" href="' + url + '" style="padding:2px 8px;font-size:10px;border-radius:4px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-right:2px;">' + esc(o.label) + '</a>';
+    return '<a class="pg-period-link" data-period="' + esc(o.key) + '" href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-right:2px;">' + esc(o.label) + '</a>';
   }).join('');
   const pgSearchFields = [
-    { key: 'all', label: '전체' },
-    { key: 'TransactionId', label: 'TransactionId' },
-    { key: 'OrderNo', label: 'OrderNo' },
-    { key: 'Customer', label: 'Customer' },
-    { key: 'Merchant', label: 'Merchant' },
-    { key: 'RouteNo', label: 'RouteNo' },
-    { key: 'Currency', label: 'Currency' },
-    { key: 'Status', label: 'Status' },
-    { key: 'Amount', label: 'Amount' },
+    { key: 'all', label: t(locale, 'pg_tx_search_all') },
+    { key: 'TransactionId', label: t(locale, 'pg_tx_search_txid') },
+    { key: 'OrderNo', label: t(locale, 'pg_tx_search_orderno') },
+    { key: 'Customer', label: t(locale, 'pg_tx_search_customer') },
+    { key: 'Merchant', label: t(locale, 'pg_tx_search_merchant') },
+    { key: 'RouteNo', label: t(locale, 'pg_tx_search_routeno') },
+    { key: 'Currency', label: t(locale, 'pg_tx_search_currency') },
+    { key: 'Status', label: t(locale, 'pg_tx_search_status') },
+    { key: 'Amount', label: t(locale, 'pg_tx_search_amount') },
   ];
   const searchFieldOptions = pgSearchFields.map((f) => '<option value="' + esc(f.key) + '"' + (searchField === f.key ? ' selected' : '') + '>' + esc(f.label) + '</option>').join('');
+  // ChillPay 원본 Status 목록과 동일한 "종류" + 추가 필터(성공제외/정산필요)
+  const pgFilterLabel = (key) => {
+    const msgKey = key ? ('pg_tx_filter_status_' + key) : 'pg_tx_filter_status_all';
+    const out = key ? t(locale, msgKey) : t(locale, 'pg_tx_filter_status_all');
+    return out && out !== msgKey ? out : (key || 'All Status');
+  };
   const statusFilterOptions = [
-    { key: '', label: t(locale, 'tx_filter_status_all') },
-    { key: 'success', label: t(locale, 'tx_filter_status_success') },
-    { key: 'fail', label: t(locale, 'tx_filter_status_fail') },
-    { key: 'void', label: t(locale, 'tx_filter_status_void') },
-    { key: 'other', label: t(locale, 'tx_filter_status_other') },
-  ].map((o) => '<option value="' + esc(o.key) + '"' + (statusFilter === o.key ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('');
-  const dateForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:4px;"><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="sort" value="' + esc(periodSort) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="orderBy" value="' + esc(orderBy) + '" /><input type="hidden" name="search" value="' + esc(searchKw) + '" /><input type="hidden" name="searchField" value="' + esc(searchField) + '" /><input type="hidden" name="statusFilter" value="' + esc(statusFilter) + '" /><input type="date" name="dateFrom" value="' + esc(dateFrom) + '" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;" /><span style="margin:0 2px;">~</span><input type="date" name="dateTo" value="' + esc(dateTo) + '" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;" /><button type="submit" style="padding:2px 8px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:2px;">적용</button></form>';
-  const searchForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:4px;"><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="sort" value="' + esc(periodSort) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="orderBy" value="' + esc(orderBy) + '" /><input type="hidden" name="dateFrom" value="' + esc(dateFrom) + '" /><input type="hidden" name="dateTo" value="' + esc(dateTo) + '" /><select name="searchField" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;">' + searchFieldOptions + '</select><input type="text" name="search" value="' + esc(searchKw) + '" placeholder="검색" style="padding:2px 6px;font-size:10px;width:100px;border:1px solid #d1d5db;border-radius:4px;margin-left:2px;" /><select name="statusFilter" style="margin-left:2px;padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:4px;">' + statusFilterOptions + '</select><button type="submit" style="padding:2px 8px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:2px;">검색</button></form>';
+    { key: '', label: pgFilterLabel('all') },
+    { key: 'success', label: pgFilterLabel('success') },
+    { key: 'fail', label: pgFilterLabel('fail') },
+    { key: 'cancel', label: pgFilterLabel('cancel') },
+    { key: 'error', label: pgFilterLabel('error') },
+    { key: 'timeout', label: pgFilterLabel('timeout') },
+    { key: 'request', label: pgFilterLabel('request') },
+    { key: 'voided', label: pgFilterLabel('voided') },
+    { key: 'refunded', label: pgFilterLabel('refunded') },
+    { key: 'refundrequested', label: pgFilterLabel('refundrequested') },
+    { key: 'settlemented', label: pgFilterLabel('settlemented') },
+    { key: 'partialrefunded', label: pgFilterLabel('partialrefunded') },
+    { key: 'voidrequested', label: pgFilterLabel('voidrequested') },
+    { key: 'exclude_success', label: pgFilterLabel('exclude_success') },
+    { key: 'settlement_needed', label: pgFilterLabel('settlement_needed') },
+  ].map((o) => '<option value="' + esc(o.key) + '"' + (String(statusFilter || '').toLowerCase() === o.key ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('');
+  const dateForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:4px;"><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="sort" value="' + esc(periodSort) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="orderBy" value="' + esc(orderBy) + '" /><input type="hidden" name="search" value="' + esc(searchKw) + '" /><input type="hidden" name="searchField" value="' + esc(searchField) + '" /><input type="hidden" name="statusFilter" value="' + esc(statusFilter) + '" /><input type="hidden" name="perPage" value="' + esc(String(perPage)) + '" /><input type="date" name="dateFrom" value="' + esc(dateFrom) + '" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;" /><span style="margin:0 2px;">~</span><input type="date" name="dateTo" value="' + esc(dateTo) + '" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;" /><button type="submit" style="padding:4px 8px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:2px;">적용</button></form>';
+  const searchForm = '<form method="get" action="' + baseUrl + '" style="display:inline;margin-left:4px;"><input type="hidden" name="env" value="' + esc(env) + '" /><input type="hidden" name="sort" value="' + esc(periodSort) + '" /><input type="hidden" name="sortDir" value="' + esc(sortDir) + '" /><input type="hidden" name="orderBy" value="' + esc(orderBy) + '" /><input type="hidden" name="dateFrom" value="' + esc(dateFrom) + '" /><input type="hidden" name="dateTo" value="' + esc(dateTo) + '" /><input type="hidden" name="perPage" value="' + esc(String(perPage)) + '" /><select name="searchField" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;">' + searchFieldOptions + '</select><input type="text" name="search" value="' + esc(searchKw) + '" placeholder="검색" style="padding:4px 6px;font-size:12px;width:100px;border:1px solid #d1d5db;border-radius:4px;margin-left:2px;" /><select name="statusFilter" style="margin-left:2px;padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;">' + statusFilterOptions + '</select><button type="submit" style="padding:4px 8px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:2px;">검색</button></form>';
   const exportUrl = baseUrl + '/export' + qs();
   const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:4px 8px;font-size:12px;background:#0d9488;color:#fff;border-radius:4px;text-decoration:none;">Excel</a>';
-  const toolbarHtml = '<div style="margin-bottom:8px;font-size:10px;display:flex;flex-wrap:wrap;align-items:center;gap:4px;max-width:100%;">' + orderByLinks + sortDirLinks + '<span style="margin:0 4px;color:#9ca3af;">|</span>' + periodLinks + dateForm + '<span style="margin:0 4px;color:#9ca3af;">|</span>' + searchForm + excelBtn + '</div>';
-  const thLabels = ['TransactionId', '거래일시', 'Merchant', 'Customer', 'OrderNo', 'PaymentChannel', '결제일시', 'Amount', 'Fee', 'TotalAmount', 'Currency', 'RouteNo', 'Status', 'Settled'];
-  const colWidths = ['7%', '7%', '6%', '6%', '18%', '6%', '7%', '5%', '4%', '6%', '4%', '4%', '5%', '3%'];
-  const colgroup = '<colgroup>' + colWidths.map((w) => '<col style="width:' + w + ';">').join('') + '</colgroup>';
-  const thead = '<thead><tr>' + thLabels.map((l) => '<th style="text-align:center;padding:4px 6px;border:1px solid #e5e7eb;background:#f3f4f6;position:relative;font-size:10px;white-space:nowrap;">' + esc(l) + '</th>').join('') + '</tr></thead>';
-  const rowToCells = (row) => {
+  const toolbarHtml = '<div style="margin-bottom:20px;font-size:12px;display:flex;flex-wrap:wrap;align-items:center;gap:4px;max-width:100%;">' + orderByLinks + sortDirLinks + '<span style="margin:0 4px;color:#9ca3af;">|</span>' + periodLinks + dateForm + '<span style="margin:0 4px;color:#9ca3af;">|</span>' + searchForm + excelBtn + '</div>';
+  const normalizeCurrencyForIcopay = (c) => {
+    const s = String(c ?? '').trim().toUpperCase();
+    if (s === '392' || s === 'JPY') return 'JPY';
+    if (s === '410' || s === 'KRW' || s === 'KOR') return 'KRW';
+    if (s === '840' || s === 'USD') return 'USD';
+    if (s === '764' || s === 'THB') return 'THB';
+    return s;
+  };
+  const parseLooseNumber = (raw) => {
+      if (raw == null || raw === '') return 0;
+      if (typeof raw === 'number') return Number.isFinite(raw) ? raw : 0;
+      let s = String(raw).trim();
+      if (!s) return 0;
+      // tolerate both "198,000.00" and "198.000,00"
+      const hasComma = s.includes(',');
+      const hasDot = s.includes('.');
+      if (hasComma && hasDot) {
+        const lastComma = s.lastIndexOf(',');
+        const lastDot = s.lastIndexOf('.');
+        if (lastComma > lastDot) {
+          // comma decimal, dot thousand
+          s = s.replace(/\./g, '').replace(/,/g, '.');
+        } else {
+          // dot decimal, comma thousand
+          s = s.replace(/,/g, '');
+        }
+      } else if (hasComma && !hasDot) {
+        // if comma looks like decimal separator (two digits), convert to dot
+        if (/,\d{1,2}$/.test(s)) s = s.replace(/,/g, '.');
+        else s = s.replace(/,/g, '');
+      } else if (hasDot && !hasComma) {
+        // if dot looks like thousand separator (groups of 3), remove them
+        if (/\.\d{3}(\.|$)/.test(s) && !/\.\d{1,2}$/.test(s)) s = s.replace(/\./g, '');
+      }
+      const n = Number(s);
+      return Number.isFinite(n) ? n : 0;
+  };
+  const toIcopay = (amountRaw, currencyRaw) => {
+    if (amountRaw == null || amountRaw === '') return 0;
+    const cur = normalizeCurrencyForIcopay(currencyRaw);
+    // JPY/KRW는 소수점 이하가 의미 없어서, "198,000.00" → "19800000"으로 보고 /100 처리
+    if (cur === 'JPY' || cur === 'KRW') {
+      const digits = String(amountRaw).replace(/[^\d]/g, '');
+      const n = digits ? Number(digits) : 0;
+      return (Number.isFinite(n) ? n : 0) / 100;
+    }
+    // USD/THB 등은 가공하지 않고 Amount 그대로 사용
+    return parseLooseNumber(amountRaw);
+  };
+  // 노티거래내역과 동일하게 날짜/시각 분리 + TH/JP 표기
+  const thLabels = [
+    t(locale, 'pg_tx_header_no'),
+    '거래일',
+    '거래시각',
+    'TransactionId',
+    'Merchant',
+    'Customer',
+    'OrderNo',
+    'PaymentChannel',
+    '결제시각',
+    'Amount',
+    'ICOPAY',
+    'Fee',
+    'TotalAmount',
+    'Currency',
+    'RouteNo',
+    'Status',
+    'Settled',
+  ];
+  // colgroup를 px로 두고 col 요소 폭을 조정해야 리사이즈가 실제로 먹힘
+  // 가로 스크롤이 생기지 않도록 기본 폭을 최대한 압축
+  const pgColDefaults = [40, 80, 120, 90, 80, 140, 90, 110, 80, 80, 70, 90, 80, 60, 80, 60, 50];
+  const colgroup = '<colgroup>' + thLabels.map((_, i) => '<col id="pg-col-' + i + '" style="width:' + (pgColDefaults[i] || 90) + 'px;min-width:40px;">').join('') + '</colgroup>';
+  const thead = '<thead><tr>' + thLabels.map((l, i) => '<th style="text-align:center;padding:8px 6px;border:1px solid #e5e7eb;background:#f3f4f6;position:relative;font-size:12px;white-space:nowrap;">' + esc(l) + '<div class="pg-col-resizer" data-col="' + i + '" style="position:absolute;top:0;right:0;width:8px;height:100%;cursor:col-resize;user-select:none;"></div></th>').join('') + '</tr></thead>';
+  // PG 거래내역은 ChillPay 원본 status 기준으로 표시 (노티 이력으로 덮어쓰기 금지)
+  const normalizePgStatus = (s) => String(s ?? '').trim().toLowerCase();
+  const getPgRowStatusKind = (row) => {
+    const s = normalizePgStatus(row && row.status);
+    if (!s) return 'other';
+    // ChillPay UI/응답에서 내려올 수 있는 케이스들을 그대로 유지
+    if (s === 'success') return 'success';
+    if (s === 'fail') return 'fail';
+    if (s === 'cancel') return 'cancel';
+    if (s === 'error') return 'error';
+    if (s === 'timeout') return 'timeout';
+    if (s === 'request') return 'request';
+    if (s === 'voided') return 'voided';
+    if (s === 'refunded') return 'refunded';
+    if (s === 'refundrequested') return 'refundrequested';
+    if (s === 'settlemented') return 'settlemented';
+    if (s === 'partialrefunded') return 'partialrefunded';
+    if (s === 'voidrequested') return 'voidrequested';
+    return 'other';
+  };
+  const pgRowStatusStyles = {
+    success: { rowBg: '#f0fdf4', cellBg: '#dcfce7', color: '#166534' },
+    fail: { rowBg: '#fef2f2', cellBg: '#fecaca', color: '#991b1b' },
+    cancel: { rowBg: '#f9fafb', cellBg: '#e5e7eb', color: '#4b5563' },
+    error: { rowBg: '#fef2f2', cellBg: '#fecaca', color: '#991b1b' },
+    timeout: { rowBg: '#fff7ed', cellBg: '#fed7aa', color: '#9a3412' },
+    request: { rowBg: '#f8fafc', cellBg: '#e2e8f0', color: '#334155' },
+    voided: { rowBg: '#fff7ed', cellBg: '#fed7aa', color: '#9a3412' },
+    voidrequested: { rowBg: '#fffbeb', cellBg: '#fde68a', color: '#92400e' },
+    refunded: { rowBg: '#eff6ff', cellBg: '#bfdbfe', color: '#1e40af' },
+    refundrequested: { rowBg: '#eef2ff', cellBg: '#c7d2fe', color: '#3730a3' },
+    partialrefunded: { rowBg: '#eff6ff', cellBg: '#bfdbfe', color: '#1e40af' },
+    settlemented: { rowBg: '#f0f9ff', cellBg: '#bae6fd', color: '#075985' },
+    other: { rowBg: '#f9fafb', cellBg: '#e5e7eb', color: '#4b5563' },
+  };
+  const pgDateTimeToIsoTh = (str) => {
+    if (!str) return '';
+    const m = String(str).trim().match(/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}):(\d{2}))?/);
+    if (!m) return '';
+    const d = parseInt(m[1], 10);
+    const mo = parseInt(m[2], 10);
+    const y = parseInt(m[3], 10);
+    const hh = parseInt(m[4] || '0', 10);
+    const mm = parseInt(m[5] || '0', 10);
+    const ss = parseInt(m[6] || '0', 10);
+    // ChillPay Payment Search 날짜는 TH 시간(UTC+7)로 내려온다고 가정하고 UTC로 변환
+    const utcMs = Date.UTC(y, mo - 1, d, hh - 7, mm, ss, 0);
+    const dt = new Date(utcMs);
+    return Number.isNaN(dt.getTime()) ? '' : dt.toISOString();
+  };
+  const getPgMerchantDisplay = (row) => {
+    // 1) RouteNo 기준
+    const rn = row && row.routeNo != null ? String(row.routeNo).trim() : '';
+    if (rn) {
+      for (const m of MERCHANTS.values()) {
+        if (m && String(m.routeNo || '').trim() === rn) return m.name || m.label || m.merchantId || rn;
+      }
+    }
+    // 2) TransactionId 기준 (노티 로그에서 merchantId 역추적)
+    const txId = row && row.transactionId != null ? String(row.transactionId).trim() : '';
+    if (txId) {
+      const logs = loadPgNotiLogsSafe ? loadPgNotiLogsSafe() : [];
+      const found = logs.find((lg) => {
+        const body = parseNotiBody(lg);
+        const bid = body.TransactionId ?? body.transactionId ?? '';
+        return bid && String(bid).trim() === txId && lg.merchantId && MERCHANTS.get(lg.merchantId);
+      });
+      if (found && found.merchantId && MERCHANTS.get(found.merchantId)) {
+        const m = MERCHANTS.get(found.merchantId);
+        return m.name || m.label || m.merchantId || rn || txId;
+      }
+    }
+    // 3) 없으면 원본 Merchant
+    return (row && row.merchant) || '-';
+  };
+  const rowToCells = (row, rowNo) => {
+    const kind = getPgRowStatusKind(row);
+    const st = pgRowStatusStyles[kind];
+    // ICOPAY = Amount / 100 (노티거래내역 ICOPAY와 동일 개념)
+    const icopayVal = row.amount != null ? formatAmountWithSeparator(toIcopay(row.amount, row.currency)) : '-';
+    const txIso = pgDateTimeToIsoTh(row.transactionDate);
+    const payIso = pgDateTimeToIsoTh(row.paymentDate);
+    const txDt = formatDateAndTimeTHJP(txIso);
+    const payDt = formatDateAndTimeTHJP(payIso);
     const cells = [
+      rowNo,
+      txDt.date || '-',
+      'TH:' + (txDt.timeTh || '-') + ' JP:' + (txDt.timeJp || '-'),
       row.transactionId,
-      row.transactionDate || '-',
-      row.merchant || '-',
+      getPgMerchantDisplay(row),
       row.customer || '-',
       row.orderNo || '-',
       row.paymentChannel || '-',
-      row.paymentDate || '-',
+      'TH:' + (payDt.timeTh || '-') + ' JP:' + (payDt.timeJp || '-'),
       row.amount != null ? row.amount : '-',
+      icopayVal,
       row.fee != null ? row.fee : '-',
       row.totalAmount != null ? row.totalAmount : '-',
       row.currency || '-',
@@ -6411,29 +6786,57 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
       row.status || '-',
       row.settled === true ? 'Y' : (row.settled === false ? 'N' : '-'),
     ];
-    return '<tr>' + cells.map((c, idx) => {
-      var extra = 'font-size:10px;';
-      if (idx === 4) extra += 'min-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-      if (idx === 10 || idx === 11 || idx === 12 || idx === 13) extra += 'overflow:hidden;text-overflow:ellipsis;';
-      return '<td style="text-align:center;padding:4px 6px;border:1px solid #e5e7eb;' + extra + '">' + esc(String(c)) + '</td>';
+    const statusCellIdx = 15;
+    return '<tr style="background:' + st.rowBg + ';">' + cells.map((c, idx) => {
+      var extra = 'font-size:12px;';
+      if (idx === 6) extra += 'min-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+      if (idx === 13 || idx === 14 || idx === 15 || idx === 16) extra += 'overflow:hidden;text-overflow:ellipsis;';
+      var cellStyle = 'text-align:center;padding:8px 6px;border:1px solid #e5e7eb;' + extra;
+      if (idx === statusCellIdx) cellStyle += 'background:' + st.cellBg + ';color:' + st.color + ';font-weight:600;';
+      return '<td style="' + cellStyle + '">' + esc(String(c)) + '</td>';
     }).join('') + '</tr>';
+  };
+  const rowMatchesStatus = (row) => {
+    if (!statusFilter) return true;
+    const key = String(statusFilter || '').toLowerCase().trim();
+    const kind = getPgRowStatusKind(row);
+    if (!key) return true;
+    if (key === 'exclude_success') return kind !== 'success';
+    if (key === 'settlement_needed') return kind === 'cancel' || kind === 'error' || kind === 'timeout' || kind === 'request';
+    return kind === key;
   };
   const rowMatchesSearch = (row) => {
     if (!searchKw) return true;
     const kw = searchKw.toLowerCase();
     if (searchField === 'all') {
-      const str = [row.transactionId, row.orderNo, row.merchant, row.customer, row.amount, row.totalAmount, row.status, row.paymentChannel, row.currency, row.paymentDate, row.transactionDate, row.routeNo].filter(Boolean).join(' ').toLowerCase();
+      const str = [
+        row.transactionId,
+        row.orderNo,
+        getPgMerchantDisplay(row),
+        row.customer,
+        row.amount,
+        row.totalAmount,
+        row.status,
+        row.paymentChannel,
+        row.currency,
+        row.paymentDate,
+        row.transactionDate,
+        row.routeNo,
+      ].filter(Boolean).join(' ').toLowerCase();
       return str.indexOf(kw) !== -1;
     }
     let val = '';
     if (searchField === 'TransactionId') val = String(row.transactionId || '');
     else if (searchField === 'OrderNo') val = String(row.orderNo || '');
     else if (searchField === 'Customer') val = String(row.customer || '');
-    else if (searchField === 'Merchant') val = String(row.merchant || '');
+    else if (searchField === 'Merchant') val = String(getPgMerchantDisplay(row) || '');
     else if (searchField === 'RouteNo') val = String(row.routeNo != null ? row.routeNo : '');
     else if (searchField === 'Currency') val = String(row.currency || '');
     else if (searchField === 'Status') val = String(row.status || '');
     else if (searchField === 'Amount') val = String(row.amount != null ? row.amount : '') + String(row.totalAmount != null ? row.totalAmount : '');
+    if (searchField === 'RouteNo') {
+      return val.toLowerCase().trim() === kw.trim();
+    }
     return val.toLowerCase().indexOf(kw) !== -1;
   };
   const parseAmount = (v) => { const n = parseFloat(String(v || '0').replace(/,/g, '')); return Number.isFinite(n) ? n : 0; };
@@ -6458,21 +6861,94 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
       return c;
     });
   };
-  let sectionsHtml = '';
+  let flatList = [];
   for (const dateKey of periodDateKeys) {
-    let list = (byDate[dateKey] || []).filter(rowMatchesSearch);
-    list = sortRows(list);
-    if (list.length === 0 && searchKw) continue;
-    const title = dateKey === todayKey ? '오늘 (' + dateKey + ')' : dateKey;
-    const rows = list.map(rowToCells).join('');
-    sectionsHtml += '<div style="margin-bottom:16px;"><h2 style="font-size:10px;margin:0 0 6px 0;color:#1f2937;">' + esc(title) + ' (' + list.length + '건)</h2><table class="pg-tx-table" style="width:100%;border-collapse:collapse;font-size:10px;table-layout:fixed;">' + colgroup + thead + '<tbody>' + rows + '</tbody></table></div>';
+    flatList = flatList.concat(byDate[dateKey] || []);
+  }
+  const unfilteredCount = flatList.length;
+  flatList = flatList.filter((row) => rowMatchesSearch(row) && rowMatchesStatus(row));
+  flatList = sortRows(flatList);
+  const totalCount = flatList.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / perPage));
+  const pageNum = Math.min(page, totalPages);
+  const displayList = flatList.slice((pageNum - 1) * perPage, pageNum * perPage);
+  const currencyKeys = [...new Set(flatList.map((r) => (r.currency && String(r.currency).trim()) || '(기타)'))].sort((a, b) => {
+    if (a === 'JPY') return -1;
+    if (b === 'JPY') return 1;
+    if (a === 'USD') return -1;
+    if (b === 'USD') return 1;
+    return String(a).localeCompare(b);
+  });
+  const emptyBucket = () => ({ totalIcopay: 0, success: { count: 0, icopay: 0 }, fail: { count: 0, icopay: 0 }, void: { count: 0, icopay: 0 }, refund: { count: 0, icopay: 0 }, other: { count: 0, icopay: 0 } });
+  const summaryByCurrency = {};
+  for (const c of currencyKeys) summaryByCurrency[c] = emptyBucket();
+  for (const row of flatList) {
+    const currency = (row.currency && String(row.currency).trim()) || '(기타)';
+    if (!summaryByCurrency[currency]) summaryByCurrency[currency] = emptyBucket();
+    const bucket = summaryByCurrency[currency];
+    const kind = getPgRowStatusKind(row);
+    const amt = toIcopay(row.amount, row.currency);
+    bucket.totalIcopay += amt;
+    const isSuccess = kind === 'success';
+    const isFail = kind === 'fail';
+    const isVoid = kind === 'voided' || kind === 'voidrequested';
+    const isRefund = kind === 'refunded' || kind === 'refundrequested' || kind === 'partialrefunded';
+    if (isSuccess) { bucket.success.count++; bucket.success.icopay += amt; }
+    else if (isFail) { bucket.fail.count++; bucket.fail.icopay += amt; }
+    else if (isVoid) { bucket.void.count++; bucket.void.icopay += amt; }
+    else if (isRefund) { bucket.refund.count++; bucket.refund.icopay += amt; }
+    else { bucket.other.count++; bucket.other.icopay += amt; }
+  }
+  const fmtIco = (n) => formatAmountWithSeparator(n);
+  const fmtByCurrency = (getVal) => currencyKeys.map((c) => c + ' ' + fmtIco(getVal(summaryByCurrency[c]))).join(' | ');
+  const totalSuccessCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].success.count, 0);
+  const totalFailCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].fail.count, 0);
+  const totalVoidCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].void.count, 0);
+  const totalRefundCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].refund.count, 0);
+  const totalOtherCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].other.count, 0);
+  const summaryStyles = {
+    total: 'color:#374151;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;background:#f3f4f6;',
+    success: 'background:#dcfce7;color:#166534;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
+    fail: 'background:#fecaca;color:#991b1b;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
+    void: 'background:#fed7aa;color:#9a3412;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
+    refund: 'background:#bfdbfe;color:#1e40af;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
+    other: 'background:#e5e7eb;color:#4b5563;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
+  };
+  const summaryStyleEmpty = 'background:#e5e7eb;color:#6b7280;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;';
+  const pgStyle = (totalCount === 0) ? summaryStyleEmpty : summaryStyles.total;
+  const pgStyleS = (totalSuccessCount === 0) ? summaryStyleEmpty : summaryStyles.success;
+  const pgStyleF = (totalFailCount === 0) ? summaryStyleEmpty : summaryStyles.fail;
+  const pgStyleV = (totalVoidCount === 0) ? summaryStyleEmpty : summaryStyles.void;
+  const pgStyleR = (totalRefundCount === 0) ? summaryStyleEmpty : summaryStyles.refund;
+  const pgStyleO = (totalOtherCount === 0) ? summaryStyleEmpty : summaryStyles.other;
+  const summaryLine1 = '총거래 (' + totalCount + '건) ' + '<span style="' + pgStyle + '">총금액 [' + esc(fmtByCurrency((b) => b.totalIcopay)) + ']</span>';
+  const summaryLine2 = ''
+    + '<span style="' + pgStyleS + '">성공 [' + totalSuccessCount + '건] [' + esc(fmtByCurrency((b) => b.success.icopay)) + ']</span> '
+    + '<span style="' + pgStyleF + '">실패 [' + totalFailCount + '건] [' + esc(fmtByCurrency((b) => b.fail.icopay)) + ']</span> '
+    + '<span style="' + pgStyleV + '">무효 [' + totalVoidCount + '건] [' + esc(fmtByCurrency((b) => b.void.icopay)) + ']</span> '
+    + '<span style="' + pgStyleR + '">환불 [' + totalRefundCount + '건] [' + esc(fmtByCurrency((b) => b.refund.icopay)) + ']</span> '
+    + '<span style="' + pgStyleO + '">기타 [' + totalOtherCount + '건] [' + esc(fmtByCurrency((b) => b.other.icopay)) + ']</span>';
+  let sectionsHtml = '';
+  if (displayList.length > 0 || totalCount > 0) {
+    const rows = displayList.map((row, i) => rowToCells(row, (pageNum - 1) * perPage + i + 1)).join('');
+    const pageLinks = [];
+    for (let i = 1; i <= totalPages; i++) {
+      const url = baseUrl + qs({ page: i });
+      pageLinks.push('<a href="' + url + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (i === pageNum ? '#2563eb' : '#e5e7eb') + ';color:' + (i === pageNum ? '#fff' : '#374151') + ';">' + i + '</a>');
+    }
+    const paginationCenter = totalPages > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinks.join('') + '</div>' : '';
+    const perPageOptions = [10, 25, 50, 100].map((n) => '<a href="' + baseUrl + qs({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPage === n ? '#059669' : '#e5e7eb') + ';color:' + (perPage === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
+    const perPageBar = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">한 번에 보기: ' + perPageOptions + ' 건 (총 ' + totalCount + '건)</div>';
+    sectionsHtml = '<div style="margin-bottom:16px;"><div style="font-size:12px;margin:0 0 20px 0;color:#1f2937;">' + summaryLine1 + '</div><div style="font-size:12px;margin:0 0 20px 0;">' + summaryLine2 + '</div><table class="pg-tx-table" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;">' + colgroup + thead + '<tbody>' + rows + '</tbody></table>' + paginationCenter + perPageBar + '</div>';
   }
   if (!sectionsHtml) {
     const hasAnyData = Object.keys(byDate).length > 0;
     const cred = env === 'sandbox' ? cfg.sandbox : cfg.production;
     const hasCreds = !!(cred.mid && cred.apiKey && cred.md5);
     let hint;
-    if (searchKw) {
+    if (unfilteredCount > 0 && (statusFilter || searchKw)) {
+      hint = ' 선택한 기간·상태·검색 조건에 해당하는 거래가 없습니다. 상태 필터나 검색 조건을 바꿔 보세요.';
+    } else if (searchKw) {
       hint = ' 검색 조건을 바꿔 보세요.';
     } else if (lastFetchedAt && hasAnyData) {
       hint = ' 선택한 기간(당일/전일/이번주 등)에 거래가 없습니다. SORT에서 <strong>당월</strong>, <strong>전월</strong>, <strong>전체</strong>를 선택해 보세요.';
@@ -6484,9 +6960,9 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cancel_refund'), asy
       const envLabel = env === 'sandbox' ? 'SANDBOX' : 'PRODUCTION';
       hint = ' 환경설정 → ChillPay 무효/환불 설정에서 <strong>' + envLabel + '</strong>의 Mid, ApiKey, MD5를 입력한 뒤 위 <strong>동기화</strong> 버튼을 눌러 주세요.';
     }
-    sectionsHtml = '<p style="color:#6b7280;font-size:10px;">해당 환경의 거래 내역이 없습니다.' + hint + '</p>';
+    sectionsHtml = '<div style="margin-bottom:16px;"><div style="font-size:12px;margin:0 0 20px 0;color:#1f2937;">' + summaryLine1 + '</div><div style="font-size:12px;margin:0 0 20px 0;">' + summaryLine2 + '</div></div><p style="color:#6b7280;font-size:12px;">해당 환경의 거래 내역이 없습니다.' + hint + '</p>';
   }
-  const resizeScript = '<script>(function(){try{var tables=document.querySelectorAll(\"table.pg-tx-table\");Array.prototype.forEach.call(tables,function(table){var ths=table.querySelectorAll(\"thead th\");Array.prototype.forEach.call(ths,function(th,index){var handle=document.createElement(\"div\");handle.style.position=\"absolute\";handle.style.top=\"0\";handle.style.right=\"0\";handle.style.width=\"6px\";handle.style.cursor=\"col-resize\";handle.style.userSelect=\"none\";handle.style.height=\"100%\";handle.addEventListener(\"mousedown\",function(e){e.preventDefault();var startX=e.pageX;var startWidth=th.offsetWidth;function onMove(ev){var newW=startWidth+(ev.pageX-startX);if(newW<40)newW=40;th.style.width=newW+\"px\";Array.prototype.forEach.call(table.querySelectorAll(\"tbody tr\"),function(tr){if(tr.children[index]){tr.children[index].style.width=newW+\"px\";}});}function onUp(){document.removeEventListener(\"mousemove\",onMove);document.removeEventListener(\"mouseup\",onUp);}document.addEventListener(\"mousemove\",onMove);document.addEventListener(\"mouseup\",onUp);});th.appendChild(handle);});});}catch(e){}})();</script>';
+  const resizeScript = '<script>(function(){try{var table=document.querySelector(\"table.pg-tx-table\");if(!table)return;var cols=table.querySelectorAll(\"col\");var headers=table.querySelectorAll(\"thead th\");var resizer=null,startX=0,startW=0,colIdx=0;function onMove(e){if(!resizer)return;var dx=e.clientX-startX;var newW=Math.max(40,startW+dx);if(cols[colIdx]) cols[colIdx].style.width=newW+\"px\";}function onUp(){resizer=null;document.removeEventListener(\"mousemove\",onMove);document.removeEventListener(\"mouseup\",onUp);document.body.style.cursor=\"\";document.body.style.userSelect=\"\";}table.querySelectorAll(\".pg-col-resizer\").forEach(function(el){el.addEventListener(\"mousedown\",function(e){e.preventDefault();colIdx=parseInt(el.getAttribute(\"data-col\"),10)||0;startX=e.clientX;startW=headers[colIdx]?headers[colIdx].offsetWidth:90;resizer=el;document.body.style.cursor=\"col-resize\";document.body.style.userSelect=\"none\";document.addEventListener(\"mousemove\",onMove);document.addEventListener(\"mouseup\",onUp);});});}catch(e){}})();</script>';
   const periodLinkScript = '<script>(function(){function pad(n){return (n<10?\"0\":\"\")+n;}function ymd(d){return d.getFullYear()+\"-\"+pad(d.getMonth()+1)+\"-\"+pad(d.getDate());}function getRange(period){var now=new Date(),y=now.getFullYear(),m=now.getMonth(),d=now.getDate();if(period===\"today\"){return{from:ymd(now),to:ymd(now)};}if(period===\"yesterday\"){var yest=new Date(y,m,d-1);return{from:ymd(yest),to:ymd(yest)};}if(period===\"thisWeek\"||period===\"lastWeek\"){var dow=now.getDay(),monOff=dow===0?6:dow-1;var mon=new Date(y,m,d-monOff);if(period===\"lastWeek\"){mon.setDate(mon.getDate()-7);}var sun=new Date(mon);sun.setDate(sun.getDate()+6);return{from:ymd(mon),to:ymd(sun)};}if(period===\"thisMonth\"){return{from:y+\"-\"+pad(m+1)+\"-01\",to:ymd(new Date(y,m+1,0))};}if(period===\"lastMonth\"){return{from:ymd(new Date(y,m-1,1)),to:ymd(new Date(y,m,0))};}return null;}document.querySelectorAll(\"a.pg-period-link\").forEach(function(a){var period=a.getAttribute(\"data-period\");if(period===\"all\")return;var range=getRange(period);if(range){var url=new URL(a.href,window.location.origin);url.searchParams.set(\"dateFrom\",range.from);url.searchParams.set(\"dateTo\",range.to);a.href=url.pathname+\"?\"+url.searchParams.toString();}});})();</script>';
   const mainContent = alertPgHtml + lastFetchedHtml + '<div style="max-width:100%;overflow-x:hidden;">' + toolbarHtml + sectionsHtml + '</div>' + periodLinkScript + resizeScript;
   res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_pg_transaction_list'), mainContent, '', req.originalUrl, req.session.member, req, syncBtnHtml, env));
@@ -6501,6 +6977,7 @@ app.get('/admin/pg-transactions/export', requireAuth, requirePage('cancel_refund
   const orderBy = (q.orderBy || 'date').toString();
   const searchKw = (q.search || '').toString().trim();
   const searchField = (q.searchField || 'all').toString();
+  const statusFilterExport = (q.statusFilter || '').toString();
   const store = loadPgTransactionStore();
   const block = env === 'sandbox' ? store.sandbox : store.production;
   const byDate = block.byDate || {};
@@ -6536,11 +7013,36 @@ app.get('/admin/pg-transactions/export', requireAuth, requirePage('cancel_refund
   if (dateFromExport || dateToExport) {
     periodDateKeys = allKeysExport.filter((k) => (!dateFromExport || k >= dateFromExport) && (!dateToExport || k <= dateToExport));
   }
+  const pgStatusNormExport = (s) => String(s ?? '').trim().toLowerCase();
+  const rowMatchesStatusExport = (row) => {
+    if (!statusFilterExport) return true;
+    const key = String(statusFilterExport || '').trim().toLowerCase();
+    if (!key) return true;
+    if (key === 'exclude_success') return pgStatusNormExport(row.status) !== 'success';
+    if (key === 'settlement_needed') {
+      const s = pgStatusNormExport(row.status);
+      return s === 'cancel' || s === 'error' || s === 'timeout' || s === 'request';
+    }
+    return pgStatusNormExport(row.status) === key;
+  };
   const rowMatchesSearch = (row) => {
     if (!searchKw) return true;
     const kw = searchKw.toLowerCase();
     if (searchField === 'all') {
-      const str = [row.transactionId, row.orderNo, row.merchant, row.customer, row.amount, row.totalAmount, row.status, row.paymentChannel, row.currency, row.paymentDate, row.transactionDate, row.routeNo].filter(Boolean).join(' ').toLowerCase();
+      const str = [
+        row.transactionId,
+        row.orderNo,
+        row.merchant,
+        row.customer,
+        row.amount,
+        row.totalAmount,
+        row.status,
+        row.paymentChannel,
+        row.currency,
+        row.paymentDate,
+        row.transactionDate,
+        row.routeNo,
+      ].filter(Boolean).join(' ').toLowerCase();
       return str.indexOf(kw) !== -1;
     }
     let val = '';
@@ -6552,39 +7054,85 @@ app.get('/admin/pg-transactions/export', requireAuth, requirePage('cancel_refund
     else if (searchField === 'Currency') val = String(row.currency || '');
     else if (searchField === 'Status') val = String(row.status || '');
     else if (searchField === 'Amount') val = String(row.amount != null ? row.amount : '') + String(row.totalAmount != null ? row.totalAmount : '');
+    if (searchField === 'RouteNo') {
+      return val.toLowerCase().trim() === kw.trim();
+    }
     return val.toLowerCase().indexOf(kw) !== -1;
   };
   const parsePgDate = (str) => { if (!str) return 0; const m = String(str).trim().match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/); if (!m) return 0; const [, d, mo, y] = m; return new Date(parseInt(y, 10), parseInt(mo, 10) - 1, parseInt(d, 10)).getTime(); };
+  const parsePgDateTime = (str) => {
+    if (!str) return 0;
+    const m = String(str).trim().match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})/);
+    if (!m) return parsePgDate(str);
+    const [, d, mo, y, hh, mm, ss] = m;
+    return new Date(parseInt(y, 10), parseInt(mo, 10) - 1, parseInt(d, 10), parseInt(hh, 10), parseInt(mm, 10), parseInt(ss, 10)).getTime();
+  };
   const sortRows = (list) => {
     const rev = sortDir === 'asc' ? 1 : -1;
     return list.slice().sort((a, b) => {
       let c = 0;
       if (orderBy === 'date') c = (parsePgDate(a.transactionDate) - parsePgDate(b.transactionDate)) * rev;
+      else if (orderBy === 'time') c = (parsePgDateTime(a.transactionDate) - parsePgDateTime(b.transactionDate)) * rev;
       else if (orderBy === 'routeNo') c = (String(a.routeNo != null ? a.routeNo : '').localeCompare(String(b.routeNo != null ? b.routeNo : ''), 'ja')) * rev;
       else if (orderBy === 'currency') c = (String(a.currency || '').localeCompare(String(b.currency || ''), 'ja')) * rev;
       else if (orderBy === 'status') c = String(a.status || '').localeCompare(String(b.status || ''), 'ja') * rev;
-      else c = (parsePgDate(a.transactionDate) - parsePgDate(b.transactionDate)) * rev;
+      else c = (parsePgDateTime(a.transactionDate) - parsePgDateTime(b.transactionDate)) * rev;
       return c;
     });
   };
   let list = [];
   for (const dateKey of periodDateKeys) {
-    const rows = (byDate[dateKey] || []).filter(rowMatchesSearch);
+    const rows = (byDate[dateKey] || []).filter((row) => rowMatchesSearch(row) && rowMatchesStatusExport(row));
     list = list.concat(rows);
   }
   list = sortRows(list);
   const csvEscape = (v) => { const s = String(v ?? ''); if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'; return s; };
-  const headerRow = ['TransactionId', t(locale, 'pg_tx_datetime'), 'Merchant', 'Customer', 'OrderNo', 'PaymentChannel', t(locale, 'pg_tx_pay_datetime'), 'Amount', 'Fee', 'TotalAmount', 'Currency', 'RouteNo', 'Status', 'Settled'];
-  const rows = list.map((row) => {
+  const toIcopayExport = (amountRaw, currencyRaw) => {
+    if (amountRaw == null || amountRaw === '') return 0;
+    const cur = normalizeCurrencyForIcopay(currencyRaw);
+    if (cur === 'JPY' || cur === 'KRW') {
+      const digits = String(amountRaw).replace(/[^\d]/g, '');
+      const n = digits ? Number(digits) : 0;
+      return (Number.isFinite(n) ? n : 0) / 100;
+    }
+    return parseLooseNumber(amountRaw);
+  };
+  const getPgMerchantDisplayExport = (row) => {
+    const rn = row && row.routeNo != null ? String(row.routeNo).trim() : '';
+    if (rn) {
+      for (const m of MERCHANTS.values()) {
+        if (m && String(m.routeNo || '').trim() === rn) return m.name || m.label || m.merchantId || rn;
+      }
+    }
+    const txId = row && row.transactionId != null ? String(row.transactionId).trim() : '';
+    if (txId) {
+      const logs = loadPgNotiLogsSafe ? loadPgNotiLogsSafe() : [];
+      const found = logs.find((lg) => {
+        const body = parseNotiBody(lg);
+        const bid = body.TransactionId ?? body.transactionId ?? '';
+        return bid && String(bid).trim() === txId && lg.merchantId && MERCHANTS.get(lg.merchantId);
+      });
+      if (found && found.merchantId && MERCHANTS.get(found.merchantId)) {
+        const m = MERCHANTS.get(found.merchantId);
+        return m.name || m.label || m.merchantId || rn || txId;
+      }
+    }
+    return (row && row.merchant) || '';
+  };
+  const headerRow = [t(locale, 'pg_tx_header_no'), t(locale, 'pg_tx_datetime'), 'TransactionId', 'Merchant', 'Customer', 'OrderNo', 'PaymentChannel', t(locale, 'pg_tx_pay_datetime'), 'Amount', 'ICOPAY', 'Fee', 'TotalAmount', 'Currency', 'RouteNo', 'Status', 'Settled'];
+  const rows = list.map((row, i) => {
+    const icopayVal = row.amount != null ? String(toIcopayExport(row.amount, row.currency)) : '';
     return [
-      row.transactionId,
+      i + 1,
       row.transactionDate || '',
-      row.merchant || '',
+      row.transactionId,
+      getPgMerchantDisplayExport(row),
       row.customer || '',
       row.orderNo || '',
       row.paymentChannel || '',
       row.paymentDate || '',
       row.amount != null ? row.amount : '',
+      icopayVal,
       row.fee != null ? row.fee : '',
       row.totalAmount != null ? row.totalAmount : '',
       row.currency || '',
@@ -6717,9 +7265,12 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cancel_refund'),
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
     const txId = body.TransactionId ?? body.transactionId ?? '';
     let notiLabel = '';
-    if (txId && hasVoidNotiSent(txId)) notiLabel = t(locale, 'cr_type_void');
-    else if (txId && hasRefundNotiSent(txId)) notiLabel = t(locale, 'cr_type_refund');
-    const isVoidedOrRefunded = isSuccess && txId && (hasVoidNotiSent(txId) || hasRefundNotiSent(txId));
+    const exportEntry = txId ? exportVoidRefundByTxId[txId] : null;
+    const hasVoidLike = !!(txId && (hasVoidNotiSent(txId) || (exportEntry && exportEntry.type === 'void')));
+    const hasRefundLike = !!(txId && (hasRefundNotiSent(txId) || (exportEntry && exportEntry.type === 'refund')));
+    if (hasVoidLike) notiLabel = t(locale, 'cr_type_void');
+    else if (hasRefundLike) notiLabel = t(locale, 'cr_type_refund');
+    const isVoidedOrRefunded = isSuccess && txId && (hasVoidLike || hasRefundLike);
     const amountVal = body.Amount ?? body.amount ?? '';
     const amountStr = isVoidedOrRefunded ? '-' : formatAmountWithSeparator(amountVal !== '' && amountVal != null ? amountVal : null);
     const internalAmt = (amountVal !== '' && amountVal != null && !isVoidedOrRefunded) ? (Number(amountVal) / 100) : null;
@@ -6727,7 +7278,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cancel_refund'),
     let detailStr = '';
     if (isVoidedOrRefunded && txId) {
       const entry = exportVoidRefundByTxId[txId];
-      const isVoid = hasVoidNotiSent(txId);
+      const isVoid = hasVoidLike;
       const kindLabel = isVoid ? t(locale, 'cr_type_void') : t(locale, 'cr_type_refund');
       const defaultReason = isVoid ? t(locale, 'tx_detail_void_reason') : t(locale, 'tx_detail_refund_reason');
       const reason = (entry && entry.reason) ? entry.reason : defaultReason;
@@ -7276,7 +7827,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cancel_refund'), 
       <td class="col-action">${emailHtml}</td>
     </tr>`;
   }).join('');
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>전송일</th><th>전송시각</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th><th>Amount</th><th>금액</th><th>무효</th><th>관리</th><th>이메일</th></tr></thead>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>전송일</th><th>전송시각</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th><th>Amount</th><th>ICOPAY</th><th>무효</th><th>관리</th><th>이메일</th></tr></thead>';
   const voidNote = '<p class="hint" style="margin-bottom:12px;color:#6b7280;font-size:13px;">전송일·전송시각은 무효 노티를 가맹점/전산에 보낸 시각(일본·태국)입니다. 전산에 <strong>결제 내역이 없는</strong> 건은 무효 노티를 보내도 전산에서 반영되지 않거나 실패로 나올 수 있습니다. (미들웨어는 ChillPay 결제 성공 노티만 보유한 건을 목록에 띄우므로, 해당 결제 노티가 당시 전산에 전달되지 않았을 수 있습니다.) 결제 노티가 전산에 먼저 전달되었는지는 <a href="/admin/internal-result">전산 결과</a>에서 해당 TransactionId·결제 건을 확인하세요.</p>';
   const tableContent = voidNote + syncResultHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + historyListHtml;
   res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_void') + ' (' + voidList.length + ')', tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
@@ -7452,7 +8003,7 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cancel_re
   });
   const categorize = (type, mode) => {
     if (type === 'void') {
-      return mode === 'auto' ? 'auto_void' : 'manual_void';
+      return mode === 'auto' ? 'auto_void' : 'void';
     }
     if (type === 'refund') {
       return mode === 'auto' ? 'auto_refund' : 'manual_refund';
@@ -7461,7 +8012,7 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cancel_re
   };
   const categoryLabel = (cat) => {
     if (cat === 'auto_void') return '자동무효';
-    if (cat === 'manual_void') return '수동무효';
+    if (cat === 'void') return '무효';
     if (cat === 'email_void') return '이메일무효';
     if (cat === 'auto_refund') return '자동환불';
     if (cat === 'manual_refund') return '수동환불';
@@ -7827,7 +8378,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cancel_refund')
       <td class="col-action">${refundHtml}</td>
     </tr>`;
   }).join('');
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>전송일</th><th>전송시각</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th><th>Amount</th><th>금액</th><th>관리</th><th>환불</th></tr></thead>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>전송일</th><th>전송시각</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th><th>Amount</th><th>ICOPAY</th><th>관리</th><th>환불</th></tr></thead>';
   const tableContent = syncResultHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + historyListHtml;
   res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_cancel_refund_refund') + ' (' + refundList.length + ')', tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
 });
@@ -8297,7 +8848,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
             <th>OrderNo</th>
             <th>Amount</th>
             <th>Currency</th>
-            <th>금액</th>
+            <th>ICOPAY</th>
             <th>성공유무</th>
             <th>실패원인</th>
             <th>재전송</th>
@@ -8453,8 +9004,9 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
     .map((code) => {
       const currentRule = full.amountRules[code] || '=';
       const currentLabel = amountRuleOptions.find((o) => o.value === currentRule)?.label || t(locale, 'internal_noti_rule_eq');
-      const routeNoVal = full.routeNoMode && full.routeNoMode[code] || 'current';
-      const customerIdVal = full.customerIdMode && full.customerIdMode[code] || 'current';
+      const routeNoVal = (full.routeNoMode && full.routeNoMode[code]) || 'current';
+      const customerIdVal = (full.customerIdMode && full.customerIdMode[code]) || 'current';
+      const customerNameVal = (full.customerNameMode && full.customerNameMode[code]) || 'format';
       const originalChecked = full.original && full.original[code];
       return `
     <tr>
@@ -8464,6 +9016,7 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
           <input type="hidden" name="currency" value="${code}" />
           <input type="hidden" name="routeNo" value="${routeNoVal}" />
           <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <input type="hidden" name="customerName" value="${customerNameVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
           <select name="rule" class="cell-select">${amountRuleOptions.map((opt) => `<option value="${opt.value}" ${currentRule === opt.value ? 'selected' : ''}>${opt.label}</option>`).join('')}</select>
           <button type="submit" class="btn-save-row">저장</button>
@@ -8475,6 +9028,7 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
           <input type="hidden" name="currency" value="${code}" />
           <input type="hidden" name="rule" value="${currentRule}" />
           <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <input type="hidden" name="customerName" value="${customerNameVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
           <select name="routeNo" class="cell-select" title="현재 RouteNo(전산용) / 삭제">
             <option value="current" ${routeNoVal === 'current' ? 'selected' : ''}>현재</option>
@@ -8488,6 +9042,7 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
           <input type="hidden" name="currency" value="${code}" />
           <input type="hidden" name="rule" value="${currentRule}" />
           <input type="hidden" name="routeNo" value="${routeNoVal}" />
+          <input type="hidden" name="customerName" value="${customerNameVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
           <select name="customerId" class="cell-select" title="가맹점 전산용 CustomerId / 삭제">
             <option value="current" ${customerIdVal === 'current' ? 'selected' : ''}>가맹점값</option>
@@ -8506,6 +9061,20 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
           <button type="submit" class="btn-save-row">저장</button>
         </form>
       </td>
+      <td>
+        <form class="cell-form" method="post" action="/admin/internal-noti-settings" onsubmit="return confirm('${confirmMsg}');">
+          <input type="hidden" name="currency" value="${code}" />
+          <input type="hidden" name="rule" value="${currentRule}" />
+          <input type="hidden" name="routeNo" value="${routeNoVal}" />
+          <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
+          <select name="customerName" class="cell-select" title="CustomerName 가공 On/Off">
+            <option value="format" ${customerNameVal === 'format' ? 'selected' : ''}>On</option>
+            <option value="none" ${customerNameVal === 'none' ? 'selected' : ''}>Off</option>
+          </select>
+          <button type="submit" class="btn-save-row">저장</button>
+        </form>
+      </td>
     </tr>`;
     })
     .join('');
@@ -8519,16 +9088,10 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     h2 { margin-top: 24px; }
-    table { border-collapse: collapse; width: 100%; table-layout: fixed; background:#fff; }
-    th, td { border: 1px solid #e5e7eb; padding: 6px 8px; font-size: 13px; text-align: center; }
+    table { border-collapse: collapse; width: 100%; table-layout: auto; background:#fff; }
+    th, td { border: 1px solid #e5e7eb; padding: 6px 8px; font-size: 13px; text-align: center; white-space: nowrap; }
     th { background: #e5f0ff; color:#1f2937; }
     tr:nth-child(even) { background:#f9fafb; }
-    th:nth-child(1), td:nth-child(1) { width: 72px; }
-    th:nth-child(2), td:nth-child(2) { width: 150px; }
-    th:nth-child(3), td:nth-child(3) { width: 90px; white-space: nowrap; }
-    th:nth-child(4), td:nth-child(4) { width: 100px; }
-    th:nth-child(5), td:nth-child(5) { width: 95px; }
-    th:nth-child(6), td:nth-child(6) { width: 120px; }
     .cell-form { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 0; }
     .cell-form-inline { flex-wrap: nowrap; }
     .cell-select { width: 100%; max-width: 82px; min-width: 52px; padding: 4px 6px; font-size: 12px; border-radius: 4px; border: 1px solid #d1d5db; box-sizing: border-box; }
@@ -8574,6 +9137,7 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
           <li><strong>RouteNo 삭제</strong>: 해당 구문과 값을 전산 전송에서 제외. 기본은 현재 전산용 루트번호(가맹점 설정).</li>
           <li><strong>CustomerId 삭제</strong>: 해당 구문과 값을 전산 전송에서 제외. 기본은 가맹점 설정의 전산용 CustomerId.</li>
           <li><strong>오리지널</strong>: PG 노티를 가공 없이 그대로 전산으로 전달 (PG 노티 로그와 동일).</li>
+          <li><strong>CustomerName 가공</strong>: 통화별 설정에서 On/Off 가능. On 일 때는 PG 오리지널의 OrderNo/CustomerId를 사용해 CustomerName을 <code>On:주문번호 / Id:CustomerId</code> 형식으로 가공하여 전산에 전송합니다.</li>
         </ul>
         <table>
             <thead>
@@ -8583,6 +9147,7 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
                 <th>현상태</th>
                 <th>RouteNo</th>
                 <th>CustomerId</th>
+                <th>CustomerName</th>
                 <th>오리지널</th>
               </tr>
             </thead>
@@ -8618,6 +9183,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
         amountRuleOptions.find((o) => o.value === currentRule)?.label || t(locale, 'internal_noti_rule_eq');
       const routeNoVal = (full.routeNoMode && full.routeNoMode[code]) || 'current';
       const customerIdVal = (full.customerIdMode && full.customerIdMode[code]) || 'current';
+      const customerNameVal = (full.customerNameMode && full.customerNameMode[code]) || 'format';
       const originalChecked = full.original && full.original[code];
       return `
     <tr>
@@ -8627,6 +9193,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <input type="hidden" name="currency" value="${code}" />
           <input type="hidden" name="routeNo" value="${routeNoVal}" />
           <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <input type="hidden" name="customerName" value="${customerNameVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
           <select name="rule" class="cell-select">${amountRuleOptions
             .map(
@@ -8643,6 +9210,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <input type="hidden" name="currency" value="${code}" />
           <input type="hidden" name="rule" value="${currentRule}" />
           <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <input type="hidden" name="customerName" value="${customerNameVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
           <select name="routeNo" class="cell-select" title="현재 RouteNo(전산용) / 삭제">
             <option value="current" ${routeNoVal === 'current' ? 'selected' : ''}>현재</option>
@@ -8656,6 +9224,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <input type="hidden" name="currency" value="${code}" />
           <input type="hidden" name="rule" value="${currentRule}" />
           <input type="hidden" name="routeNo" value="${routeNoVal}" />
+          <input type="hidden" name="customerName" value="${customerNameVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
           <select name="customerId" class="cell-select" title="가맹점 전산용 CustomerId / 삭제">
             <option value="current" ${customerIdVal === 'current' ? 'selected' : ''}>가맹점값</option>
@@ -8674,6 +9243,20 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <button type="submit" class="btn-save-row">저장</button>
         </form>
       </td>
+      <td>
+        <form class="cell-form" method="post" action="/admin/dev-internal-noti-settings" onsubmit="return confirm('${confirmMsg}');">
+          <input type="hidden" name="currency" value="${code}" />
+          <input type="hidden" name="rule" value="${currentRule}" />
+          <input type="hidden" name="routeNo" value="${routeNoVal}" />
+          <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
+          <select name="customerName" class="cell-select" title="CustomerName 가공 On/Off">
+            <option value="format" ${customerNameVal === 'format' ? 'selected' : ''}>On</option>
+            <option value="none" ${customerNameVal === 'none' ? 'selected' : ''}>Off</option>
+          </select>
+          <button type="submit" class="btn-save-row">저장</button>
+        </form>
+      </td>
     </tr>`;
     })
     .join('');
@@ -8687,16 +9270,10 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     h2 { margin-top: 24px; }
-    table { border-collapse: collapse; width: 100%; table-layout: fixed; background:#fff; }
-    th, td { border: 1px solid #e5e7eb; padding: 6px 8px; font-size: 13px; text-align: center; }
+    table { border-collapse: collapse; width: 100%; table-layout: auto; background:#fff; }
+    th, td { border: 1px solid #e5e7eb; padding: 6px 8px; font-size: 13px; text-align: center; white-space: nowrap; }
     th { background: #e5f0ff; color:#1f2937; }
     tr:nth-child(even) { background:#f9fafb; }
-    th:nth-child(1), td:nth-child(1) { width: 72px; }
-    th:nth-child(2), td:nth-child(2) { width: 150px; }
-    th:nth-child(3), td:nth-child(3) { width: 90px; white-space: nowrap; }
-    th:nth-child(4), td:nth-child(4) { width: 100px; }
-    th:nth-child(5), td:nth-child(5) { width: 95px; }
-    th:nth-child(6), td:nth-child(6) { width: 120px; }
     .cell-form { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 0; }
     .cell-form-inline { flex-wrap: nowrap; }
     .cell-select { width: 100%; max-width: 82px; min-width: 52px; padding: 4px 6px; font-size: 12px; border-radius: 4px; border: 1px solid #d1d5db; box-sizing: border-box; }
@@ -8742,6 +9319,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <li><strong>RouteNo 삭제</strong>: 해당 구문과 값을 전산 전송에서 제외. 기본은 현재 전산용 루트번호(가맹점 설정).</li>
           <li><strong>CustomerId 삭제</strong>: 해당 구문과 값을 전산 전송에서 제외. 기본은 가맹점 설정의 전산용 CustomerId.</li>
           <li><strong>오리지널</strong>: PG 노티를 가공 없이 그대로 개발 전산으로 전달 (PG 노티 로그와 동일).</li>
+          <li><strong>CustomerName 가공</strong>: 오리지널이 아닐 때는 PG 오리지널의 OrderNo/CustomerId를 사용해 CustomerName을 O"주문번호"/ID"CustomerId" 형식으로 가공하여 개발 전산에 전송합니다.</li>
         </ul>
         <table>
             <thead>
@@ -8751,6 +9329,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
                 <th>현상태</th>
                 <th>RouteNo</th>
                 <th>CustomerId</th>
+                <th>CustomerName</th>
                 <th>오리지널</th>
               </tr>
             </thead>
@@ -8776,6 +9355,8 @@ app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inte
     full.routeNoMode[currency] = rn === 'delete' ? 'delete' : 'current';
     const cid = (req.body.customerId || 'current').trim();
     full.customerIdMode[currency] = cid === 'delete' ? 'delete' : 'current';
+    const cn = (req.body.customerName || 'format').trim();
+    full.customerNameMode[currency] = cn === 'none' ? 'none' : 'format';
     full.original[currency] = req.body.original === 'on';
     saveDevInternalNotiSettings(full);
     if (typeof appendConfigChangeLog === 'function') {
@@ -8794,6 +9375,7 @@ app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inte
     const amountRules = {};
     const routeNoMode = {};
     const customerIdMode = {};
+    const customerNameMode = {};
     const original = {};
     CURRENCY_CODES.forEach((code) => {
       let r = (req.body['rule_' + code] || '=').trim() || '=';
@@ -8803,12 +9385,15 @@ app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inte
       routeNoMode[code] = rn === 'delete' ? 'delete' : 'current';
       const cid = (req.body['customerId_' + code] || 'current').trim();
       customerIdMode[code] = cid === 'delete' ? 'delete' : 'current';
+      const cn = (req.body['customerName_' + code] || 'format').trim();
+      customerNameMode[code] = cn === 'none' ? 'none' : 'format';
       original[code] = req.body['original_' + code] === 'on';
     });
     saveDevInternalNotiSettings({
       amountRules,
       routeNoMode,
       customerIdMode,
+      customerNameMode,
       original,
     });
     if (typeof appendConfigChangeLog === 'function') {
@@ -8838,6 +9423,8 @@ app.post('/admin/internal-noti-settings', requireAuth, requirePage('internal_not
     full.routeNoMode[currency] = rn === 'delete' ? 'delete' : 'current';
     const cid = (req.body.customerId || 'current').trim();
     full.customerIdMode[currency] = cid === 'delete' ? 'delete' : 'current';
+    const cn = (req.body.customerName || 'format').trim();
+    full.customerNameMode[currency] = cn === 'none' ? 'none' : 'format';
     full.original[currency] = req.body.original === 'on';
     saveInternalNotiSettings(full);
     if (typeof appendConfigChangeLog === 'function') {
@@ -8853,6 +9440,7 @@ app.post('/admin/internal-noti-settings', requireAuth, requirePage('internal_not
     const amountRules = {};
     const routeNoMode = {};
     const customerIdMode = {};
+    const customerNameMode = {};
     const original = {};
     CURRENCY_CODES.forEach((code) => {
       let r = (req.body['rule_' + code] || '=').trim() || '=';
@@ -8862,12 +9450,15 @@ app.post('/admin/internal-noti-settings', requireAuth, requirePage('internal_not
       routeNoMode[code] = rn === 'delete' ? 'delete' : 'current';
       const cid = (req.body['customerId_' + code] || 'current').trim();
       customerIdMode[code] = cid === 'delete' ? 'delete' : 'current';
+      const cn = (req.body['customerName_' + code] || 'format').trim();
+      customerNameMode[code] = cn === 'none' ? 'none' : 'format';
       original[code] = req.body['original_' + code] === 'on';
     });
     saveInternalNotiSettings({
       amountRules,
       routeNoMode,
       customerIdMode,
+      customerNameMode,
       original,
     });
     if (typeof appendConfigChangeLog === 'function') {
