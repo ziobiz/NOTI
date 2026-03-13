@@ -5371,7 +5371,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
     .relay-fail-reason { font-size: 11px; color: #b91c1c; word-break: break-all; display: block; margin-top: 2px; text-align: center; }
     .status-none { color:#b91c1c; font-weight:700; }
     .label-none { color:#b91c1c; font-weight:700; }
-    .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; }
     .btn-resend:hover { background: #1d4ed8; }
     .btn-resend-json { padding: 4px 10px; font-size: 12px; background: #059669; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
     .btn-resend-json:hover { background: #047857; }
@@ -8869,7 +8869,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
   <title>${t(locale, 'nav_pg_result')}</title>
   <style>
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
-    table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; }
+    table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; table-layout: fixed; }
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
@@ -8879,6 +8879,9 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
     .status-fail { color: #dc2626; font-weight: 600; }
     .time-jp { color: #2563eb; }
     .col-fail-reason { text-align: center; word-break: break-all; max-width: 200px; }
+    /* 재전송(11열) 컬럼 폭을 약 4% 넓게 설정 */
+    thead th:nth-child(11),
+    tbody td:nth-child(11) { width: 9%; }
     .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
     .btn-resend-json { padding: 4px 10px; font-size: 12px; background: #059669; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
     .btn-resend-json:hover { background: #047857; }
@@ -11070,7 +11073,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       <h1>${t(locale, 'internal_logs_title')} (${INTERNAL_LOGS.length})</h1>
       <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'internal_logs_desc')}</p>
       <table>
-        <colgroup><col style="width:7%;" /><col style="width:9%;" /><col style="width:12%;" /><col style="width:5%;" /><col style="width:20%;" /><col style="width:43%;" /><col style="width:6%;" /></colgroup>
+        <colgroup><col style="width:7%;" /><col style="width:9%;" /><col style="width:12%;" /><col style="width:5%;" /><col style="width:20%;" /><col style="width:39%;" /><col style="width:10%;" /></colgroup>
         <thead>
           <tr>
             <th>${t(locale, 'pg_logs_th_received_date')}</th>
@@ -11187,7 +11190,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
     .status-fail { color: #dc2626; font-weight: 600; }
     .time-jp { color: #2563eb; }
     .col-fail-reason { text-align: center; word-break: break-all; max-width: 200px; }
-    .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; }
     .alert { padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
     .alert-ok { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
     .alert-fail { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
