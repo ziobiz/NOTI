@@ -10753,8 +10753,9 @@ app.get('/admin/test-logs', requireAuth, requirePage('test_history'), (req, res)
     th { background: #e5f0ff; text-align: center; white-space: nowrap; }
     /* 테스트 내역 컬럼 폭/정렬 조정
        - 1~8열(시간 + 7컬럼): 가운데 정렬, 요청하신 비율로 재조정
-       - 9열(요청 JSON): 25% 폭, 제목만 가운데/내용은 왼쪽, 줄바꿈 없음
-       - 10열(응답 JSON): 나머지 폭, 제목만 가운데/내용은 왼쪽, 줄바꿈 없음 */
+       - 2열(설정 ID): 기존보다 +2%
+       - 3열(환경): 기존보다 +1%
+       - 10열(응답 JSON): 기존보다 -3% */
     thead th:nth-child(1),
     tbody td:nth-child(1) { width: 9%; text-align:center; }
 
@@ -10764,11 +10765,11 @@ app.get('/admin/test-logs', requireAuth, requirePage('test_history'), (req, res)
     tbody td:nth-child(3) {
       text-align: center;
     }
-    /* 설정 ID(2열) 2%, 환경(3열) 4% */
+    /* 설정 ID(2열) 5%, 환경(3열) 5% */
     thead th:nth-child(2),
-    tbody td:nth-child(2) { width: 2%; }
+    tbody td:nth-child(2) { width: 5%; }
     thead th:nth-child(3),
-    tbody td:nth-child(3) { width: 4%; }
+    tbody td:nth-child(3) { width: 5%; }
 
     /* Currency(4열) 4%, OrderNo(5열) 6%, Amount(6열) 5%, 응답 HTTP(7열) 4%, 오류(8열) 4% */
     thead th:nth-child(4),
@@ -10789,19 +10790,19 @@ app.get('/admin/test-logs', requireAuth, requirePage('test_history'), (req, res)
       white-space: nowrap;
     }
     tbody td:nth-child(9) {
-      width: 23%;
+      width: 25%;
       text-align: left;
       white-space: nowrap;
     }
 
     /* 응답(JSON) */
     thead th:nth-child(10) {
-      width: 38%;
+      width: 34%;
       text-align: center;
       white-space: nowrap;
     }
     tbody td:nth-child(10) {
-      width: 38%;
+      width: 34%;
       text-align: left;
       white-space: nowrap;
     }
