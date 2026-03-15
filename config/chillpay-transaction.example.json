@@ -14,6 +14,7 @@
   "refundStartHour": 0,
   "refundStartMinute": 0,
   "refundWindowDays": 7,
+  "forceRefundWindowDays": 0,
   "amountDisplayOp": "/",
   "amountDisplayValue": 100,
   "syncResultDisplayMinutes": 30,
