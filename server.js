@@ -3719,6 +3719,10 @@ app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) 
     .hint { font-size:12px; color:#6b7280; margin-top:6px; }
     .row { display:flex; justify-content:space-between; align-items:center; margin-top:10px; }
     .row span { font-size:13px; color:#374151; }
+    .account-otp-row { margin-top:10px; text-align:left; }
+    .account-otp-row label { display:inline-flex; align-items:center; margin-top:0; font-size:13px; }
+    .account-otp-status { font-size:13px; color:#374151; margin-top:6px; }
+    .account-otp-status.otp-set { color:#b91c1c; background:#fecaca; padding:4px 8px; border-radius:6px; display:inline-block; }
   </style>
 </head>
 <body>
@@ -3733,9 +3737,9 @@ app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) 
         <form method="post" action="/admin/account" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
           <label>${t(locale, 'account_new_username')}<input type="text" name="username" value="${(currentMember.userId || '').replace(/"/g, '&quot;')}" required /></label>
           <label>${t(locale, 'account_new_password')}<input type="password" name="password" /></label>
-          <div class="row">
-            <span>${t(locale, 'account_otp_status')}: ${hasOtp ? t(locale, 'account_otp_set') : t(locale, 'account_otp_not_set')}</span>
-            <label style="margin:0;font-size:13px;"><input type="checkbox" name="resetOtp" />${t(locale, 'account_otp_regenerate')}</label>
+          <div class="account-otp-row">
+            <label>${t(locale, 'account_otp_regenerate')} <input type="checkbox" name="resetOtp" /></label>
+            <div class="account-otp-status${hasOtp ? ' otp-set' : ''}">${t(locale, 'account_otp_status')}: ${hasOtp ? t(locale, 'account_otp_set') : t(locale, 'account_otp_not_set')}</div>
           </div>
           <div class="hint">${t(locale, 'account_otp_hint')}</div>
           <button type="submit">${t(locale, 'account_save')}</button>
@@ -4509,7 +4513,8 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
     .perm-legend { font-size:11px; color:#6b7280; background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:6px 10px; margin-bottom:10px; line-height:1.5; }
     .perm-legend-inner { display:grid; grid-template-columns:repeat(auto-fill, minmax(100px, 1fr)); gap:2px 10px; }
     .add-form-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:12px 20px; align-items:end; }
-    .add-form-grid label { margin-top:0; }
+    .add-form-grid label { margin-top:0; display:block; }
+    .add-form-grid label input, .add-form-grid label select { margin-top:8px; display:block; }
     .add-form-perm-label { margin-top:8px !important; }
     .add-form-option-row { display:flex; align-items:center; gap:6px 10px; flex-wrap:nowrap; }
     .add-form-option-sep { color:#9ca3af; margin:0 4px; user-select:none; }
@@ -4541,7 +4546,7 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
           <label>${t(locale, 'member_country')} <input type="text" name="country" id="m-country" /></label>
           <label>${t(locale, 'member_user_id')} <input type="text" name="userId" id="m-userId" required /></label>
           <label>${t(locale, 'member_email')} <input type="email" name="email" id="m-email" /></label>
-          <label>${t(locale, 'member_birth_date')} <span class="date-format-hint">(${(t(locale, 'date_placeholder_ymd') || '연도-월-일').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')})</span> <input type="date" name="birthDate" id="m-birthDate" placeholder="${(t(locale, 'date_placeholder_ymd') || '연도-월-일').replace(/"/g, '&quot;')}" title="${(t(locale, 'date_placeholder_ymd') || '연도-월-일').replace(/"/g, '&quot;')}" /></label>
+          <label>${t(locale, 'member_birth_date')} <span class="date-format-hint">(Year-Month-Day)</span> <input type="date" name="birthDate" id="m-birthDate" placeholder="Year-Month-Day" title="Year-Month-Day" /></label>
           ${addFormRoleBlock}
           <label class="add-form-perm-label" style="grid-column:1/-1; margin-top:8px;">${t(locale, 'page_permissions')} ${t(locale, 'page_permissions_operator_suffix') || '(OPERATOR만 해당)'} <div id="add-form-perms">${addFormPermBlock}</div></label>
           <label style="grid-column:1/-1;">${t(locale, 'members_internal_targets_label')} <div id="add-form-internal-targets">${addFormInternalTargetBlock}</div></label>
@@ -5004,7 +5009,7 @@ app.get('/admin/forgot', (req, res) => {
       <form method="post" action="/admin/forgot">
         <label>${t(locale, 'member_email')} <input type="email" name="email" required /></label>
         <label>${t(locale, 'member_name')} <input type="text" name="name" required /></label>
-        <label>${t(locale, 'member_birth_date')} <span class="date-format-hint">(${(t(locale, 'date_placeholder_ymd') || '연도-월-일').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')})</span> <input type="date" name="birthDate" placeholder="${(t(locale, 'date_placeholder_ymd') || '연도-월-일').replace(/"/g, '&quot;')}" title="${(t(locale, 'date_placeholder_ymd') || '연도-월-일').replace(/"/g, '&quot;')}" /></label>
+        <label>${t(locale, 'member_birth_date')} <span class="date-format-hint">(Year-Month-Day)</span> <input type="date" name="birthDate" placeholder="Year-Month-Day" title="Year-Month-Day" /></label>
         <button type="submit">${t(locale, 'forgot_btn')}</button>
       </form>
       <p style="margin-top:16px;"><a href="/admin/login">${t(locale, 'login_submit')}</a></p>
@@ -8570,7 +8575,10 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
     const merchantId = log.merchantId || '';
     const routeNo = log.routeNo || '';
     const emailTo = log.emailTo || '';
-    const subject = log.subject || '';
+    let subject = log.subject || '';
+    // 메일 로그 Subject: 무효 요청 등 저장 시 언어와 관계없이 현재 locale로 표시
+    const voidSubjectMatch = subject.match(/^(무효\s*요청|無効リクエスト|Void\s*request|ขอโมฆะ|无效请求)\s*:\s*(.*)$/);
+    if (voidSubjectMatch) subject = (t(locale, 'cr_email_subject_void') || 'Void request: ') + voidSubjectMatch[2];
     const status = log.deliveryStatus || '';
     const accepted = Array.isArray(log.accepted) ? log.accepted.join(', ') : '';
     const rejected = Array.isArray(log.rejected) ? log.rejected.join(', ') : '';
@@ -9104,7 +9112,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
     const manageHtml = '-';
     const refundHtml = canRefundNow
       ? `<form method="post" action="/admin/cancel-refund/refund-request" style="display:inline;" onsubmit="return confirm('${confirmRefund}') && confirm('${confirmRefund2}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="env" value="${escR(env)}" /><button type="submit" class="btn-refund">${t(locale, 'cr_btn_refund_request')}</button></form>`
-      : '<span class="btn-refund-disabled" title="환경설정에서 지정한 환불 가능 기간을 지났거나 아직 시작 전입니다.">환불 기간 아님</span>';
+      : '<span class="btn-refund-disabled" title="' + (t(locale, 'cr_refund_period_no_title') || '환경설정에서 지정한 환불 가능 기간을 지났거나 아직 시작 전입니다.').replace(/"/g, '&quot;') + '">' + (t(locale, 'cr_refund_period_no') || '환불 기간 아님') + '</span>';
     const sentEntry = refundSentMap[String(txId).trim()];
     const sentDt = sentEntry ? formatDateAndTimeTHJP(sentEntry.sentAtIso || sentEntry.sentAt) : { date: '-', timeTh: '-', timeJp: '-' };
     return `<tr>

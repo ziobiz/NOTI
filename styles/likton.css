@@ -1,0 +1,48 @@
+/**
+ * 릭톤 (Likton) — 기본 색톤 팔레트
+ * 페이지 접근 권한(계정관리) 화면에서 사용하는 색상을 프로젝트 기본으로 정의합니다.
+ * 모든 개발에서 이 변수를 참조하여 일관된 색상을 적용할 수 있습니다.
+ *
+ * 사용법: 레이아웃 HTML에 <link rel="stylesheet" href="/styles/likton.css"> 추가 후
+ *        CSS에서 var(--likton-bg-page), var(--likton-text-primary) 등으로 참조.
+ */
+:root {
+  /* ── 배경 ── */
+  --likton-bg-page: #FFFFFF;
+  --likton-bg-content: #F9F9F9;
+
+  /* ── 텍스트 ── */
+  --likton-text-primary: #333333;
+
+  /* ── 테두리 ── */
+  --likton-border-default: #DDDDDD;
+  --likton-border-checkbox: #CCCCCC;
+
+  /* ── 섹션 박스 배경 (페이지 접근 권한 4개 영역) ── */
+  --likton-section-main: #FFFAE4;       /* 주요설정 */
+  --likton-section-logs: #E2EFF9;       /* 로그분석 */
+  --likton-section-transaction: #E2F9E6; /* 종합거래 */
+  --likton-section-system: #F0F2F5;     /* 시스템 */
+
+  /* ── 섹션 테두리 (선택 시 구분용) ── */
+  --likton-section-border-main: #fcd34d;
+  --likton-section-border-logs: #7dd3fc;
+  --likton-section-border-transaction: #6ee7b7;
+  --likton-section-border-system: #cbd5e1;
+
+  /* ── 버튼/슬롯 미선택 ── */
+  --likton-button-bg: #FFFFFF;
+  --likton-button-border: #DDDDDD;
+
+  /* ── 버튼/슬롯 선택 (핑크) ── */
+  --likton-selected-pink-bg: #FFF0F4;
+  --likton-selected-pink-border: #FFCCDA;
+
+  /* ── 버튼/슬롯 선택 (블루) ── */
+  --likton-selected-blue-bg: #EBF5FF;
+  --likton-selected-blue-border: #C2E0FF;
+
+  /* ── 버튼/슬롯 선택 (그린) ── */
+  --likton-selected-green-bg: #EEFFF0;
+  --likton-selected-green-border: #D1FFDB;
+}
