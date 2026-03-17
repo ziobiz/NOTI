@@ -9553,6 +9553,9 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     .logs-result-table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; table-layout: fixed; }
     .card .logs-result-table { max-width: 100%; }
+    .logs-result-table th { position: relative; }
+    .logs-result-resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 1; user-select: none; }
+    .logs-result-resizer:hover { background: rgba(37, 99, 235, 0.2); }
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
@@ -9618,32 +9621,67 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       </form>
       <table class="logs-result-table">
         <colgroup>
-          <col style="width:7%;" /><col style="width:8%;" /><col style="width:4%;" /><col style="width:4%;" /><col style="width:11%;" />
-          <col style="width:7%;" /><col style="width:7%;" /><col style="width:8%;" /><col style="width:5%;" /><col style="width:6%;" />
-          <col style="width:5%;" /><col style="width:12%;" /><col style="width:6%;" /><col style="width:10%;" />
+          <col id="logs-result-col-0" style="width:7%;" /><col id="logs-result-col-1" style="width:8%;" /><col id="logs-result-col-2" style="width:4%;" /><col id="logs-result-col-3" style="width:4%;" /><col id="logs-result-col-4" style="width:11%;" />
+          <col id="logs-result-col-5" style="width:7%;" /><col id="logs-result-col-6" style="width:10%;" /><col id="logs-result-col-7" style="width:8%;" /><col id="logs-result-col-8" style="width:5%;" /><col id="logs-result-col-9" style="width:6%;" />
+          <col id="logs-result-col-10" style="width:5%;" /><col id="logs-result-col-11" style="width:10%;" /><col id="logs-result-col-12" style="width:5%;" /><col id="logs-result-col-13" style="width:10%;" />
         </colgroup>
         <thead>
           <tr>
-            <th>${t(locale, 'pg_logs_th_received_date')}</th>
-            <th>${t(locale, 'pg_logs_th_received_time')}</th>
-            <th>route</th>
-            <th>${t(locale, 'common_env')}</th>
-            <th>merchant id</th>
-            <th>TransactionId</th>
-            <th>OrderNo</th>
-            <th>Amount</th>
-            <th>Currency</th>
-            <th>ICOPAY</th>
-            <th>${t(locale, 'dev_result_th_success')}</th>
-            <th>${t(locale, 'cr_th_fail_reason')}</th>
-            <th>${t(locale, 'logs_result_th_noti_kind')}</th>
-            <th>${t(locale, 'pg_logs_th_resend')}</th>
+            <th>${t(locale, 'pg_logs_th_received_date')}<div class="logs-result-resizer" data-col="0" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>${t(locale, 'pg_logs_th_received_time')}<div class="logs-result-resizer" data-col="1" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>route<div class="logs-result-resizer" data-col="2" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>${t(locale, 'common_env')}<div class="logs-result-resizer" data-col="3" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>merchant id<div class="logs-result-resizer" data-col="4" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>TransactionId<div class="logs-result-resizer" data-col="5" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>OrderNo<div class="logs-result-resizer" data-col="6" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>Amount<div class="logs-result-resizer" data-col="7" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>Currency<div class="logs-result-resizer" data-col="8" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>ICOPAY<div class="logs-result-resizer" data-col="9" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>${t(locale, 'dev_result_th_success')}<div class="logs-result-resizer" data-col="10" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>${t(locale, 'cr_th_fail_reason')}<div class="logs-result-resizer" data-col="11" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>${t(locale, 'logs_result_th_noti_kind')}<div class="logs-result-resizer" data-col="12" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            <th>${t(locale, 'pg_logs_th_resend')}<div class="logs-result-resizer" data-col="13" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
           </tr>
         </thead>
         <tbody>
           ${rows || '<tr><td colspan="14" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
+      <script>
+      (function(){
+        var table = document.querySelector('.logs-result-table');
+        if (!table) return;
+        var cols = table.querySelectorAll('col');
+        var headers = table.querySelectorAll('thead th');
+        var resizer = null, startX = 0, startW = 0, colIdx = 0;
+        function onMove(e) {
+          if (resizer === null) return;
+          var dx = e.clientX - startX;
+          var newW = Math.max(40, startW + dx);
+          if (cols[colIdx]) cols[colIdx].style.width = newW + 'px';
+        }
+        function onUp() {
+          resizer = null;
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+        }
+        table.querySelectorAll('.logs-result-resizer').forEach(function(el) {
+          el.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            colIdx = parseInt(el.getAttribute('data-col'), 10) || 0;
+            startX = e.clientX;
+            startW = headers[colIdx] ? headers[colIdx].offsetWidth : 70;
+            resizer = el;
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+          });
+        });
+      })();
+      </script>
       </div>
     </main>
   </div>
