@@ -232,6 +232,8 @@ const DEFAULT_FORCE_REFUND_WINDOW_DAYS = 0;
 const DEFAULT_PG_TRANSACTION_SYNC_INTERVAL_MINUTES = 30;
 const DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS = 2;
 const DEFAULT_PG_TRANSACTION_INITIAL_SYNC_MONTHS = 3;
+const DEFAULT_LOG_KEEP_DAYS_MEM = 7;
+const DEFAULT_LOG_KEEP_DAYS_DISK = 30;
 const DEFAULT_AMOUNT_DISPLAY_OP = '/'; // '*', '/', '+', '-'
 const DEFAULT_AMOUNT_DISPLAY_VALUE = 100;
 const DEFAULT_SMTP_PORT = 587;
@@ -268,6 +270,8 @@ function loadChillPayTransactionConfig() {
       pgTransactionSyncIntervalMinutes: Number.isFinite(o && o.pgTransactionSyncIntervalMinutes) && o.pgTransactionSyncIntervalMinutes > 0 ? Math.min(1440, o.pgTransactionSyncIntervalMinutes) : DEFAULT_PG_TRANSACTION_SYNC_INTERVAL_MINUTES,
       pgTransactionInitialSyncMonths: Number.isFinite(o && o.pgTransactionInitialSyncMonths) && o.pgTransactionInitialSyncMonths > 0 ? Math.min(60, o.pgTransactionInitialSyncMonths) : DEFAULT_PG_TRANSACTION_INITIAL_SYNC_MONTHS,
       pgTransactionIncrementalDays: Number.isFinite(o && o.pgTransactionIncrementalDays) && o.pgTransactionIncrementalDays > 0 ? Math.min(365, o.pgTransactionIncrementalDays) : DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
+      logKeepDaysMem: Number.isFinite(o && o.logKeepDaysMem) && o.logKeepDaysMem > 0 ? o.logKeepDaysMem : DEFAULT_LOG_KEEP_DAYS_MEM,
+      logKeepDaysDisk: Number.isFinite(o && o.logKeepDaysDisk) && o.logKeepDaysDisk > 0 ? o.logKeepDaysDisk : DEFAULT_LOG_KEEP_DAYS_DISK,
       timezone: (o && o.timezone && String(o.timezone).trim()) ? String(o.timezone).trim() : DEFAULT_CHILLPAY_TIMEZONE,
       useSandbox: !!(o && o.useSandbox === true),
       emailFrom: (o && o.emailFrom != null) ? String(o.emailFrom).trim() : '',
@@ -296,6 +300,8 @@ function loadChillPayTransactionConfig() {
       pgTransactionSyncIntervalMinutes: DEFAULT_PG_TRANSACTION_SYNC_INTERVAL_MINUTES,
       pgTransactionInitialSyncMonths: DEFAULT_PG_TRANSACTION_INITIAL_SYNC_MONTHS,
       pgTransactionIncrementalDays: DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
+      logKeepDaysMem: DEFAULT_LOG_KEEP_DAYS_MEM,
+      logKeepDaysDisk: DEFAULT_LOG_KEEP_DAYS_DISK,
       timezone: DEFAULT_CHILLPAY_TIMEZONE,
       useSandbox: APP_ENV === 'test',
       emailFrom: '',
@@ -329,6 +335,8 @@ function saveChillPayTransactionConfig(o) {
     pgTransactionSyncIntervalMinutes: o && Number.isFinite(o.pgTransactionSyncIntervalMinutes) && o.pgTransactionSyncIntervalMinutes > 0 ? Math.min(1440, o.pgTransactionSyncIntervalMinutes) : cur.pgTransactionSyncIntervalMinutes,
     pgTransactionInitialSyncMonths: o && Number.isFinite(o.pgTransactionInitialSyncMonths) && o.pgTransactionInitialSyncMonths > 0 ? Math.min(60, o.pgTransactionInitialSyncMonths) : cur.pgTransactionInitialSyncMonths,
     pgTransactionIncrementalDays: o && Number.isFinite(o.pgTransactionIncrementalDays) && o.pgTransactionIncrementalDays > 0 ? Math.min(365, o.pgTransactionIncrementalDays) : cur.pgTransactionIncrementalDays || DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
+    logKeepDaysMem: o && Number.isFinite(o.logKeepDaysMem) && o.logKeepDaysMem > 0 ? o.logKeepDaysMem : cur.logKeepDaysMem || DEFAULT_LOG_KEEP_DAYS_MEM,
+    logKeepDaysDisk: o && Number.isFinite(o.logKeepDaysDisk) && o.logKeepDaysDisk > 0 ? o.logKeepDaysDisk : cur.logKeepDaysDisk || DEFAULT_LOG_KEEP_DAYS_DISK,
     timezone: (o && o.timezone != null && String(o.timezone).trim()) ? String(o.timezone).trim() : cur.timezone,
     amountDisplayOp: (o && typeof o.amountDisplayOp === 'string' && ['*', '/', '+', '-'].includes(o.amountDisplayOp)) ? o.amountDisplayOp : cur.amountDisplayOp || DEFAULT_AMOUNT_DISPLAY_OP,
     amountDisplayValue: o && Number.isFinite(o.amountDisplayValue) ? o.amountDisplayValue : cur.amountDisplayValue,
@@ -834,7 +842,7 @@ function applyDevAmountRule(amountNum, currencyCode) {
 }
 
 // ========== 테스트 결제 환경 설정 (test payment configs) ==========
-// id -> { id, name, environment, merchantCode, routeNo, apiKey, md5Key, currency, paymentApiUrl, returnUrl, useTestResultPage }
+// id -> { id, name, environment, merchantCode, routeNo, apiKey, md5Key, currency, paymentApiUrl, recurringApiUrl, returnUrl, useTestResultPage }
 function loadTestConfigs() {
   const loaded = loadJsonConfig(TEST_CONFIGS_CONFIG_PATH, null);
   if (loaded && typeof loaded === 'object') {
@@ -922,6 +930,7 @@ const CONFIG_LOG_PATH = path.join(DATA_DIR, 'config-change.log');
 const VOID_REFUND_NOTI_LOG_PATH = path.join(DATA_DIR, 'void-refund-noti.log');
 const VOID_UI_DELETED_PATH = path.join(DATA_DIR, 'void-ui-deleted.log');
 const MAIL_LOG_PATH = path.join(DATA_DIR, 'mail-logs.log');
+const RECURRING_CALLBACK_LOG_PATH = path.join(DATA_DIR, 'recurring-callback.log');
 const VOID_UI_DELETED_RETENTION_DAYS = 31;
 
 // ChillPay PG 거래 동기화용 최근 API 오류 (페이지 상단 안내용)
@@ -1002,7 +1011,7 @@ function removeVoidUiDeletedById(id) {
   }
 }
 
-// ===== 공통: JSON Lines 로그 로더 (최근 7일 메모리 유지, 30일 초과 파일 정리) =====
+// ===== 공통: JSON Lines 로그 로더 (환경설정 기준: 메모리/파일 보관 기간) =====
 function loadJsonLogFile(filePath, isoKey) {
   try {
     if (!fs.existsSync(filePath)) return [];
@@ -1010,8 +1019,11 @@ function loadJsonLogFile(filePath, isoKey) {
     if (!raw.trim()) return [];
     const lines = raw.split('\n').filter((l) => l.trim().length > 0);
     const now = Date.now();
-    const memCutoff = now - 7 * 24 * 60 * 60 * 1000; // 최근 7일
-    const diskCutoff = now - 30 * 24 * 60 * 60 * 1000; // 최근 30일
+    const cfg = loadChillPayTransactionConfig();
+    const memDays = Number(cfg.logKeepDaysMem) > 0 ? cfg.logKeepDaysMem : DEFAULT_LOG_KEEP_DAYS_MEM;
+    const diskDays = Number(cfg.logKeepDaysDisk) > 0 ? cfg.logKeepDaysDisk : DEFAULT_LOG_KEEP_DAYS_DISK;
+    const memCutoff = now - memDays * 24 * 60 * 60 * 1000;
+    const diskCutoff = now - diskDays * 24 * 60 * 60 * 1000;
     const keptLines = [];
     const memEntries = [];
     for (const line of lines) {
@@ -1200,6 +1212,25 @@ function appendMailLog(entry) {
   }
 }
 
+// ===== ChillPay Recurring 콜백 로그 (최근 7일 메모리 + 파일에도 기록) =====
+let RECURRING_CALLBACK_LOGS = loadJsonLogFile(RECURRING_CALLBACK_LOG_PATH, 'at');
+function appendRecurringCallbackLog(entry) {
+  const nowIso = new Date().toISOString();
+  const log = { ...entry, at: nowIso };
+  try {
+    RECURRING_CALLBACK_LOGS.push(log);
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    RECURRING_CALLBACK_LOGS = RECURRING_CALLBACK_LOGS.filter((e) => {
+      const t = Date.parse(e.at || '');
+      return !Number.isNaN(t) && t >= cutoff;
+    });
+  } catch (_) {}
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFile(RECURRING_CALLBACK_LOG_PATH, JSON.stringify(log) + '\n', () => {});
+  } catch (_) {}
+}
+
 function normalizeCurrencyCode(value) {
   if (!value) return '';
   const v = String(value).toUpperCase();
@@ -1208,6 +1239,104 @@ function normalizeCurrencyCode(value) {
   if (v === 'THB' || v === '764') return '764'; // THB
   if (v === 'KRW' || v === 'KOR' || v === '410') return '410'; // KRW(KOR)
   return value;
+}
+
+// ===== 로그 날짜 필터 공통(방콕 기준) =====
+const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000; // Asia/Bangkok = UTC+7 (DST 없음)
+function toYmdUTC(d) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function getBangkokYmdFromIso(iso) {
+  if (!iso) return '';
+  const t = Date.parse(String(iso));
+  if (!t || Number.isNaN(t)) return '';
+  // 방콕 자정 기준 비교를 위해 ms에 오프셋을 더한 뒤 UTC 날짜를 사용
+  const bang = new Date(t + BANGKOK_OFFSET_MS);
+  return toYmdUTC(bang);
+}
+function getBangkokTodayYmd() {
+  return toYmdUTC(new Date(Date.now() + BANGKOK_OFFSET_MS));
+}
+function calcBangkokPresetRange(preset) {
+  const p = String(preset || '').toString().trim();
+  if (!p) return null;
+  const nowBang = new Date(Date.now() + BANGKOK_OFFSET_MS);
+  const base = new Date(Date.UTC(nowBang.getUTCFullYear(), nowBang.getUTCMonth(), nowBang.getUTCDate()));
+  const todayYmd = toYmdUTC(base);
+
+  const dayOfWeek = base.getUTCDay(); // 0=일요일
+  const mondayDiff = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+
+  const ymd = (d) => toYmdUTC(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())));
+
+  if (p === 'today') return { startDate: todayYmd, endDate: todayYmd };
+  if (p === 'yesterday') {
+    const d = new Date(base);
+    d.setUTCDate(d.getUTCDate() - 1);
+    const s = ymd(d);
+    return { startDate: s, endDate: s };
+  }
+  if (p === 'this_week') {
+    const start = new Date(base);
+    start.setUTCDate(start.getUTCDate() + mondayDiff);
+    const end = new Date(start);
+    end.setUTCDate(end.getUTCDate() + 6);
+    return { startDate: ymd(start), endDate: ymd(end) };
+  }
+  if (p === 'last_week') {
+    const end = new Date(base);
+    end.setUTCDate(end.getUTCDate() + mondayDiff - 1);
+    const start = new Date(end);
+    start.setUTCDate(start.getUTCDate() - 6);
+    return { startDate: ymd(start), endDate: ymd(end) };
+  }
+  if (p === 'this_month') {
+    const start = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 1));
+    const end = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0));
+    return { startDate: ymd(start), endDate: ymd(end) };
+  }
+  if (p === 'last_month') {
+    const start = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() - 1, 1));
+    const end = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 0));
+    return { startDate: ymd(start), endDate: ymd(end) };
+  }
+  return null;
+}
+
+function parseLogDateRangeFromQuery(q) {
+  const startDateQ = (q.startDate || '').toString().trim();
+  const endDateQ = (q.endDate || '').toString().trim();
+  const presetQ = (q.preset || '').toString().trim();
+  let startDate = startDateQ;
+  let endDate = endDateQ;
+  if (!startDate && !endDate && presetQ) {
+    const r = calcBangkokPresetRange(presetQ);
+    if (r) {
+      startDate = r.startDate;
+      endDate = r.endDate;
+    }
+  }
+  return { startDate, endDate, preset: presetQ };
+}
+
+function parseAllowedPerPage(qPerPage) {
+  const n = parseInt(qPerPage, 10);
+  const allowed = [100, 200, 300, 400, 500];
+  return allowed.includes(n) ? n : 100;
+}
+
+function buildQueryString(obj) {
+  const parts = [];
+  Object.keys(obj || {}).forEach((k) => {
+    const v = obj[k];
+    if (v === undefined || v === null) return;
+    if (typeof v === 'string' && v.trim() === '') return;
+    parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
+  });
+  return parts.join('&');
 }
 
 // 태국 시간(Asia/Bangkok) 문자열 생성 (노티 로그용)
@@ -1293,10 +1422,112 @@ const INTERNAL_NOTI_URL = process.env.INTERNAL_NOTI_URL || '';
 // ========== ChillPay Transaction API (Request Void / Request Refund) ==========
 const CHILLPAY_TRANSACTION_SANDBOX_BASE = 'https://sandbox-api-transaction.chillpay.co';
 const CHILLPAY_TRANSACTION_PROD_BASE = 'https://api-transaction.chillpay.co';
+const CHILLPAY_RECURRING_SANDBOX_BASE = 'https://sandbox-api-recurring.chillpay.co';
+const CHILLPAY_RECURRING_PROD_BASE = 'https://api-recurring.chillpay.co';
 
 function chillPayTransactionChecksum(concatStr, md5Key) {
   const s = (concatStr || '') + (md5Key ? String(md5Key).trim() : '');
   return crypto.createHash('md5').update(s, 'utf8').digest('hex').toLowerCase();
+}
+
+function chillPayRecurringChecksum(parts, merchantCode, apiKey, md5Key) {
+  // Recurring 문서: 지정된 순서대로 값 concat 후 merchantCode + apiKey + MD5 Secret Key 붙여 MD5
+  const p = Array.isArray(parts) ? parts : [];
+  const concat = p.map((v) => (v == null ? '' : String(v))).join('')
+    + String(merchantCode || '').trim()
+    + String(apiKey || '').trim();
+  return chillPayTransactionChecksum(concat, md5Key);
+}
+
+function getChillPayCredForEnv(env) {
+  const cfg = loadChillPayTransactionConfig();
+  const useSandbox = String(env || '').toLowerCase() === 'sandbox';
+  const cred = useSandbox ? cfg.sandbox : cfg.production;
+  return { useSandbox, cred };
+}
+
+async function chillPayRecurringRequest(env, pathSuffix, method, body, checksumParts, credOverride, baseUrlOverride) {
+  const { useSandbox, cred: credFromSettings } = getChillPayCredForEnv(env);
+  const cred = credOverride || credFromSettings;
+  const pickedBase = useSandbox ? CHILLPAY_RECURRING_SANDBOX_BASE : CHILLPAY_RECURRING_PROD_BASE;
+  const base = (baseUrlOverride && String(baseUrlOverride).trim())
+    ? String(baseUrlOverride).trim().replace(/\/+$/, '')
+    : pickedBase;
+  if (!cred || !cred.mid || !cred.apiKey || !cred.md5) {
+    return { success: false, error: 'ChillPay API 미설정 (mid/apiKey/md5)' };
+  }
+  const headers = {
+    'Content-Type': 'application/json',
+    'CHILLPAY-MerchantCode': cred.mid,
+    // Recurring 문서/예제에서 ApiKey 헤더 표기가 혼재되어 있어 둘 다 보낸다.
+    'CHILLPAY-ApiKey': cred.apiKey,
+    'CHILLPAY-Apikey': cred.apiKey,
+  };
+  const hasChecksum = checksumParts !== null && checksumParts !== undefined;
+  const checkSum = hasChecksum ? chillPayRecurringChecksum(checksumParts || [], cred.mid, cred.apiKey, cred.md5) : null;
+  const payload = hasChecksum ? { ...(body || {}), check_sum: checkSum } : { ...(body || {}) };
+  try {
+    const res = await axios({
+      url: base + pathSuffix,
+      method: method || 'POST',
+      headers,
+      data: (method || 'POST').toUpperCase() === 'GET' ? undefined : payload,
+      timeout: 20000,
+    });
+    const data = res.data;
+    if (data && (data.status === 200 || data.status === '200')) return { success: true, data };
+    return {
+      success: false,
+      error: (data && (data.message || data.Message)) || res.statusText || 'Recurring API 실패',
+      data,
+      debug: {
+        env,
+        useSandbox,
+        url: base + pathSuffix,
+        method: (method || 'POST').toUpperCase(),
+        merchantCode: cred.mid,
+        apiKey: maskChillPaySecret(cred.apiKey),
+        hasChecksum,
+      },
+    };
+  } catch (err) {
+    const respData = err.response && err.response.data ? err.response.data : null;
+    const msg = respData ? (respData.message || respData.Message || JSON.stringify(respData)) : err.message;
+    return {
+      success: false,
+      error: msg,
+      data: respData,
+      debug: {
+        env,
+        useSandbox,
+        url: base + pathSuffix,
+        method: (method || 'POST').toUpperCase(),
+        merchantCode: cred.mid,
+        apiKey: maskChillPaySecret(cred.apiKey),
+        hasChecksum,
+      },
+    };
+  }
+}
+
+function getTestConfigEnvKey(cfgEnv) {
+  const s = String(cfgEnv || '').toUpperCase().trim();
+  if (s === 'SANDBOX') return 'sandbox';
+  return 'production';
+}
+
+function getRecurringCredFromTestConfig(envKey, configId) {
+  const id = String(configId || '').trim();
+  const cfg = id ? TEST_CONFIGS.get(id) : null;
+  if (!cfg) return { ok: false, error: '테스트 환경(config)을 선택하세요.' };
+  const cfgEnvKey = getTestConfigEnvKey(cfg.environment);
+  if (cfgEnvKey !== envKey) return { ok: false, error: '선택한 테스트 환경의 Environment가 현재 ENV와 다릅니다.' };
+  const mid = String(cfg.merchantCode || '').trim();
+  const apiKey = String(cfg.apiKey || '').trim();
+  const md5 = String(cfg.md5Key || '').trim();
+  const recurringApiUrl = String(cfg.recurringApiUrl || '').trim();
+  if (!mid || !apiKey || !md5) return { ok: false, error: '선택한 테스트 환경에 MerchantCode/ApiKey/MD5Key가 없습니다.' };
+  return { ok: true, cred: { mid, apiKey, md5 }, routeNo: String(cfg.routeNo || '').trim(), recurringApiUrl };
 }
 
 async function chillPayRequestVoid(transactionId, useSandbox) {
@@ -2737,6 +2968,86 @@ async function handleNotiRequest(routeKey, req, res) {
 
   console.log('[수신] routeKey=', routeKey, 'Content-Type=', incomingContentType, 'body=', JSON.stringify(body));
 
+  // ===== Recurring(정기결제) 콜백: 기존 가맹점 callback URL(/noti/callback/번호)로도 수신 =====
+  // Recurring Schedule Callback payload는 recurring_schedule_id 등을 포함한다.
+  try {
+    const b = (body && typeof body === 'object') ? body : {};
+    const recurringScheduleId =
+      b.recurring_schedule_id || b.recurringScheduleId || b.RecurringScheduleId || b.recurringScheduleID || b.recurring_scheduleID;
+    const isCallbackRoute = typeof routeKey === 'string' && routeKey.startsWith('callback/');
+    if (isCallbackRoute && recurringScheduleId) {
+      const routeNo = routeKey.split('/')[1] || '';
+      // 전산 노티 설정(가맹점 enableInternal / internalTargetId / INTERNAL_TARGETS URL)을 동일하게 적용
+      let matchRecurring = null;
+      try { matchRecurring = findMerchantByRouteKey(routeKey); } catch (_) { matchRecurring = null; }
+      if (matchRecurring && matchRecurring.merchant) {
+        const merchant = matchRecurring.merchant;
+        const merchantId = matchRecurring.merchantId || '';
+        const kind = matchRecurring.kind || 'callback';
+        const enableInternal = merchant.enableInternal !== false;
+        if (enableInternal) {
+          let internalDeliverySuccess = false;
+          let internalTargetUrl = '';
+          try {
+            let internalUrl = null;
+            if (merchant.internalTargetId) internalUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
+            if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
+            if (internalUrl) {
+              internalTargetUrl = internalUrl;
+              let internalRes = await sendToInternal(internalUrl, b);
+              internalDeliverySuccess = internalRes.success;
+              if (!internalDeliverySuccess) {
+                await new Promise((r) => setTimeout(r, 2000));
+                internalRes = await sendToInternal(internalUrl, b);
+                internalDeliverySuccess = internalRes.success;
+              }
+            }
+            appendInternalLog({
+              storedAt: new Date().toISOString(),
+              merchantId,
+              routeNo: merchant.routeNo || routeNo || '',
+              internalTargetId: merchant.internalTargetId || '',
+              payload: b,
+              internalTargetUrl,
+              internalDeliveryStatus: internalTargetUrl ? (internalDeliverySuccess ? 'ok' : 'fail') : 'skip',
+              recurringScheduleId: String(recurringScheduleId),
+              recurring: true,
+            });
+          } catch (err) {
+            let failUrl = internalTargetUrl;
+            if (!failUrl && merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
+            if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
+            appendInternalLog({
+              storedAt: new Date().toISOString(),
+              merchantId,
+              routeNo: merchant.routeNo || routeNo || '',
+              internalTargetId: merchant.internalTargetId || '',
+              payload: b,
+              internalTargetUrl: failUrl || '',
+              internalDeliveryStatus: 'fail',
+              recurringScheduleId: String(recurringScheduleId),
+              recurring: true,
+            });
+          }
+        }
+      }
+      appendRecurringCallbackLog({
+        kind: 'recurring_schedule_callback',
+        routeNo: String(routeNo || '').trim() || '-',
+        routeKey,
+        headers: {
+          'content-type': incomingContentType || '',
+          'user-agent': (req.get && req.get('User-Agent')) || (req.headers && req.headers['user-agent']) || '',
+        },
+        body: b,
+        rawBody: rawBodyStr || undefined,
+        env,
+        ip: (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '',
+      });
+      return res.status(200).send('OK');
+    }
+  } catch (_) {}
+
   // POST로 들어온 요청이 브라우저(고객 리다이렉트)인지 판단. 브라우저면 결과 페이지로 302 리다이렉트.
   // 칠페이 서버 노티는 Api-Key를 보내고, 브라우저 폼 전송은 보내지 않음. Accept가 없어도 User-Agent로 보완.
   function isLikelyBrowserResultReturn(req) {
@@ -3299,10 +3610,11 @@ function getAdminSidebar(locale, adminUser, member, currentPath) {
     nav.push(`<details class="nav-group"${crOpen ? ' open' : ''}><summary class="nav-group-summary"><a href="/admin/transactions" class="nav-group-summary-link" style="color:inherit;text-decoration:none;" onclick="event.stopPropagation()">${crLabel}</a></summary><div class="nav-group-items">${crItems.join('')}</div></details>`);
   }
   if (can('test_config') || can('test_run') || can('test_history')) {
-    const testPaths = ['/admin/test-configs', '/admin/test-pay', '/admin/test-logs'];
+    const testPaths = ['/admin/test-configs', '/admin/test-pay', '/admin/test-recurring', '/admin/test-logs'];
     const testItems = [];
     if (can('test_config')) testItems.push(link('/admin/test-configs', t(locale, 'nav_test_config')));
     if (can('test_run')) testItems.push(link('/admin/test-pay', t(locale, 'nav_test_run')));
+    if (can('test_run')) testItems.push(link('/admin/test-recurring', t(locale, 'nav_test_recurring')));
     if (can('test_history')) testItems.push(link('/admin/test-logs', t(locale, 'nav_test_history')));
     nav.push(navGroup(t(locale, 'nav_test'), testPaths, testItems.join('')));
   }
@@ -4066,6 +4378,13 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
         + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_reset_months') + '</td>'
         + '<td class="time-desc-cell">' + t(locale, 'chillpay_cell_pg_incremental_days') + '</td>'
         + '</tr></tbody></table>'
+        + '<table class="chillpay-time-table" style="margin-top:10px;"><colgroup><col style="width:20%" /><col style="width:20%" /><col style="width:60%" /></colgroup><thead><tr>'
+        + '<th>노티/로그 메모리 보관(일)</th><th>노티/로그 파일 보관(일)</th><th></th>'
+        + '</tr></thead><tbody><tr>'
+        + '<td><input type="number" name="logKeepDaysMem" min="1" max="365" value="' + (c.logKeepDaysMem || DEFAULT_LOG_KEEP_DAYS_MEM) + '" style="text-align:center;" /> ' + t(locale, 'unit_day') + '</td>'
+        + '<td><input type="number" name="logKeepDaysDisk" min="1" max="365" value="' + (c.logKeepDaysDisk || DEFAULT_LOG_KEEP_DAYS_DISK) + '" style="text-align:center;" /> ' + t(locale, 'unit_day') + '</td>'
+        + '<td class="time-desc-cell">피지결과, 전산결과, 개발결과, 피지노티, 전산노티, 메일 로그의 보관 기간입니다.</td>'
+        + '</tr></tbody></table>'
           + '</section>'
           + '<input type="hidden" name="timezone" value="Asia/Bangkok" />'
           + '<div class="chillpay-submit"><button type="submit">' + t(locale, 'common_save') + '</button></div></form></div>'
@@ -4517,6 +4836,8 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
     .add-form-grid label input, .add-form-grid label select { margin-top:8px; display:block; }
     .add-form-perm-label { margin-top:8px !important; }
     .add-form-option-row { display:flex; align-items:center; gap:6px 10px; flex-wrap:nowrap; }
+    .add-form-option-row label { display:inline-flex; align-items:center; gap:6px; margin:0; }
+    .add-form-option-row label input { margin-top:0; display:inline-block; }
     .add-form-option-sep { color:#9ca3af; margin:0 4px; user-select:none; }
     input[type="text"], input[type="email"], input[type="date"], select { width:100%; max-width:280px; padding:8px 10px; border-radius:6px; border:1px solid #d1d5db; box-sizing:border-box; }
     .date-format-hint { font-size:12px; color:#6b7280; margin-left:4px; }
@@ -5643,6 +5964,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
   const locale = getLocale(req);
   const q = req.query || {};
   const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const resendKind = (q.resendKind || 'payment').toString().toLowerCase();
   const resendOkLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_ok') : t(locale, 'pg_logs_resend_pay_ok');
   const resendFailLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_fail') : t(locale, 'pg_logs_resend_pay_fail');
@@ -5674,8 +5996,35 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
 
   const filteredLogsPg = getEnvFilteredLogs(req);
-  const reversed = [...filteredLogsPg].slice().reverse();
-  const rows = reversed
+  let reversed = [...filteredLogsPg].slice().reverse();
+
+  // 날짜/프리셋 필터 + 페이징
+  const todayYmd = getBangkokTodayYmd();
+  const dr = parseLogDateRangeFromQuery(q);
+  const startDateStr = dr.startDate;
+  const endDateStr = dr.endDate;
+  const presetUsed = dr.preset;
+  const isTodayOnly = !!(startDateStr && endDateStr && startDateStr === endDateStr && startDateStr === todayYmd);
+
+  if (startDateStr || endDateStr) {
+    reversed = reversed.filter((log) => {
+      const iso = log.receivedAtIso || log.receivedAt;
+      const ymd = getBangkokYmdFromIso(iso);
+      if (!ymd) return false;
+      if (startDateStr && ymd < startDateStr) return false;
+      if (endDateStr && ymd > endDateStr) return false;
+      return true;
+    });
+  }
+
+  const perPage = parseAllowedPerPage(q.perPage);
+  const page = Math.max(1, parseInt(q.page, 10) || 1);
+  const totalCountPg = reversed.length;
+  const totalPagesPg = Math.max(1, Math.ceil(totalCountPg / perPage));
+  const pageNumPg = Math.min(page, totalPagesPg);
+  const pagedLogsPg = isTodayOnly ? reversed : reversed.slice((pageNumPg - 1) * perPage, pageNumPg * perPage);
+
+  const rows = pagedLogsPg
     .map((log, i) => {
       const realIndex = NOTI_LOGS.indexOf(log);
       const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
@@ -5816,8 +6165,37 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       ${resendMsg}
-      <h1>${t(locale, 'pg_logs_title')} (${filteredLogsPg.length})</h1>
+      <h1>${t(locale, 'pg_logs_title')} (${totalCountPg})</h1>
       <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'pg_logs_desc_full')}</p>
+      <form method="get" action="/admin/logs" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;">
+        <input type="hidden" name="resendKind" value="${esc(resendKind)}" />
+        <input type="hidden" name="perPage" value="${perPage}" />
+        <input type="hidden" name="page" value="1" />
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${(() => {
+            const make = (key, label) => {
+              const active = presetUsed === key;
+              const url = '/admin/logs?' + buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage });
+              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
+            };
+            return [
+              make('today', t(locale, 'tx_filter_today')),
+              make('yesterday', t(locale, 'tx_filter_yesterday')),
+              make('this_week', t(locale, 'tx_filter_this_week')),
+              make('last_week', t(locale, 'tx_filter_last_week')),
+              make('this_month', t(locale, 'tx_filter_this_month')),
+              make('last_month', t(locale, 'tx_filter_last_month')),
+            ].join('');
+          })()}
+        </div>
+      </form>
       <table>
         <colgroup><col class="col-date" /><col class="col-time" /><col class="col-narrow" /><col class="col-narrow" /><col class="col-status" /><col class="col-json" /><col class="col-json" /><col class="col-action" /><col class="col-void-refund" /></colgroup>
         <thead>
@@ -5837,6 +6215,27 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
           ${rows || `<tr><td colspan="9" style="text-align:center;color:#777;">${t(locale, 'pg_logs_empty')}</td></tr>`}
         </tbody>
       </table>
+      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <div>
+          ${t(locale, 'tx_per_page_bar')}: 
+          ${[100,200,300,400,500]
+            .map((n) => {
+              const url = '/admin/logs?' + buildQueryString({ ...(q || {}), perPage: n, page: 1 });
+              const active = perPage === n;
+              return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
+            })
+            .join('')}
+          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountPg}${t(locale, 'cr_count_suffix')})
+        </div>
+        ${isTodayOnly
+          ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>'
+          : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesPg }, (_, idx) => {
+              const i = idx + 1;
+              const url = '/admin/logs?' + buildQueryString({ ...(q || {}), page: i, perPage });
+              const active = i === pageNumPg;
+              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
+            }).join('')}</div>`}
+      </div>
       </div>
     </main>
   </div>
@@ -8567,7 +8966,35 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
   logs = logs.slice().sort((a, b) => {
     return (Date.parse(b.sentAtIso || '') || 0) - (Date.parse(a.sentAtIso || '') || 0);
   });
-  const rows = logs.map((log) => {
+
+  // 날짜/프리셋 필터 + 페이징
+  const todayYmd = getBangkokTodayYmd();
+  const dr = parseLogDateRangeFromQuery(q);
+  const startDateStr = dr.startDate;
+  const endDateStr = dr.endDate;
+  const presetUsed = dr.preset;
+  const isTodayOnly = !!(startDateStr && endDateStr && startDateStr === endDateStr && startDateStr === todayYmd);
+
+  let filteredForDateMail = logs;
+  if (startDateStr || endDateStr) {
+    filteredForDateMail = filteredForDateMail.filter((log) => {
+      const iso = log.sentAtIso || log.sentAt;
+      const ymd = getBangkokYmdFromIso(iso);
+      if (!ymd) return false;
+      if (startDateStr && ymd < startDateStr) return false;
+      if (endDateStr && ymd > endDateStr) return false;
+      return true;
+    });
+  }
+
+  const perPage = parseAllowedPerPage(q.perPage);
+  const page = Math.max(1, parseInt(q.page, 10) || 1);
+  const totalCountMail = filteredForDateMail.length;
+  const totalPagesMail = Math.max(1, Math.ceil(totalCountMail / perPage));
+  const pageNumMail = Math.min(page, totalPagesMail);
+  const pagedLogsMail = isTodayOnly ? filteredForDateMail : filteredForDateMail.slice((pageNumMail - 1) * perPage, pageNumMail * perPage);
+
+  const rows = pagedLogsMail.map((log) => {
     const dt = formatDateAndTimeTHJP(log.sentAtIso || log.sentAt || '');
     const typeLabel = log.type || 'void_manual_email';
     const tx = log.transactionId || '';
@@ -8619,7 +9046,60 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
     + '<th>Subject</th>'
     + '</tr></thead>';
   const mainContent = '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
-  res.send(renderCancelRefundPage(locale, adminUser, t(locale, 'nav_mail_logs') || 'Mail logs', mainContent, '', req.originalUrl, req.session.member, req, undefined, env));
+  const dateFilterForm = `<form method="get" action="/admin/mail-logs" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+    <input type="hidden" name="env" value="${esc(env)}" />
+    <input type="hidden" name="perPage" value="${perPage}" />
+    <input type="hidden" name="page" value="1" />
+    <label style="display:flex;flex-direction:column;gap:4px;">
+      <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+    </label>
+    <label style="display:flex;flex-direction:column;gap:4px;">
+      <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+    </label>
+    <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;">
+      ${(() => {
+        const make = (key, label) => {
+          const active = presetUsed === key;
+          const url = '/admin/mail-logs?' + buildQueryString({ ...(q || {}), env, preset: key, startDate: '', endDate: '', page: 1, perPage });
+          return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
+        };
+        return [
+          make('today', t(locale, 'tx_filter_today')),
+          make('yesterday', t(locale, 'tx_filter_yesterday')),
+          make('this_week', t(locale, 'tx_filter_this_week')),
+          make('last_week', t(locale, 'tx_filter_last_week')),
+          make('this_month', t(locale, 'tx_filter_this_month')),
+          make('last_month', t(locale, 'tx_filter_last_month')),
+        ].join('');
+      })()}
+    </div>
+  </form>`;
+
+  const paginationBarMail = `<div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+    <div>
+      ${t(locale, 'tx_per_page_bar')}: 
+      ${[100,200,300,400,500]
+        .map((n) => {
+          const url = '/admin/mail-logs?' + buildQueryString({ ...(q || {}), env, perPage: n, page: 1 });
+          const active = perPage === n;
+          return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
+        })
+        .join('')}
+      ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountMail}${t(locale, 'cr_count_suffix')})
+    </div>
+    ${isTodayOnly
+      ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>'
+      : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesMail }, (_, idx) => {
+          const i = idx + 1;
+          const url = '/admin/mail-logs?' + buildQueryString({ ...(q || {}), env, page: i, perPage });
+          const active = i === pageNumMail;
+          return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
+        }).join('')}</div>`}
+  </div>`;
+
+  const mainContentWithControls = dateFilterForm + mainContent + paginationBarMail;
+  res.send(renderCancelRefundPage(locale, adminUser, (t(locale, 'nav_mail_logs') || 'Mail logs') + ' (' + totalCountMail + ')', mainContentWithControls, '', req.originalUrl, req.session.member, req, undefined, env));
 });
 
 // 무효내역 요약: 자동무효/수동무효/이메일무효/자동환불/수동환불
@@ -8790,6 +9270,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     const receivedAt = log.receivedAtIso || log.receivedAt;
     const inNormal = isWithinRefundWindow(payDate, nowIso) || (receivedAt && isWithinRefundWindow(receivedAt, nowIso));
     const inForce = isWithinForceRefundWindow(payDate, nowIso) || (receivedAt && isWithinForceRefundWindow(receivedAt, nowIso));
+    // 환불 가능 기간은 끝났고, 강제환불 가능 기간 안에 있는 거래만 노출
     return !inNormal && inForce;
   });
   const perPageFv = Math.max(10, Math.min(100, parseInt(q.perPage, 10) || 25));
@@ -9486,7 +9967,34 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       return txId && txId === txFilter;
     });
   }
-  const rows = reversed
+  // 날짜/프리셋 필터 + 페이징
+  const todayYmd = getBangkokTodayYmd();
+  const dr = parseLogDateRangeFromQuery(q);
+  const startDateStr = dr.startDate;
+  const endDateStr = dr.endDate;
+  const presetUsed = dr.preset;
+  const isTodayOnly = !!(startDateStr && endDateStr && startDateStr === endDateStr && startDateStr === todayYmd);
+
+  if (startDateStr || endDateStr) {
+    reversed = reversed.filter((log) => {
+      const iso = log.receivedAtIso || log.receivedAt;
+      const ymd = getBangkokYmdFromIso(iso);
+      if (!ymd) return false;
+      if (startDateStr && ymd < startDateStr) return false;
+      if (endDateStr && ymd > endDateStr) return false;
+      return true;
+    });
+  }
+
+  const allowedPerPage = [100, 200, 300, 400, 500];
+  const perPage = parseAllowedPerPage(q.perPage);
+  const page = Math.max(1, parseInt(q.page, 10) || 1);
+  const totalCountResult = reversed.length;
+  const totalPagesResult = Math.max(1, Math.ceil(totalCountResult / perPage));
+  const pageNumResult = Math.min(page, totalPagesResult);
+  const pagedLogsResult = isTodayOnly ? reversed : reversed.slice((pageNumResult - 1) * perPage, pageNumResult * perPage);
+
+  const rows = pagedLogsResult
     .map((log) => {
       const realIndex = NOTI_LOGS.indexOf(log);
       const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
@@ -9609,7 +10117,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       ${resendMsg}
-      <h1>${t(locale, 'nav_pg_result')} (${filteredLogsResult.length})</h1>
+      <h1>${t(locale, 'nav_pg_result')} (${totalCountResult})</h1>
       <p style="font-size:13px;color:#555;">${t(locale, 'logs_result_desc')}</p>
       <form method="get" action="/admin/logs-result" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
         <label style="display:flex;align-items:center;gap:4px;">
@@ -9618,6 +10126,35 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
         </label>
         <button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;">${t(locale, 'common_search')}</button>
         ${txFilter ? `<a href="/admin/logs-result" style="margin-left:4px;font-size:12px;color:#2563eb;text-decoration:none;">${t(locale, 'common_search_reset')}</a>` : ''}
+      </form>
+      <form method="get" action="/admin/logs-result" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;">
+        <input type="hidden" name="txId" value="${esc(txFilter)}" />
+        <input type="hidden" name="perPage" value="${perPage}" />
+        <input type="hidden" name="page" value="1" />
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${(() => {
+            const make = (key, label) => {
+              const active = presetUsed === key;
+              const url = '/admin/logs-result?' + buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage: perPage });
+              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
+            };
+            return [
+              make('today', t(locale, 'tx_filter_today')),
+              make('yesterday', t(locale, 'tx_filter_yesterday')),
+              make('this_week', t(locale, 'tx_filter_this_week')),
+              make('last_week', t(locale, 'tx_filter_last_week')),
+              make('this_month', t(locale, 'tx_filter_this_month')),
+              make('last_month', t(locale, 'tx_filter_last_month')),
+            ].join('');
+          })()}
+        </div>
       </form>
       <table class="logs-result-table">
         <colgroup>
@@ -9647,6 +10184,27 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
           ${rows || '<tr><td colspan="14" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
+      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <div>
+          ${t(locale, 'tx_per_page_bar')}: 
+          ${allowedPerPage
+            .map((n) => {
+              const url = '/admin/logs-result?' + buildQueryString({ ...(q || {}), perPage: n, page: 1 });
+              const active = perPage === n;
+              return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
+            })
+            .join('')}
+          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountResult}${t(locale, 'cr_count_suffix')})
+        </div>
+        ${isTodayOnly
+          ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>'
+          : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesResult }, (_, idx) => {
+              const i = idx + 1;
+              const url = '/admin/logs-result?' + buildQueryString({ ...(q || {}), page: i, perPage });
+              const active = i === pageNumResult;
+              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
+            }).join('')}</div>`}
+      </div>
       <script>
       (function(){
         var table = document.querySelector('.logs-result-table');
@@ -10354,8 +10912,8 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
         .map((m) => String(m.routeNo).trim()),
     ),
   ];
-  const routeNoInUse =
-    editingConfig && usedRouteNos.includes(String(editingConfig.routeNo || '').trim());
+  // 편집 초기에는 경고를 띄우지 않고, 사용자가 입력값을 바꾸면 즉시 경고 표시(중복/혼동 가능)
+  const routeNoInUse = false;
 
   // 설정 ID 중복 검사용: 이미 등록된 ID 목록 (수정 시에는 현재 id 제외)
   const existingConfigIds = editingConfig
@@ -10368,10 +10926,18 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
       (cfg) =>
         `<tr>
           <td>
-            <form method="get" action="/admin/test-pay" style="margin:0;">
-              <input type="hidden" name="configId" value="${cfg.id}" />
-              <button type="submit" style="padding:4px 8px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:4px;cursor:pointer;">${t(locale, 'test_run_title')}</button>
-            </form>
+            <div style="display:flex;flex-direction:column;gap:4px;align-items:center;">
+              <form method="get" action="/admin/test-pay" style="margin:0;">
+                <input type="hidden" name="configId" value="${cfg.id}" />
+                <button type="submit" style="padding:4px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:4px;cursor:pointer;min-width:110px;">테스트 결제실행</button>
+              </form>
+              <form method="get" action="/admin/test-recurring" style="margin:0;">
+                <input type="hidden" name="env" value="${getTestConfigEnvKey(cfg.environment)}" />
+                <input type="hidden" name="configId" value="${cfg.id}" />
+                <input type="hidden" name="tab" value="generate" />
+                <button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;min-width:110px;">테스트 정기결제</button>
+              </form>
+            </div>
           </td>
           <td>${cfg.id}</td>
           <td>${cfg.name}</td>
@@ -10392,6 +10958,7 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
               : cfg.currency
           }</td>
           <td class="td-long">${cfg.paymentApiUrl || ''}</td>
+          <td class="td-long">${(cfg.recurringApiUrl || '') ? (cfg.recurringApiUrl.replace(/\/+$/, '') + '/api/v1/recurringschedule') : ''}</td>
           <td class="td-long">${cfg.useTestResultPage ? t(locale, 'test_config_use_result_page_flag') : (cfg.returnUrl || '')}</td>
           <td class="actions-cell">
             <div style="display:flex;flex-direction:column;gap:4px;align-items:center;">
@@ -10419,9 +10986,14 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
     h1 { margin-bottom: 8px; }
     h2 { margin-top: 32px; }
     table { border-collapse: collapse; width: 100%; background:#fff; border-radius:8px; overflow:hidden; table-layout:fixed; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 14px; vertical-align:top; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align:middle; }
     th { background: #e5f0ff; text-align: center; }
     td { text-align: center; }
+    .test-config-table th,
+    .test-config-table td {
+      text-align: center;
+      vertical-align: middle;
+    }
     tr:nth-child(even) { background:#f9fafb; }
     .td-long { word-break:break-all; white-space:normal; font-size:12px; line-height:1.4; }
     .actions-cell { text-align:center; }
@@ -10543,6 +11115,10 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
             <input type="text" name="paymentApiUrl" value="${editingConfig ? (editingConfig.paymentApiUrl || '') : ''}" placeholder="${t(locale, 'test_config_placeholder_payment_api')}" />
           </label>
           <label>
+            Recurring API URL
+            <input type="text" name="recurringApiUrl" value="${editingConfig ? (editingConfig.recurringApiUrl || '') : ''}" placeholder="(empty = auto: sandbox/prod recurring URL)" />
+          </label>
+          <label>
             ${t(locale, 'test_config_label_return_url')}
             <input type="text" name="returnUrl" value="${editingConfig ? (editingConfig.returnUrl || '') : ''}" placeholder="${t(locale, 'test_config_placeholder_return_url')}" />
           </label>
@@ -10563,7 +11139,7 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
       </div>
       <div class="card">
         <h2>${t(locale, 'test_config_list_title')}</h2>
-        <table>
+        <table class="test-config-table">
           <thead>
             <tr>
               <th>${t(locale, 'test_config_th_run')}</th>
@@ -10575,7 +11151,8 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
               <th>API KEY</th>
               <th>MD5 Key</th>
               <th>Currency</th>
-              <th>Payment API URL</th>
+              <th>Payment API</th>
+              <th>Recurring API</th>
               <th>ReturnUrl</th>
               <th class="actions-cell">${t(locale, 'test_config_th_manage')}</th>
             </tr>
@@ -10583,7 +11160,7 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
           <tbody>
             ${
               rows ||
-              '<tr><td colspan="11" style="text-align:center;color:#777;">' + t(locale, 'test_config_no_data') + '</td></tr>'
+              '<tr><td colspan="12" style="text-align:center;color:#777;">' + t(locale, 'test_config_no_data') + '</td></tr>'
             }
           </tbody>
         </table>
@@ -10607,6 +11184,7 @@ app.post('/admin/test-configs', requireAuth, requirePage('test_config'), (req, r
     md5Key,
     currency,
     paymentApiUrl,
+    recurringApiUrl,
     returnUrl,
     useTestResultPage,
   } = req.body;
@@ -10633,6 +11211,11 @@ app.post('/admin/test-configs', requireAuth, requirePage('test_config'), (req, r
     '';
   const before = TEST_CONFIGS.get(idTrim) || null;
 
+  const envKey = getTestConfigEnvKey(environment);
+  const recurringApiUrlFinal = (recurringApiUrl != null && String(recurringApiUrl).trim() !== '')
+    ? String(recurringApiUrl).trim()
+    : (envKey === 'sandbox' ? CHILLPAY_RECURRING_SANDBOX_BASE : CHILLPAY_RECURRING_PROD_BASE);
+
   TEST_CONFIGS.set(idTrim, {
     id: idTrim,
     name,
@@ -10643,6 +11226,7 @@ app.post('/admin/test-configs', requireAuth, requirePage('test_config'), (req, r
     md5Key,
     currency,
     paymentApiUrl: paymentApiUrl || '',
+    recurringApiUrl: recurringApiUrlFinal,
     returnUrl: returnUrl || '',
     useTestResultPage: useTestResultPage === 'on',
   });
@@ -10690,6 +11274,424 @@ app.post('/admin/test-configs/delete', requireAuth, requirePage('test_config'), 
   });
 
   return res.redirect('/admin/test-configs');
+});
+
+// ===== ChillPay Recurring(정기결제) 테스트 =====
+// (호환용) 예전 Recurring 콜백 URL → /noti/callback/{routeNo}로 통일 처리
+app.post('/noti/recurring-schedule-callback', async (req, res) => {
+  await handleNotiRequest('callback/0', req, res);
+});
+app.post('/noti/recurring-schedule-callback/:routeNo', async (req, res) => {
+  await handleNotiRequest('callback/' + String(req.params.routeNo || '').trim(), req, res);
+});
+
+app.get('/admin/test-recurring', requireAuth, requirePage('test_run'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const q = req.query || {};
+  const chillCfgForDefaultEnv = loadChillPayTransactionConfig();
+  const env = (q.env != null && String(q.env).trim() !== '')
+    ? ((q.env || '').toString() === 'sandbox' ? 'sandbox' : 'production')
+    : (chillCfgForDefaultEnv && chillCfgForDefaultEnv.useSandbox ? 'sandbox' : 'production');
+  const tab = (q.tab || 'generate').toString();
+  const configId = (q.configId || '').toString().trim();
+  const cbRouteNo = (q.cbRouteNo || '').toString().trim();
+  const merchantCodeOverride = (q.mid || q.MID || q.merchantCode || '').toString().trim();
+  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+  const nowDate = new Date();
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const flash = (req.session && req.session.lastRecurringResult) ? req.session.lastRecurringResult : null;
+  if (req.session) req.session.lastRecurringResult = null;
+
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
+  // 테스트 환경 선택(ENV 필터)
+  const configsForEnv = Array.from(TEST_CONFIGS.entries())
+    .map(([id, c]) => ({ id, c }))
+    .filter((x) => getTestConfigEnvKey(x.c.environment) === env);
+  const configIdsForEnv = new Set(configsForEnv.map((x) => String(x.id)));
+  const safeConfigId = (configId && configIdsForEnv.has(String(configId))) ? configId : '';
+  const defaultConfigId = safeConfigId || (configsForEnv[0] ? configsForEnv[0].id : '');
+  const selectedCfg = defaultConfigId ? TEST_CONFIGS.get(defaultConfigId) : null;
+
+  // 테스트 환경(Route No) 기반 콜백 URL (기본=선택한 config의 Route No)
+  const normalizeRouteNo = (v) => {
+    const raw = String(v || '').trim();
+    if (!raw) return '';
+    // routeNo가 "20,20" 같은 형태로 저장된 경우가 있어 첫 번째 값만 사용
+    const first = raw.split(',').map((x) => x.trim()).filter(Boolean)[0] || '';
+    return first;
+  };
+  const allRouteNos = Array.from(TEST_CONFIGS.values())
+    .flatMap((c) => String(c.routeNo || '').split(',').map((x) => x.trim()).filter(Boolean));
+  const uniqueRouteNos = Array.from(new Set(allRouteNos.map(normalizeRouteNo).filter(Boolean)));
+  const cfgRouteNo = selectedCfg ? normalizeRouteNo(selectedCfg.routeNo) : '';
+  const defaultCbRouteNo = normalizeRouteNo(cbRouteNo) || cfgRouteNo || (uniqueRouteNos[0] || '');
+  const callbackUrl = baseUrl + '/noti/callback' + (defaultCbRouteNo ? '/' + encodeURIComponent(defaultCbRouteNo) : '');
+  const envOpt = (val, label) => `<option value="${val}"${env === val ? ' selected' : ''}>${label}</option>`;
+  const tabs = [
+    { id: 'generate', label: t(locale, 'test_recurring_tab_generate') || 'Generate schedule' },
+    { id: 'get', label: t(locale, 'test_recurring_tab_get') || 'Get schedule' },
+    { id: 'search', label: t(locale, 'test_recurring_tab_search') || 'Search schedules' },
+    { id: 'cancel', label: t(locale, 'test_recurring_tab_cancel') || 'Cancel schedule' },
+    { id: 'callbacks', label: t(locale, 'test_recurring_tab_callbacks') || 'Callbacks' },
+  ];
+  const tabLinks = tabs.map((t2) => `<a href="/admin/test-recurring?env=${encodeURIComponent(env)}&tab=${encodeURIComponent(t2.id)}${defaultConfigId ? '&configId=' + encodeURIComponent(defaultConfigId) : ''}${defaultCbRouteNo ? '&cbRouteNo=' + encodeURIComponent(defaultCbRouteNo) : ''}${merchantCodeOverride ? '&mid=' + encodeURIComponent(merchantCodeOverride) : ''}" style="padding:6px 10px;border-radius:8px;text-decoration:none;font-size:12px;background:${tab === t2.id ? '#2563eb' : '#e5e7eb'};color:${tab === t2.id ? '#fff' : '#374151'};">${esc(t2.label)}</a>`).join(' ');
+
+  const mkAlert = () => {
+    if (!flash) return '';
+    const ok = !!flash.success;
+    const title = ok ? (t(locale, 'test_recurring_ok') || 'Success') : (t(locale, 'test_recurring_fail') || 'Fail');
+    const msg = ok ? (flash.data && flash.data.message ? flash.data.message : '') : (flash.error || '');
+    const detailObj = flash.debug ? { ...(flash.data || {}), debug: flash.debug } : (flash.data || null);
+    const detail = detailObj ? JSON.stringify(detailObj, null, 2) : '';
+    return `<div style="padding:10px 12px;border-radius:10px;margin:12px 0;border:1px solid ${ok ? '#6ee7b7' : '#fca5a5'};background:${ok ? '#ecfdf5' : '#fef2f2'};color:${ok ? '#065f46' : '#991b1b'};">
+      <div style="font-weight:700;margin-bottom:6px;">${esc(title)}</div>
+      ${msg ? `<div style="font-size:12px;margin-bottom:6px;">${esc(msg)}</div>` : ''}
+      ${detail ? `<pre style="white-space:pre-wrap;margin:0;background:rgba(255,255,255,0.7);padding:8px;border-radius:8px;color:#111827;font-size:11px;max-height:260px;overflow:auto;">${esc(detail)}</pre>` : ''}
+    </div>`;
+  };
+
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate() + 1).padStart(2, '0');
+  const defaultDue = `${yyyy}-${mm}-${dd}`;
+
+  let content = '';
+  if (tab === 'get') {
+    content = `
+      <form method="post" action="/admin/test-recurring/get" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;">
+        <input type="hidden" name="env" value="${esc(env)}" />
+        <input type="hidden" name="configId" value="${esc(defaultConfigId)}" />
+        <input type="hidden" name="cbRouteNo" value="${esc(defaultCbRouteNo)}" />
+        <input type="hidden" name="merchantCodeOverride" value="${esc(merchantCodeOverride)}" />
+        <label style="display:flex;flex-direction:column;font-size:12px;">Recurring Schedule ID
+          <input type="text" name="recurring_schedule_id" required style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;min-width:260px;" />
+        </label>
+        <button type="submit" style="padding:9px 14px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${esc(t(locale, 'test_recurring_btn_get') || 'Get')}</button>
+      </form>
+    `;
+  } else if (tab === 'search') {
+    content = `
+      <form method="post" action="/admin/test-recurring/search" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;">
+        <input type="hidden" name="env" value="${esc(env)}" />
+        <input type="hidden" name="configId" value="${esc(defaultConfigId)}" />
+        <input type="hidden" name="cbRouteNo" value="${esc(defaultCbRouteNo)}" />
+        <input type="hidden" name="merchantCodeOverride" value="${esc(merchantCodeOverride)}" />
+        <label style="display:flex;flex-direction:column;font-size:12px;">Start (UTC)
+          <input type="datetime-local" name="start_date" required style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">End (UTC)
+          <input type="datetime-local" name="end_date" required style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">Status
+          <input type="text" name="status" placeholder="(optional)" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;min-width:120px;" />
+        </label>
+        <button type="submit" style="padding:9px 14px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${esc(t(locale, 'test_recurring_btn_search') || 'Search')}</button>
+      </form>
+      <div style="margin-top:10px;font-size:12px;color:#6b7280;">${esc(t(locale, 'test_recurring_search_hint') || 'Date range must be UTC. Results are returned by ChillPay recurring API.')}</div>
+    `;
+  } else if (tab === 'cancel') {
+    content = `
+      <form method="post" action="/admin/test-recurring/cancel" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;">
+        <input type="hidden" name="env" value="${esc(env)}" />
+        <input type="hidden" name="configId" value="${esc(defaultConfigId)}" />
+        <input type="hidden" name="cbRouteNo" value="${esc(defaultCbRouteNo)}" />
+        <input type="hidden" name="merchantCodeOverride" value="${esc(merchantCodeOverride)}" />
+        <label style="display:flex;flex-direction:column;font-size:12px;">Recurring Schedule ID
+          <input type="text" name="recurring_schedule_id" required style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;min-width:260px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">Reason
+          <input type="text" name="cancellation_reason" required style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;min-width:220px;" />
+        </label>
+        <button type="submit" style="padding:9px 14px;background:#dc2626;color:#fff;border:none;border-radius:8px;cursor:pointer;" onclick="return confirm('${(t(locale, 'test_recurring_confirm_cancel') || 'Cancel this schedule?').replace(/'/g, "\\'")}');">${esc(t(locale, 'test_recurring_btn_cancel') || 'Cancel')}</button>
+      </form>
+    `;
+  } else if (tab === 'callbacks') {
+    const list = (Array.isArray(RECURRING_CALLBACK_LOGS) ? RECURRING_CALLBACK_LOGS : [])
+      .filter((e) => !defaultCbRouteNo || String(e.routeNo || '') === String(defaultCbRouteNo))
+      .slice()
+      .sort((a, b) => (Date.parse(b.at || '') || 0) - (Date.parse(a.at || '') || 0))
+      .slice(0, 50);
+    const rows = list.map((e) => {
+      const at = e.at || '';
+      const rn = e.routeNo || '';
+      const sid = (e.body && (e.body.recurring_schedule_id || e.body.RecurringScheduleId)) || '';
+      const status = (e.body && (e.body.status || e.body.Status)) || '';
+      return `<tr><td style="border:1px solid #e5e7eb;padding:6px 8px;font-size:12px;">${esc(at)}</td><td style="border:1px solid #e5e7eb;padding:6px 8px;font-size:12px;">${esc(String(rn))}</td><td style="border:1px solid #e5e7eb;padding:6px 8px;font-size:12px;">${esc(String(sid))}</td><td style="border:1px solid #e5e7eb;padding:6px 8px;font-size:12px;">${esc(String(status))}</td><td style="border:1px solid #e5e7eb;padding:6px 8px;font-size:11px;word-break:break-all;max-width:520px;">${esc(JSON.stringify(e.body || {}))}</td></tr>`;
+    }).join('');
+    content = `
+      <div style="font-size:12px;color:#374151;margin-bottom:8px;">Callback URL (RouteNo): <code style="background:#f3f4f6;padding:2px 6px;border-radius:6px;">${esc(callbackUrl)}</code></div>
+      <table style="width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;">
+        <thead><tr style="background:#f3f4f6;"><th style="border:1px solid #e5e7eb;padding:6px 8px;font-size:12px;">At</th><th style="border:1px solid #e5e7eb;padding:6px 8px;font-size:12px;">RouteNo</th><th style="border:1px solid #e5e7eb;padding:6px 8px;font-size:12px;">ScheduleId</th><th style="border:1px solid #e5e7eb;padding:6px 8px;font-size:12px;">Status</th><th style="border:1px solid #e5e7eb;padding:6px 8px;font-size:12px;">Body</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5" style="border:1px solid #e5e7eb;padding:10px;text-align:center;color:#6b7280;">No callbacks yet</td></tr>'}</tbody>
+      </table>
+    `;
+  } else {
+    // generate
+    const cbRouteOptions = uniqueRouteNos.length
+      ? uniqueRouteNos.map((rn) => `<option value="${esc(rn)}"${String(defaultCbRouteNo) === String(rn) ? ' selected' : ''}>${esc(rn)}</option>`).join('')
+      : '<option value="">(no routeNo in test configs)</option>';
+    content = `
+      <form method="post" action="/admin/test-recurring/generate" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px 14px;align-items:end;">
+        <input type="hidden" name="env" value="${esc(env)}" />
+        <input type="hidden" name="configId" value="${esc(defaultConfigId)}" />
+        <input type="hidden" name="cbRouteNo" value="${esc(defaultCbRouteNo)}" />
+        <input type="hidden" name="merchantCodeOverride" value="${esc(merchantCodeOverride)}" />
+        <label style="display:flex;flex-direction:column;font-size:12px;">Callback Route No
+          <select name="cbRouteNo" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;">${cbRouteOptions}</select>
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">customer_id
+          <input type="text" name="customer_id" value="CU00001" required style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">customer_email
+          <input type="email" name="customer_email" value="test@gmail.com" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">order_no
+          <input type="text" name="order_no" value="Order${Date.now()}" required style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">currency
+          <select name="currency" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;">
+            <option value="THB">THB</option>
+            <option value="JPY">JPY</option>
+            <option value="USD">USD</option>
+            <option value="KRW">KRW</option>
+          </select>
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">description
+          <input type="text" name="description" value="Test subscription" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">billing_due_date (YYYY-MM-DD)
+          <input type="date" name="billing_due_date" value="${esc(defaultDue)}" required style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">billing_cycle
+          <select name="billing_cycle" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;">
+            <option value="day">day</option>
+            <option value="month" selected>month</option>
+            <option value="year">year</option>
+          </select>
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">billing_round
+          <input type="number" name="billing_round" value="1" required style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">total_billing (optional)
+          <input type="number" name="total_billing" placeholder="(empty = indefinite)" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:12px;">amount_per_round
+          <input type="number" step="0.01" name="amount_per_round" value="1550" required style="padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;" />
+        </label>
+        <div style="grid-column:1/-1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px;">
+          <button type="submit" style="padding:10px 16px;background:#2563eb;color:#fff;border:none;border-radius:10px;cursor:pointer;font-size:13px;">${esc(t(locale, 'test_recurring_btn_generate') || 'Generate')}</button>
+          <span style="font-size:12px;color:#6b7280;">Callback URL (RouteNo): <code style="background:#f3f4f6;padding:2px 6px;border-radius:6px;">${esc(callbackUrl)}</code></span>
+        </div>
+      </form>
+      <div style="margin-top:10px;font-size:12px;color:#6b7280;">${esc(t(locale, 'test_recurring_generate_hint') || 'After success, open verify_payment_url to register/verify the card. Then ChillPay will charge per schedule and send callbacks to your callback URL.')}</div>
+    `;
+  }
+
+  const configSelect = configsForEnv.length
+    ? ('<label style="font-size:12px;color:#374151;">' + esc(t(locale, 'test_run_label_env') || 'Config') + '</label><select name="configId" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:8px;max-width:260px;">'
+      + configsForEnv.map((x) => '<option value="' + esc(x.id) + '"' + (String(defaultConfigId) === String(x.id) ? ' selected' : '') + '>' + esc((x.c && x.c.name) ? (x.c.name + ' (' + x.id + ')') : x.id) + '</option>').join('')
+      + '</select>')
+    : '<input type="hidden" name="configId" value="" />';
+
+  const cbRouteSelect = uniqueRouteNos.length
+    ? ('<label style="font-size:12px;color:#374151;">RouteNo</label><select name="cbRouteNo" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:8px;">'
+      + uniqueRouteNos.map((rn) => '<option value="' + esc(rn) + '"' + (String(defaultCbRouteNo) === String(rn) ? ' selected' : '') + '>' + esc(rn) + '</option>').join('')
+      + '</select>')
+    : '<input type="hidden" name="cbRouteNo" value="" />';
+
+  const envSwitcher = `<form method="get" action="/admin/test-recurring" style="margin-bottom:10px;">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+    <input type="hidden" name="tab" value="${esc(tab)}" />
+    <label style="font-size:12px;color:#374151;">ENV</label>
+    <select name="env" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:8px;">
+      ${envOpt('production', 'production')}
+      ${envOpt('sandbox', 'sandbox')}
+    </select>
+    ${configSelect}
+    ${cbRouteSelect}
+    <label style="font-size:12px;color:#374151;">MID</label>
+    <input type="text" name="mid" value="${esc(merchantCodeOverride)}" placeholder="(optional override)" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:8px;max-width:220px;" />
+    </div>
+    <div style="margin-top:8px;display:flex;justify-content:flex-end;">
+      <button type="submit" style="padding:7px 14px;background:#111827;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;min-width:90px;">확인</button>
+    </div>
+  </form>`;
+
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${t(locale, 'test_recurring_title') || 'Recurring test'}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+    label { display:block; font-size: 12px; color:#374151; }
+    input[type="text"], input[type="email"], input[type="number"], input[type="date"], input[type="datetime-local"], select {
+      width: 100%;
+      padding: 8px 10px;
+      box-sizing: border-box;
+      border-radius: 8px;
+      border: 1px solid #d1d5db;
+      background: #ffffff;
+      font-size: 13px;
+    }
+    input:focus, select:focus { outline:none; border-color:#60a5fa; box-shadow:0 0 0 1px #bfdbfe; }
+    button { padding: 9px 14px; border:none; border-radius: 10px; cursor:pointer; font-size: 13px; }
+
+    .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav-group { margin-bottom:2px; border:1px solid transparent; border-radius:6px; }
+    .nav-group-summary { font-size:14px; font-weight:600; color:#e5e7eb; padding:6px 8px; cursor:pointer; list-style:none; text-transform:uppercase; letter-spacing:0.06em; display:flex; align-items:center; justify-content:space-between; border-radius:6px; }
+    .nav-group-summary::-webkit-details-marker { display:none; }
+    .nav-group-summary::marker { content:""; }
+    .nav-group-summary::after { content:"\\25BC"; font-size:14px; opacity:0.7; transition:transform 0.15s ease; flex-shrink:0; }
+    .nav-group[open] .nav-group-summary::after { transform:rotate(-180deg); }
+    .nav-group-items { padding-left:4px; padding-bottom:4px; }
+    .nav-group-items a { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:13px; border-radius:6px; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(59, 130, 246, 0.35); color:#dbeafe; }
+
+    .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
+    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
+    .topbar span { margin-right:12px; }
+    .card { background:#fff; padding:16px 20px; border-radius:12px; box-shadow:0 10px 25px rgba(15,23,42,0.06); border:1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
+      <div class="card">
+        <h1 style="margin:0 0 6px;">${t(locale, 'test_recurring_title') || 'Recurring test'}</h1>
+        <div style="font-size:12px;color:#6b7280;margin-bottom:10px;">${t(locale, 'test_recurring_desc') || 'Test ChillPay recurring schedule APIs (generate/get/search/cancel) and callbacks.'}</div>
+        ${envSwitcher}
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">${tabLinks}</div>
+        ${mkAlert()}
+        ${content}
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
+});
+
+app.post('/admin/test-recurring/generate', requireAuth, requirePage('test_run'), async (req, res) => {
+  const locale = getLocale(req);
+  const b = req.body || {};
+  const env = (b.env || '').toString() === 'sandbox' ? 'sandbox' : 'production';
+  const cbRouteNo = String(b.cbRouteNo || '').trim();
+  const configId = String(b.configId || '').trim();
+  const merchantCodeOverride = String(b.merchantCodeOverride || '').trim();
+  const credPick = getRecurringCredFromTestConfig(env, configId);
+  if (!credPick.ok) {
+    if (req.session) req.session.lastRecurringResult = { success: false, error: credPick.error };
+    return res.redirect('/admin/test-recurring?env=' + encodeURIComponent(env) + '&tab=generate' + (configId ? '&configId=' + encodeURIComponent(configId) : '') + (cbRouteNo ? '&cbRouteNo=' + encodeURIComponent(cbRouteNo) : '') + (merchantCodeOverride ? '&mid=' + encodeURIComponent(merchantCodeOverride) : ''));
+  }
+  const cred = merchantCodeOverride ? { ...credPick.cred, mid: merchantCodeOverride } : credPick.cred;
+  const customer_id = String(b.customer_id || '').trim();
+  const customer_email = String(b.customer_email || '').trim();
+  const order_no = String(b.order_no || '').trim();
+  const currency = normalizeCurrencyCode(String(b.currency || '').trim());
+  const description = String(b.description || '').trim();
+  const billing_due_date = String(b.billing_due_date || '').trim();
+  const billing_cycle = String(b.billing_cycle || '').trim();
+  const billing_round = Number(b.billing_round || 0);
+  const total_billing = b.total_billing != null && String(b.total_billing).trim() !== '' ? Number(b.total_billing) : undefined;
+  const amount_per_round = Number(b.amount_per_round || 0);
+  const body = {
+    customer_id,
+    customer_email,
+    order_no,
+    currency,
+    description,
+    billing_due_date,
+    billing_cycle,
+    billing_round,
+    ...(total_billing != null ? { total_billing } : {}),
+    amount_per_round,
+  };
+  const checksumParts = [
+    customer_id,
+    customer_email,
+    order_no,
+    currency,
+    description,
+    billing_due_date,
+    billing_cycle,
+    String(billing_round),
+    total_billing != null ? String(total_billing) : '',
+    String(amount_per_round),
+  ];
+  const result = await chillPayRecurringRequest(env, '/api/v1/recurringschedule', 'POST', body, checksumParts, cred, credPick.recurringApiUrl);
+  if (req.session) req.session.lastRecurringResult = result;
+  return res.redirect('/admin/test-recurring?env=' + encodeURIComponent(env) + '&tab=generate' + (configId ? '&configId=' + encodeURIComponent(configId) : '') + (cbRouteNo ? '&cbRouteNo=' + encodeURIComponent(cbRouteNo) : '') + (merchantCodeOverride ? '&mid=' + encodeURIComponent(merchantCodeOverride) : ''));
+});
+
+app.post('/admin/test-recurring/get', requireAuth, requirePage('test_run'), async (req, res) => {
+  const env = (req.body || {}).env === 'sandbox' ? 'sandbox' : 'production';
+  const cbRouteNo = String((req.body || {}).cbRouteNo || '').trim();
+  const configId = String((req.body || {}).configId || '').trim();
+  const merchantCodeOverride = String((req.body || {}).merchantCodeOverride || '').trim();
+  const credPick = getRecurringCredFromTestConfig(env, configId);
+  const cred = (credPick && credPick.ok && merchantCodeOverride) ? { ...credPick.cred, mid: merchantCodeOverride } : (credPick && credPick.ok ? credPick.cred : null);
+  const id = String((req.body || {}).recurring_schedule_id || '').trim();
+  const result = credPick.ok
+    ? await chillPayRecurringRequest(env, '/api/v1/recurringschedule/get/' + encodeURIComponent(id), 'GET', null, null, cred, credPick.recurringApiUrl)
+    : { success: false, error: credPick.error };
+  if (req.session) req.session.lastRecurringResult = result;
+  return res.redirect('/admin/test-recurring?env=' + encodeURIComponent(env) + '&tab=get' + (configId ? '&configId=' + encodeURIComponent(configId) : '') + (cbRouteNo ? '&cbRouteNo=' + encodeURIComponent(cbRouteNo) : '') + (merchantCodeOverride ? '&mid=' + encodeURIComponent(merchantCodeOverride) : ''));
+});
+
+app.post('/admin/test-recurring/search', requireAuth, requirePage('test_run'), async (req, res) => {
+  const env = (req.body || {}).env === 'sandbox' ? 'sandbox' : 'production';
+  const cbRouteNo = String((req.body || {}).cbRouteNo || '').trim();
+  const configId = String((req.body || {}).configId || '').trim();
+  const merchantCodeOverride = String((req.body || {}).merchantCodeOverride || '').trim();
+  const credPick = getRecurringCredFromTestConfig(env, configId);
+  if (!credPick.ok) {
+    if (req.session) req.session.lastRecurringResult = { success: false, error: credPick.error };
+    return res.redirect('/admin/test-recurring?env=' + encodeURIComponent(env) + '&tab=search' + (configId ? '&configId=' + encodeURIComponent(configId) : '') + (cbRouteNo ? '&cbRouteNo=' + encodeURIComponent(cbRouteNo) : '') + (merchantCodeOverride ? '&mid=' + encodeURIComponent(merchantCodeOverride) : ''));
+  }
+  const cred = merchantCodeOverride ? { ...credPick.cred, mid: merchantCodeOverride } : credPick.cred;
+  const start_date = String((req.body || {}).start_date || '').trim();
+  const end_date = String((req.body || {}).end_date || '').trim();
+  const status = String((req.body || {}).status || '').trim();
+  const merchant_code = [cred.mid];
+  const billing_cycle = '';
+  const start = 0;
+  const page_size = 50;
+  const order_by = 'RecurringScheduleID';
+  const order_dir = 'DESC';
+  const body = { start_date: start_date ? new Date(start_date).toISOString() : '', end_date: end_date ? new Date(end_date).toISOString() : '', status: status || null, merchant_code, billing_cycle, start, page_size, order_by, order_dir, keyword: '' };
+  const checksumParts = [status || '', merchant_code.join(''), billing_cycle, String(start), String(page_size), order_by, order_dir, merchant_code.join('')];
+  const result = await chillPayRecurringRequest(env, '/api/v1/recurringschedule/search', 'POST', body, checksumParts, cred, credPick.recurringApiUrl);
+  if (req.session) req.session.lastRecurringResult = result;
+  return res.redirect('/admin/test-recurring?env=' + encodeURIComponent(env) + '&tab=search' + (configId ? '&configId=' + encodeURIComponent(configId) : '') + (cbRouteNo ? '&cbRouteNo=' + encodeURIComponent(cbRouteNo) : '') + (merchantCodeOverride ? '&mid=' + encodeURIComponent(merchantCodeOverride) : ''));
+});
+
+app.post('/admin/test-recurring/cancel', requireAuth, requirePage('test_run'), async (req, res) => {
+  const env = (req.body || {}).env === 'sandbox' ? 'sandbox' : 'production';
+  const cbRouteNo = String((req.body || {}).cbRouteNo || '').trim();
+  const configId = String((req.body || {}).configId || '').trim();
+  const merchantCodeOverride = String((req.body || {}).merchantCodeOverride || '').trim();
+  const credPick = getRecurringCredFromTestConfig(env, configId);
+  const cred = (credPick && credPick.ok && merchantCodeOverride) ? { ...credPick.cred, mid: merchantCodeOverride } : (credPick && credPick.ok ? credPick.cred : null);
+  const recurring_schedule_id = String((req.body || {}).recurring_schedule_id || '').trim();
+  const cancellation_reason = String((req.body || {}).cancellation_reason || '').trim();
+  const body = { recurring_schedule_id, cancellation_reason };
+  const checksumParts = [recurring_schedule_id, cancellation_reason];
+  const result = credPick.ok
+    ? await chillPayRecurringRequest(env, '/api/v1/recurringschedule/cancel', 'POST', body, checksumParts, cred, credPick.recurringApiUrl)
+    : { success: false, error: credPick.error };
+  if (req.session) req.session.lastRecurringResult = result;
+  return res.redirect('/admin/test-recurring?env=' + encodeURIComponent(env) + '&tab=cancel' + (configId ? '&configId=' + encodeURIComponent(configId) : '') + (cbRouteNo ? '&cbRouteNo=' + encodeURIComponent(cbRouteNo) : '') + (merchantCodeOverride ? '&mid=' + encodeURIComponent(merchantCodeOverride) : ''));
 });
 
 // 테스트 결제 실행 페이지 (환경 선택 + 주문 정보 입력)
@@ -11729,7 +12731,34 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
   const filteredReversedInternal = (memberInternal && getMemberInternalTargetIds(memberInternal) !== null)
     ? withIndexInternal.filter(({ log }) => canAccessInternalTarget(memberInternal, log.internalTargetId))
     : withIndexInternal;
-  const rows = filteredReversedInternal
+  // 날짜/프리셋 필터 + 페이징
+  const todayYmd = getBangkokTodayYmd();
+  const dr = parseLogDateRangeFromQuery(req.query || {});
+  const startDateStr = dr.startDate;
+  const endDateStr = dr.endDate;
+  const presetUsed = dr.preset;
+  const isTodayOnly = !!(startDateStr && endDateStr && startDateStr === endDateStr && startDateStr === todayYmd);
+
+  let filteredForDateInternal = filteredReversedInternal;
+  if (startDateStr || endDateStr) {
+    filteredForDateInternal = filteredForDateInternal.filter(({ log }) => {
+      const iso = log.storedAtIso || log.storedAt;
+      const ymd = getBangkokYmdFromIso(iso);
+      if (!ymd) return false;
+      if (startDateStr && ymd < startDateStr) return false;
+      if (endDateStr && ymd > endDateStr) return false;
+      return true;
+    });
+  }
+
+  const perPage = parseAllowedPerPage((req.query || {}).perPage);
+  const page = Math.max(1, parseInt((req.query || {}).page, 10) || 1);
+  const totalCountInternal = filteredForDateInternal.length;
+  const totalPagesInternal = Math.max(1, Math.ceil(totalCountInternal / perPage));
+  const pageNumInternal = Math.min(page, totalPagesInternal);
+  const pagedLogsInternal = isTodayOnly ? filteredForDateInternal : filteredForDateInternal.slice((pageNumInternal - 1) * perPage, pageNumInternal * perPage);
+
+  const rows = pagedLogsInternal
     .map(({ log, realIndex }, i) => {
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
       const payload = log.payload || {};
@@ -11805,8 +12834,36 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
-      <h1>${t(locale, 'internal_logs_title')} (${filteredReversedInternal.length})</h1>
+      <h1>${t(locale, 'internal_logs_title')} (${totalCountInternal})</h1>
       <p style="font-size:12px;color:#555;line-height:1.45;">${t(locale, 'internal_logs_desc')}</p>
+      <form method="get" action="/admin/internal" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;">
+        <input type="hidden" name="perPage" value="${perPage}" />
+        <input type="hidden" name="page" value="1" />
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${(() => {
+            const make = (key, label) => {
+              const active = presetUsed === key;
+              const url = '/admin/internal?' + buildQueryString({ ...(req.query || {}), preset: key, startDate: '', endDate: '', page: 1, perPage });
+              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
+            };
+            return [
+              make('today', t(locale, 'tx_filter_today')),
+              make('yesterday', t(locale, 'tx_filter_yesterday')),
+              make('this_week', t(locale, 'tx_filter_this_week')),
+              make('last_week', t(locale, 'tx_filter_last_week')),
+              make('this_month', t(locale, 'tx_filter_this_month')),
+              make('last_month', t(locale, 'tx_filter_last_month')),
+            ].join('');
+          })()}
+        </div>
+      </form>
       <table>
         <colgroup><col style="width:7%;" /><col style="width:9%;" /><col style="width:12%;" /><col style="width:5%;" /><col style="width:20%;" /><col style="width:39%;" /><col style="width:10%;" /></colgroup>
         <thead>
@@ -11824,6 +12881,25 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
           ${rows || `<tr><td colspan="7" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
         </tbody>
       </table>
+      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <div>
+          ${t(locale, 'tx_per_page_bar')}: 
+          ${[100,200,300,400,500]
+            .map((n) => {
+              const url = '/admin/internal?' + buildQueryString({ ...(req.query || {}), perPage: n, page: 1 });
+              const active = perPage === n;
+              return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
+            })
+            .join('')}
+          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountInternal}${t(locale, 'cr_count_suffix')})
+        </div>
+        ${isTodayOnly ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>' : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesInternal }, (_, idx) => {
+            const i = idx + 1;
+            const url = '/admin/internal?' + buildQueryString({ ...(req.query || {}), page: i, perPage });
+            const active = i === pageNumInternal;
+            return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
+          }).join('')}</div>`}
+      </div>
       </div>
     </main>
   </div>
@@ -11885,7 +12961,34 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
   const filteredReversedInternalResult = (memberInternalResult && getMemberInternalTargetIds(memberInternalResult) !== null)
     ? withIndexInternalResult.filter(({ log }) => canAccessInternalTarget(memberInternalResult, log.internalTargetId))
     : withIndexInternalResult;
-  const rows = filteredReversedInternalResult
+  // 날짜/프리셋 필터 + 페이징
+  const todayYmd = getBangkokTodayYmd();
+  const dr = parseLogDateRangeFromQuery(q);
+  const startDateStr = dr.startDate;
+  const endDateStr = dr.endDate;
+  const presetUsed = dr.preset;
+  const isTodayOnly = !!(startDateStr && endDateStr && startDateStr === endDateStr && startDateStr === todayYmd);
+
+  let filteredForDateInternal = filteredReversedInternalResult;
+  if (startDateStr || endDateStr) {
+    filteredForDateInternal = filteredForDateInternal.filter(({ log }) => {
+      const iso = log.storedAtIso || log.storedAt;
+      const ymd = getBangkokYmdFromIso(iso);
+      if (!ymd) return false;
+      if (startDateStr && ymd < startDateStr) return false;
+      if (endDateStr && ymd > endDateStr) return false;
+      return true;
+    });
+  }
+
+  const perPage = parseAllowedPerPage(q.perPage);
+  const page = Math.max(1, parseInt(q.page, 10) || 1);
+  const totalCountInternalResult = filteredForDateInternal.length;
+  const totalPagesInternalResult = Math.max(1, Math.ceil(totalCountInternalResult / perPage));
+  const pageNumInternalResult = Math.min(page, totalPagesInternalResult);
+  const pagedLogsInternal = isTodayOnly ? filteredForDateInternal : filteredForDateInternal.slice((pageNumInternalResult - 1) * perPage, pageNumInternalResult * perPage);
+
+  const rows = pagedLogsInternal
     .map(({ log, realIndex }, i) => {
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
       const status = log.internalDeliveryStatus || '-';
@@ -11966,8 +13069,37 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       ${resendMsg}
-      <h1>${t(locale, 'nav_internal_result')} (${filteredReversedInternalResult.length})</h1>
+      <h1>${t(locale, 'nav_internal_result')} (${totalCountInternalResult})</h1>
       <p style="font-size:13px;color:#555;">${t(locale, 'internal_result_desc').replace('{{cancelRefundNotiUrl}}', '/admin/cancel-refund/noti')}</p>
+      <form method="get" action="/admin/internal-result" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;">
+        <input type="hidden" name="resendKind" value="${esc(resendKind)}" />
+        <input type="hidden" name="perPage" value="${perPage}" />
+        <input type="hidden" name="page" value="1" />
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${(() => {
+            const make = (key, label) => {
+              const active = presetUsed === key;
+              const url = '/admin/internal-result?' + buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage });
+              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
+            };
+            return [
+              make('today', t(locale, 'tx_filter_today')),
+              make('yesterday', t(locale, 'tx_filter_yesterday')),
+              make('this_week', t(locale, 'tx_filter_this_week')),
+              make('last_week', t(locale, 'tx_filter_last_week')),
+              make('this_month', t(locale, 'tx_filter_this_month')),
+              make('last_month', t(locale, 'tx_filter_last_month')),
+            ].join('');
+          })()}
+        </div>
+      </form>
       <table>
         <thead>
           <tr>
@@ -11988,6 +13120,25 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
           ${rows || '<tr><td colspan="11" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
+      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <div>
+          ${t(locale, 'tx_per_page_bar')}: 
+          ${[100,200,300,400,500]
+            .map((n) => {
+              const url = '/admin/internal-result?' + buildQueryString({ ...(q || {}), perPage: n, page: 1 });
+              const active = perPage === n;
+              return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
+            })
+            .join('')}
+          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountInternalResult}${t(locale, 'cr_count_suffix')})
+        </div>
+        ${isTodayOnly ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>' : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesInternalResult }, (_, idx) => {
+          const i = idx + 1;
+          const url = '/admin/internal-result?' + buildQueryString({ ...(q || {}), page: i, perPage });
+          const active = i === pageNumInternalResult;
+          return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
+        }).join('')}</div>`}
+      </div>
       </div>
     </main>
   </div>
@@ -12173,7 +13324,34 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   const filteredReversedDevResult = (memberDevResult && getMemberInternalTargetIds(memberDevResult) !== null)
     ? withIndexDevResult.filter(({ log }) => canAccessInternalTarget(memberDevResult, log.internalTargetId))
     : withIndexDevResult;
-  const rows = filteredReversedDevResult
+  // 날짜/프리셋 필터 + 페이징
+  const todayYmd = getBangkokTodayYmd();
+  const dr = parseLogDateRangeFromQuery(q);
+  const startDateStr = dr.startDate;
+  const endDateStr = dr.endDate;
+  const presetUsed = dr.preset;
+  const isTodayOnly = !!(startDateStr && endDateStr && startDateStr === endDateStr && startDateStr === todayYmd);
+
+  let filteredForDateDev = filteredReversedDevResult;
+  if (startDateStr || endDateStr) {
+    filteredForDateDev = filteredForDateDev.filter(({ log }) => {
+      const iso = log.storedAtIso || log.storedAt;
+      const ymd = getBangkokYmdFromIso(iso);
+      if (!ymd) return false;
+      if (startDateStr && ymd < startDateStr) return false;
+      if (endDateStr && ymd > endDateStr) return false;
+      return true;
+    });
+  }
+
+  const perPage = parseAllowedPerPage(q.perPage);
+  const page = Math.max(1, parseInt(q.page, 10) || 1);
+  const totalCountDevResult = filteredForDateDev.length;
+  const totalPagesDevResult = Math.max(1, Math.ceil(totalCountDevResult / perPage));
+  const pageNumDevResult = Math.min(page, totalPagesDevResult);
+  const pagedLogsDev = isTodayOnly ? filteredForDateDev : filteredForDateDev.slice((pageNumDevResult - 1) * perPage, pageNumDevResult * perPage);
+
+  const rows = pagedLogsDev
     .map(({ log, realIndex }, i) => {
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
       const status = log.internalDeliveryStatus || '-';
@@ -12247,8 +13425,37 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       ${resendMsg}
-      <h1>${t(locale, 'nav_dev_result')} (${filteredReversedDevResult.length})</h1>
+      <h1>${t(locale, 'nav_dev_result')} (${totalCountDevResult})</h1>
       <p style="font-size:13px;color:#555;">${t(locale, 'dev_result_desc')}</p>
+      <form method="get" action="/admin/dev-internal-result" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;">
+        <input type="hidden" name="resendKind" value="${esc(resendKind)}" />
+        <input type="hidden" name="perPage" value="${perPage}" />
+        <input type="hidden" name="page" value="1" />
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;">
+          <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${(() => {
+            const make = (key, label) => {
+              const active = presetUsed === key;
+              const url = '/admin/dev-internal-result?' + buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage });
+              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
+            };
+            return [
+              make('today', t(locale, 'tx_filter_today')),
+              make('yesterday', t(locale, 'tx_filter_yesterday')),
+              make('this_week', t(locale, 'tx_filter_this_week')),
+              make('last_week', t(locale, 'tx_filter_last_week')),
+              make('this_month', t(locale, 'tx_filter_this_month')),
+              make('last_month', t(locale, 'tx_filter_last_month')),
+            ].join('');
+          })()}
+        </div>
+      </form>
       <table>
         <thead>
           <tr>
@@ -12266,6 +13473,25 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
           ${rows || '<tr><td colspan="8" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
+      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <div>
+          ${t(locale, 'tx_per_page_bar')}: 
+          ${[100,200,300,400,500]
+            .map((n) => {
+              const url = '/admin/dev-internal-result?' + buildQueryString({ ...(q || {}), perPage: n, page: 1 });
+              const active = perPage === n;
+              return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
+            })
+            .join('')}
+          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountDevResult}${t(locale, 'cr_count_suffix')})
+        </div>
+        ${isTodayOnly ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>' : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesDevResult }, (_, idx) => {
+          const i = idx + 1;
+          const url = '/admin/dev-internal-result?' + buildQueryString({ ...(q || {}), page: i, perPage });
+          const active = i === pageNumDevResult;
+          return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
+        }).join('')}</div>`}
+      </div>
       </div>
     </main>
   </div>
