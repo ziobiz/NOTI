@@ -6555,58 +6555,104 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   const page = Math.max(1, parseInt(q.page, 10) || 1);
   // 거래 내역 = PG에서 수신한 모든 노티(성공/실패/취소). env 쿼리로 PRODUCTION/SANDBOX 선택.
   let list = [...getEnvFilteredLogs(req)].slice().reverse();
+  // "칠리페이 기준" = ChillPay 환경설정 timezone 기준으로 날짜를 끊는다 (피지거래내역과 동일)
+  const cfgTx = loadChillPayTransactionConfig();
+  const chillTz = (cfgTx && cfgTx.timezone) ? String(cfgTx.timezone).trim() : 'Asia/Bangkok';
+  const toYmd = (d) => {
+    try {
+      // en-CA: YYYY-MM-DD 형식
+      return new Intl.DateTimeFormat('en-CA', { timeZone: chillTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+    } catch {
+      return '';
+    }
+  };
+  const isoToYmd = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return toYmd(d);
+  };
+  const parseYmd = (s) => {
+    const m = String(s || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const da = Number(m[3]);
+    if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(da)) return null;
+    return new Date(Date.UTC(y, mo - 1, da));
+  };
+  const addDaysYmd = (ymdStr, deltaDays) => {
+    const base = parseYmd(ymdStr);
+    if (!base) return '';
+    base.setUTCDate(base.getUTCDate() + (Number(deltaDays) || 0));
+    const y = base.getUTCFullYear();
+    const m = String(base.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(base.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+  const getTzDow = (d) => {
+    try {
+      const w = new Intl.DateTimeFormat('en-US', { timeZone: chillTz, weekday: 'short' }).format(d);
+      const map = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+      return map[w] != null ? map[w] : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const calcPresetRange = (p) => {
+    const now = new Date();
+    const todayYmd = toYmd(now);
+    if (!todayYmd) return null;
+    if (p === 'today') return { startDate: todayYmd, endDate: todayYmd };
+    if (p === 'yesterday') {
+      const y = addDaysYmd(todayYmd, -1);
+      return y ? { startDate: y, endDate: y } : null;
+    }
+    if (p === 'thisWeek' || p === 'lastWeek') {
+      const dow = getTzDow(now); // 0=Sun
+      const mondayDiff = dow === 0 ? -6 : 1 - dow;
+      const thisMon = addDaysYmd(todayYmd, mondayDiff);
+      if (!thisMon) return null;
+      if (p === 'thisWeek') return { startDate: thisMon, endDate: addDaysYmd(thisMon, 6) };
+      const lastSun = addDaysYmd(thisMon, -1);
+      if (!lastSun) return null;
+      return { startDate: addDaysYmd(lastSun, -6), endDate: lastSun };
+    }
+    if (p === 'thisMonth' || p === 'lastMonth') {
+      const base = parseYmd(todayYmd);
+      if (!base) return null;
+      let y = base.getUTCFullYear();
+      let m = base.getUTCMonth(); // 0-based
+      if (p === 'lastMonth') {
+        m -= 1;
+        if (m < 0) { m = 11; y -= 1; }
+      }
+      const start = new Date(Date.UTC(y, m, 1));
+      const end = new Date(Date.UTC(y, m + 1, 0));
+      const startYmd = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}`;
+      const endYmd = `${end.getUTCFullYear()}-${String(end.getUTCMonth() + 1).padStart(2, '0')}-${String(end.getUTCDate()).padStart(2, '0')}`;
+      return { startDate: startYmd, endDate: endYmd };
+    }
+    return null;
+  };
 
   // 기간 프리셋(당일/전일/이번주/지난주/당월/전월) 적용: 사용자가 직접 일자를 지정한 경우에는 우선
   if (!dateFrom && !dateTo && period) {
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const ymd = (d) => {
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${y}-${m}-${day}`;
-    };
-    let start = null;
-    let end = null;
-    if (period === 'today') {
-      start = new Date(today);
-      end = new Date(today);
-    } else if (period === 'yesterday') {
-      start = new Date(today);
-      start.setDate(start.getDate() - 1);
-      end = new Date(start);
-    } else if (period === 'thisWeek') {
-      const day = today.getDay(); // 0=일요일
-      const monOffset = day === 0 ? -6 : 1 - day;
-      start = new Date(today);
-      start.setDate(start.getDate() + monOffset);
-      end = new Date(start);
-      end.setDate(end.getDate() + 6);
-    } else if (period === 'lastWeek') {
-      const day = today.getDay();
-      const monOffset = day === 0 ? -6 : 1 - day;
-      end = new Date(today);
-      end.setDate(end.getDate() + monOffset - 1);
-      start = new Date(end);
-      start.setDate(start.getDate() - 6);
-    } else if (period === 'thisMonth') {
-      start = new Date(today.getFullYear(), today.getMonth(), 1);
-      end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-    } else if (period === 'lastMonth') {
-      start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-      end = new Date(today.getFullYear(), today.getMonth(), 0);
-    }
-    if (start && end) {
-      dateFrom = ymd(start);
-      dateTo = ymd(end);
+    const r = calcPresetRange(period);
+    if (r && r.startDate && r.endDate) {
+      dateFrom = r.startDate;
+      dateTo = r.endDate;
     }
   }
   if (dateFrom || dateTo) {
-    const fromTs = dateFrom ? Date.parse(dateFrom) : 0;
-    const toTs = dateTo ? (Date.parse(dateTo) + 86400000) : Infinity;
+    // receivedAtIso를 ChillPay timezone(설정값) 날짜(YYYY-MM-DD)로 변환해 문자열로 비교
     list = list.filter((log) => {
-      const t = Date.parse(log.receivedAtIso || log.receivedAt);
-      return !Number.isNaN(t) && t >= fromTs && t < toTs;
+      const iso = log.receivedAtIso || log.receivedAt;
+      const ymd = isoToYmd(iso);
+      if (!ymd) return false;
+      if (dateFrom && ymd < dateFrom) return false;
+      if (dateTo && ymd > dateTo) return false;
+      return true;
     });
   }
   const voidRefundByTxIdForFilter = buildVoidRefundNotiMap(30);
@@ -7308,54 +7354,87 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
     }
   }
   const syncIntervalMin = Number.isFinite(cfg.pgTransactionSyncIntervalMinutes) && cfg.pgTransactionSyncIntervalMinutes > 0 ? cfg.pgTransactionSyncIntervalMinutes : 30;
-  // 당월/전월 등 기간 버튼은 서버 로컬 날짜 기준으로 계산 (타임존 변환 오류 방지)
+  // "칠리페이 기준" = ChillPay 환경설정 timezone 기준으로 프리셋(당일/전일/이번주...) 계산
+  const chillTz = (cfg && cfg.timezone) ? String(cfg.timezone).trim() : 'Asia/Bangkok';
+  const toYmdTz = (dObj) => {
+    try {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: chillTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(dObj);
+    } catch {
+      return '';
+    }
+  };
+  const parseYmd = (s) => {
+    const m = String(s || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const da = Number(m[3]);
+    if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(da)) return null;
+    return new Date(Date.UTC(y, mo - 1, da));
+  };
+  const addDaysYmd = (ymdStr, deltaDays) => {
+    const base = parseYmd(ymdStr);
+    if (!base) return '';
+    base.setUTCDate(base.getUTCDate() + (Number(deltaDays) || 0));
+    const y = base.getUTCFullYear();
+    const m = String(base.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(base.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+  const getTzDow = (dObj) => {
+    try {
+      const w = new Intl.DateTimeFormat('en-US', { timeZone: chillTz, weekday: 'short' }).format(dObj);
+      const map = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+      return map[w] != null ? map[w] : 0;
+    } catch {
+      return 0;
+    }
+  };
   const now = new Date();
-  const y = now.getFullYear();
-  const m = now.getMonth();
-  const d = now.getDate();
-  const toYmd = (date) => date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0');
-  const todayKey = toYmd(now);
-  const yesterdayDate = new Date(y, m, d - 1);
-  const yesterdayKey = toYmd(yesterdayDate);
-  const dayOfWeek = now.getDay();
+  const todayKey = toYmdTz(now);
+  const yesterdayKey = todayKey ? addDaysYmd(todayKey, -1) : '';
+  const dayOfWeek = getTzDow(now);
   const monOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-  const thisWeekMon = new Date(y, m, d + monOffset);
-  const thisWeekSun = new Date(thisWeekMon);
-  thisWeekSun.setDate(thisWeekSun.getDate() + 6);
-  const lastWeekMon = new Date(thisWeekMon);
-  lastWeekMon.setDate(lastWeekMon.getDate() - 7);
-  const lastWeekSun = new Date(lastWeekMon);
-  lastWeekSun.setDate(lastWeekSun.getDate() + 6);
+  const thisWeekMonKey = todayKey ? addDaysYmd(todayKey, monOffset) : '';
+  const thisWeekSunKey = thisWeekMonKey ? addDaysYmd(thisWeekMonKey, 6) : '';
+  const lastWeekSunKey = thisWeekMonKey ? addDaysYmd(thisWeekMonKey, -1) : '';
+  const lastWeekMonKey = lastWeekSunKey ? addDaysYmd(lastWeekSunKey, -6) : '';
   // 노티거래내역과 동일하게, 기간 프리셋(당일/전일/이번주/지난주/당월/전월)을 선택하면
   // 내부적으로 dateFrom/dateTo(YYYY-MM-DD)를 계산해 준다.
   if (!dateFrom && !dateTo && periodSort && periodSort !== 'all') {
-    const today = new Date(y, m, d);
-    const ymd = (dt) => toYmd(dt);
-    let start = null;
-    let end = null;
     if (periodSort === 'today') {
-      start = new Date(today);
-      end = new Date(today);
+      dateFrom = todayKey;
+      dateTo = todayKey;
     } else if (periodSort === 'yesterday') {
-      start = new Date(today);
-      start.setDate(start.getDate() - 1);
-      end = new Date(start);
+      dateFrom = yesterdayKey;
+      dateTo = yesterdayKey;
     } else if (periodSort === 'thisWeek') {
-      start = new Date(thisWeekMon);
-      end = new Date(thisWeekSun);
+      dateFrom = thisWeekMonKey;
+      dateTo = thisWeekSunKey;
     } else if (periodSort === 'lastWeek') {
-      start = new Date(lastWeekMon);
-      end = new Date(lastWeekSun);
+      dateFrom = lastWeekMonKey;
+      dateTo = lastWeekSunKey;
     } else if (periodSort === 'thisMonth') {
-      start = new Date(y, m, 1);
-      end = new Date(y, m + 1, 0);
+      const base = parseYmd(todayKey);
+      if (base) {
+        const y = base.getUTCFullYear();
+        const m = base.getUTCMonth();
+        const start = new Date(Date.UTC(y, m, 1));
+        const end = new Date(Date.UTC(y, m + 1, 0));
+        dateFrom = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}`;
+        dateTo = `${end.getUTCFullYear()}-${String(end.getUTCMonth() + 1).padStart(2, '0')}-${String(end.getUTCDate()).padStart(2, '0')}`;
+      }
     } else if (periodSort === 'lastMonth') {
-      start = new Date(y, m - 1, 1);
-      end = new Date(y, m, 0);
-    }
-    if (start && end) {
-      dateFrom = ymd(start);
-      dateTo = ymd(end);
+      const base = parseYmd(todayKey);
+      if (base) {
+        let y = base.getUTCFullYear();
+        let m = base.getUTCMonth() - 1;
+        if (m < 0) { m = 11; y -= 1; }
+        const start = new Date(Date.UTC(y, m, 1));
+        const end = new Date(Date.UTC(y, m + 1, 0));
+        dateFrom = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}`;
+        dateTo = `${end.getUTCFullYear()}-${String(end.getUTCMonth() + 1).padStart(2, '0')}-${String(end.getUTCDate()).padStart(2, '0')}`;
+      }
     }
   }
   const allKeys = Object.keys(byDate).sort((a, b) => b.localeCompare(a));
