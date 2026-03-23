@@ -496,6 +496,14 @@ function saveChillPayTransactionConfig(o) {
   return toSave;
 }
 
+/** 노티/로그 메모리 보관(일) — append* 에서 메모리 상한 필터에 사용 */
+function getLogKeepMemCutoffMs() {
+  const cfg = loadChillPayTransactionConfig();
+  const memDays = Number(cfg.logKeepDaysMem) > 0 ? cfg.logKeepDaysMem : DEFAULT_LOG_KEEP_DAYS_MEM;
+  const clamped = Math.min(365, Math.max(1, memDays));
+  return Date.now() - clamped * 24 * 60 * 60 * 1000;
+}
+
 function ensureConfigDir() {
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
@@ -1669,7 +1677,7 @@ function loadJsonLogFile(filePath, isoKey) {
         keptLines.push(JSON.stringify(obj));
       }
     }
-    // 30일 이내 기록만 다시 파일에 저장
+    // 파일 보관 일(diskDays) 이내 기록만 다시 파일에 저장
     try {
       if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
       fs.writeFileSync(filePath, keptLines.join('\n') + (keptLines.length ? '\n' : ''));
@@ -1682,7 +1690,7 @@ function loadJsonLogFile(filePath, isoKey) {
   }
 }
 
-// ===== PG 노티 로그 (최근 7일 메모리 + 파일에도 기록) =====
+// ===== PG 노티 로그 (메모리=logKeepDaysMem일, 파일=logKeepDaysDisk일) =====
 let NOTI_LOGS = loadJsonLogFile(PG_NOTI_LOG_PATH, 'receivedAtIso');
 
 function loadPgNotiLogsSafe() {
@@ -1701,8 +1709,8 @@ function appendPgNotiLog(entry) {
     ...entry,
   };
   NOTI_LOGS.push(log);
-  // 메모리에서는 최근 7일만 유지
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  // 메모리: 환경설정 logKeepDaysMem 일만 유지
+  const cutoff = getLogKeepMemCutoffMs();
   NOTI_LOGS = NOTI_LOGS.filter((e) => {
     const t = Date.parse(e.receivedAtIso || e.receivedAt);
     return !Number.isNaN(t) && t >= cutoff;
@@ -1828,7 +1836,7 @@ function enrichPayloadForVoidRefundNoti(log, basePayload, paymentStatus) {
   return payload;
 }
 
-// ===== 전산 노티 로그 (최근 7일 메모리 + 파일에도 기록) =====
+// ===== 전산 노티 로그 (메모리·파일 보관은 환경설정 일수) =====
 let INTERNAL_LOGS = loadJsonLogFile(INTERNAL_LOG_PATH, 'storedAtIso');
 
 function appendInternalLog(entry) {
@@ -1839,7 +1847,7 @@ function appendInternalLog(entry) {
     storedAtIso: nowIso,
   };
   INTERNAL_LOGS.push(log);
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const cutoff = getLogKeepMemCutoffMs();
   INTERNAL_LOGS = INTERNAL_LOGS.filter((e) => {
     const t = Date.parse(e.storedAtIso || e.storedAt);
     return !Number.isNaN(t) && t >= cutoff;
@@ -1852,7 +1860,7 @@ function appendInternalLog(entry) {
   }
 }
 
-// ===== 개발 노티 로그 (최근 7일 메모리 + 파일에도 기록) =====
+// ===== 개발 노티 로그 (메모리·파일 보관은 환경설정 일수) =====
 let DEV_INTERNAL_LOGS = loadJsonLogFile(DEV_INTERNAL_LOG_PATH, 'storedAtIso');
 
 function appendDevInternalLog(entry) {
@@ -1863,7 +1871,7 @@ function appendDevInternalLog(entry) {
     storedAtIso: nowIso,
   };
   DEV_INTERNAL_LOGS.push(log);
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const cutoff = getLogKeepMemCutoffMs();
   DEV_INTERNAL_LOGS = DEV_INTERNAL_LOGS.filter((e) => {
     const t = Date.parse(e.storedAtIso || e.storedAt);
     return !Number.isNaN(t) && t >= cutoff;
@@ -1972,7 +1980,7 @@ function appendConfigChangeLog(entry) {
   }
 }
 
-// ===== 테스트 결제 로그 (최근 7일 메모리 + 파일에도 기록) =====
+// ===== 테스트 결제 로그 (메모리·파일 보관은 환경설정 일수) =====
 let TEST_LOGS = loadJsonLogFile(TEST_LOG_PATH, 'loggedAtIso');
 
 function appendTestLog(entry) {
@@ -1983,7 +1991,7 @@ function appendTestLog(entry) {
     loggedAtIso: nowIso,
   };
   TEST_LOGS.push(log);
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const cutoff = getLogKeepMemCutoffMs();
   TEST_LOGS = TEST_LOGS.filter((e) => {
     const t = Date.parse(e.loggedAtIso || e.loggedAt);
     return !Number.isNaN(t) && t >= cutoff;
@@ -1996,7 +2004,7 @@ function appendTestLog(entry) {
   }
 }
 
-// ===== 메일 발송 로그 (최근 7일 메모리 + 파일에도 기록) =====
+// ===== 메일 발송 로그 (메모리·파일 보관은 환경설정 일수) =====
 let MAIL_LOGS = loadJsonLogFile(MAIL_LOG_PATH, 'sentAtIso');
 
 function appendMailLog(entry) {
@@ -2006,7 +2014,7 @@ function appendMailLog(entry) {
     sentAtIso: nowIso,
   };
   MAIL_LOGS.push(log);
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const cutoff = getLogKeepMemCutoffMs();
   MAIL_LOGS = MAIL_LOGS.filter((e) => {
     const t = Date.parse(e.sentAtIso || e.sentAt);
     return !Number.isNaN(t) && t >= cutoff;
@@ -2019,14 +2027,14 @@ function appendMailLog(entry) {
   }
 }
 
-// ===== ChillPay Recurring 콜백 로그 (최근 7일 메모리 + 파일에도 기록) =====
+// ===== ChillPay Recurring 콜백 로그 (메모리·파일 보관은 환경설정 일수) =====
 let RECURRING_CALLBACK_LOGS = loadJsonLogFile(RECURRING_CALLBACK_LOG_PATH, 'at');
 function appendRecurringCallbackLog(entry) {
   const nowIso = new Date().toISOString();
   const log = { ...entry, at: nowIso };
   try {
     RECURRING_CALLBACK_LOGS.push(log);
-    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const cutoff = getLogKeepMemCutoffMs();
     RECURRING_CALLBACK_LOGS = RECURRING_CALLBACK_LOGS.filter((e) => {
       const t = Date.parse(e.at || '');
       return !Number.isNaN(t) && t >= cutoff;
@@ -2036,6 +2044,16 @@ function appendRecurringCallbackLog(entry) {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.appendFile(RECURRING_CALLBACK_LOG_PATH, JSON.stringify(log) + '\n', () => {});
   } catch (_) {}
+}
+
+/** 메모리 보관 일수·파일 보관 일수 저장 직후: 디스크에 남은 기간만큼 다시 적재해 노티거래내역 등에 반영 */
+function reloadMemLogsFromDisk() {
+  NOTI_LOGS = loadJsonLogFile(PG_NOTI_LOG_PATH, 'receivedAtIso');
+  INTERNAL_LOGS = loadJsonLogFile(INTERNAL_LOG_PATH, 'storedAtIso');
+  DEV_INTERNAL_LOGS = loadJsonLogFile(DEV_INTERNAL_LOG_PATH, 'storedAtIso');
+  TEST_LOGS = loadJsonLogFile(TEST_LOG_PATH, 'loggedAtIso');
+  MAIL_LOGS = loadJsonLogFile(MAIL_LOG_PATH, 'sentAtIso');
+  RECURRING_CALLBACK_LOGS = loadJsonLogFile(RECURRING_CALLBACK_LOG_PATH, 'at');
 }
 
 function normalizeCurrencyCode(value) {
@@ -3016,7 +3034,8 @@ async function syncChillPayVoidNoti() {
   }
   const now = new Date();
   const toDate = new Date(now.getTime());
-  const fromDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const memDays = Math.min(90, Math.max(1, Number(cfg.logKeepDaysMem) > 0 ? cfg.logKeepDaysMem : DEFAULT_LOG_KEEP_DAYS_MEM));
+  const fromDate = new Date(now.getTime() - memDays * 24 * 60 * 60 * 1000);
   const transactionDateFrom = formatChillPayTransactionDate(fromDate, '00:00:00');
   const transactionDateTo = formatChillPayTransactionDate(toDate, '23:59:59');
   const searchResult = await chillPaySearchVoid(false, {
@@ -3113,7 +3132,8 @@ async function syncChillPayRefundNoti() {
   }
   const now = new Date();
   const toDate = new Date(now.getTime());
-  const fromDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const memDaysRf = Math.min(90, Math.max(1, Number(cfg.logKeepDaysMem) > 0 ? cfg.logKeepDaysMem : DEFAULT_LOG_KEEP_DAYS_MEM));
+  const fromDate = new Date(now.getTime() - memDaysRf * 24 * 60 * 60 * 1000);
   const transactionDateFrom = formatChillPayTransactionDate(fromDate, '00:00:00');
   const transactionDateTo = formatChillPayTransactionDate(toDate, '23:59:59');
   const searchResult = await chillPaySearchRefund(false, {
@@ -6068,6 +6088,10 @@ app.post('/admin/settings/chillpay-time', requireAuth, requireSettingsOrRedirect
   const refundWindowDays = parseInt(req.body.refundWindowDays, 10);
   const forceRefundWindowDays = parseInt(req.body.forceRefundWindowDays, 10);
   const pgTransactionIncrementalDays = parseInt(req.body.pgTransactionIncrementalDays, 10);
+  const logKeepDaysMem = parseInt(req.body.logKeepDaysMem, 10);
+  const logKeepDaysDisk = parseInt(req.body.logKeepDaysDisk, 10);
+  const amountDisplayOp = req.body && req.body.amountDisplayOp != null ? String(req.body.amountDisplayOp).trim() : '';
+  const amountDisplayValue = parseFloat(req.body.amountDisplayValue);
   saveChillPayTransactionConfig({
     voidCutoffHour: Number.isFinite(voidCutoffHour) ? voidCutoffHour : DEFAULT_VOID_CUTOFF_HOUR,
     voidCutoffMinute: Number.isFinite(voidCutoffMinute) ? voidCutoffMinute : DEFAULT_VOID_CUTOFF_MINUTE,
@@ -6079,8 +6103,17 @@ app.post('/admin/settings/chillpay-time', requireAuth, requireSettingsOrRedirect
     pgTransactionSyncIntervalMinutes: Number.isFinite(pgTransactionSyncIntervalMinutes) && pgTransactionSyncIntervalMinutes > 0 ? Math.min(1440, pgTransactionSyncIntervalMinutes) : 30,
     pgTransactionInitialSyncMonths: Number.isFinite(pgTransactionInitialSyncMonths) && pgTransactionInitialSyncMonths > 0 ? Math.min(60, pgTransactionInitialSyncMonths) : 3,
     pgTransactionIncrementalDays: Number.isFinite(pgTransactionIncrementalDays) && pgTransactionIncrementalDays > 0 ? Math.min(365, pgTransactionIncrementalDays) : DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
+    logKeepDaysMem: Number.isFinite(logKeepDaysMem) && logKeepDaysMem > 0 ? Math.min(365, logKeepDaysMem) : undefined,
+    logKeepDaysDisk: Number.isFinite(logKeepDaysDisk) && logKeepDaysDisk > 0 ? Math.min(365, logKeepDaysDisk) : undefined,
+    amountDisplayOp: ['*', '/', '+', '-'].includes(amountDisplayOp) ? amountDisplayOp : undefined,
+    amountDisplayValue: Number.isFinite(amountDisplayValue) ? amountDisplayValue : undefined,
     timezone: (req.body && req.body.timezone != null) ? String(req.body.timezone).trim() : 'Asia/Tokyo',
   });
+  try {
+    reloadMemLogsFromDisk();
+  } catch (_) {
+    // 재적재 실패 시에도 설정 저장은 유지
+  }
   return res.redirect('/admin/settings');
 });
 
