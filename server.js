@@ -7048,6 +7048,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       };
       const pgCbDisplay = jpayCbKey ? jnotiFromKey(jpayCbKey) : cbDisplay;
       const pgRsDisplay = jpayRsKey ? jnotiFromKey(jpayRsKey) : rsDisplay;
+      const listPg = resolveMerchantListPgAcquirer(m);
       const merchantPgKind = jpayCbKey || jpayRsKey ? 'jpay' : 'chillpay';
       const cbUrl = m.callbackUrl || '';
       const rsUrl = m.resultUrl || '';
@@ -7066,6 +7067,11 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <td>${m.routeNo || ''}</td>
         <td>${m.internalCustomerId || ''}</td>
         <td>${internalTargetId}</td>
+        <td style="font-weight:600;color:${listPg === 'jpay' ? '#7c3aed' : '#0369a1'};">${
+          listPg === 'jpay'
+            ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
+            : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
+        }</td>
         <td>${relay}</td>
         <td>${internal}</td>
         <td>${devInternal}</td>
@@ -7143,7 +7149,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
     .card { background:#ffffff; padding:18px 22px; border-radius:10px; box-shadow:0 10px 25px rgba(15,23,42,0.06); margin-bottom:8px; border:1px solid #e5e7eb; }
     .cell-url { word-break: break-all; overflow-wrap: break-word; white-space: normal; max-width: 200px; text-align: center; }
     .merchants-table-wrap { overflow-x: auto; }
-    .merchants-table-wrap table { min-width: 1020px; }
+    .merchants-table-wrap table { min-width: 1120px; }
   </style>
 </head>
 <body>
@@ -7173,11 +7179,11 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           <div style="font-size:13px;font-weight:700;color:#1e293b;margin-bottom:8px;">${t(locale, 'merchants_pg_route_title')}</div>
           <label style="display:inline-flex;align-items:center;gap:8px;margin-right:20px;">
             <input type="radio" name="merchantPgKind" id="merchant-pg-chillpay" value="chillpay" checked />
-            <span>ChillPay</span>
+            <span>${t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY'}</span>
           </label>
           <label style="display:inline-flex;align-items:center;gap:8px;">
             <input type="radio" name="merchantPgKind" id="merchant-pg-jpay" value="jpay" />
-            <span>JPAY</span>
+            <span>${t(locale, 'merchants_pg_provider_jpay') || 'JPAY'}</span>
           </label>
           <p class="admin-page-desc">${t(locale, 'merchants_pg_route_hint')}</p>
         </div>
@@ -7305,6 +7311,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             <th style="width:70px;">${t(locale, 'merchants_th_route')}</th>
             <th style="width:90px;">CustomerId</th>
             <th style="width:100px;">${t(locale, 'merchants_th_target')}</th>
+            <th style="width:88px;">${t(locale, 'merchants_th_pg_acquirer')}</th>
             <th style="width:50px;">${t(locale, 'merchants_relay')}</th>
             <th style="width:50px;">${t(locale, 'merchants_internal')}</th>
             <th style="width:50px;">${t(locale, 'common_dev')}</th>
@@ -7314,7 +7321,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <tbody>
           ${
             rows ||
-            `<tr><td colspan="12" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
+            `<tr><td colspan="13" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
           }
         </tbody>
       </table>
@@ -7555,6 +7562,23 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 </html>`);
 });
 
+/**
+ * 가맹점 목록 PG 구분: 전산 **등록대상**(internalTargetId)의 pgProvider 우선,
+ * 미선택·미등록 시 노티 수신 경로(jpay/callback/… vs callback/N)로 판별.
+ */
+function resolveMerchantListPgAcquirer(m) {
+  if (!m || typeof m !== 'object') return 'chillpay';
+  const tid = String(m.internalTargetId || '').trim();
+  if (tid && INTERNAL_TARGETS.has(tid)) {
+    const pg = String(INTERNAL_TARGETS.get(tid).pgProvider || '').toLowerCase().trim();
+    if (pg === 'jpay' || pg === 'chillpay') return pg;
+  }
+  const jpayCb = String(m.jpayRouteCallbackKey || '').trim();
+  const jpayRs = String(m.jpayRouteResultKey || '').trim();
+  if (jpayCb || jpayRs) return 'jpay';
+  return 'chillpay';
+}
+
 // 가맹점 목록 Excel(CSV) 내보내기 (현재 정렬 기준)
 function getSortedMerchantEntries(sortType) {
   let entries = [...MERCHANTS.entries()];
@@ -7602,6 +7626,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
     'Route No',
     'Internal CustomerId',
     t(locale, 'merchants_th_target'),
+    t(locale, 'merchants_th_pg_acquirer'),
     t(locale, 'merchants_relay'),
     t(locale, 'merchants_internal'),
     t(locale, 'common_dev'),
@@ -7622,7 +7647,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
       if (!ma) return s ? notiBase + s.replace(/^\/?/, '') : '';
       return `https://noti.icopay.net/noti/${ma[1]}/${ma[2]}`;
     };
-    const pgKind = (m.merchantPgKind || '').toString().trim().toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
+    const pgKind = resolveMerchantListPgAcquirer(m);
     if (pgKind === 'jpay') {
       cbDisplay = jpayCbK ? jnotiU(jpayCbK) : '';
       rsDisplay = jpayRsK ? jnotiU(jpayRsK) : '';
@@ -7640,6 +7665,9 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
         m.routeNo || '',
         m.internalCustomerId || '',
         m.internalTargetId || '',
+        pgKind === 'jpay'
+          ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
+          : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY'),
         relay,
         internal,
         devInternal,
@@ -11039,7 +11067,7 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
   const rows = displayFilteredNoti.map((e) => {
     const dt = e.sentAtIso ? new Date(e.sentAtIso).toLocaleString('ko-KR', { hour12: false }) : '-';
     const typeLabel = e.type === 'void' ? t(locale, 'cr_type_void') : e.type === 'refund' ? t(locale, 'cr_type_refund') : e.type || '-';
-    const pgProvLabel = (e.pgProvider || 'chillpay') === 'jpay' ? 'JPAY' : 'CHILLPAY';
+    const pgProvLabel = (e.pgProvider || 'chillpay') === 'jpay' ? t(locale, 'pg_provider_jpay') : t(locale, 'pg_provider_chillpay');
     const notiMerchant = e.merchantId ? MERCHANTS.get(e.merchantId) : null;
     const internalTargetName = getInternalTargetName(notiMerchant && notiMerchant.internalTargetId);
     const resendForm =
@@ -11070,7 +11098,7 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
   }).join('');
   const envParam = '&env=' + encodeURIComponent(envNoti);
   const pgParam = pgFilter !== 'all' ? '&pg=' + encodeURIComponent(pgFilter) : '';
-  const pgFilterAllLabel = t(locale, 'cr_filter_pg_all') || 'PG 전체';
+  const pgFilterAllLabel = t(locale, 'cr_filter_pg_all') || 'All PGs';
   const pgFilterChillLabel = t(locale, 'cr_filter_pg_chillpay') || 'CHILLPAY';
   const pgFilterJpayLabel = t(locale, 'cr_filter_pg_jpay') || 'JPAY';
   const filterLinks = `<div style="margin-bottom:12px;font-size:12px;color:#374151;">
@@ -11696,7 +11724,7 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cr_void_s
   for (const e of notiEntries) {
     const cat = categorize(e.type, e.mode);
     const dt = formatDateAndTimeTHJP(e.sentAtIso || e.sentAt || '');
-    const pgTag = (e.pgProvider || 'chillpay') === 'jpay' ? 'JPAY' : 'CHILLPAY';
+    const pgTag = (e.pgProvider || 'chillpay') === 'jpay' ? t(locale, 'pg_provider_jpay') : t(locale, 'pg_provider_chillpay');
     rowsData.push({
       sentAt: dt,
       category: cat,
