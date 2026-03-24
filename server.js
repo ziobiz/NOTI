@@ -8411,14 +8411,14 @@ const cancelRefundLayoutCss = ADMIN_PAGE_DESC_BOX_CSS + `
   .card table th, .card table td { text-align: center; vertical-align: middle; }
   tr:nth-child(even) { background:#f9fafb; }
   .tx-status-fail { color: #dc2626; font-weight: 600; }
-  .tx-status-success { color: #2563eb; font-weight: 600; }
-  .tx-status-cancel { color: #059669; font-weight: 600; }
+  .tx-status-success { color: #047857; font-weight: 600; }
+  .tx-status-cancel { color: #6b7280; font-weight: 600; }
   .tx-status-void-manual { color: #7c3aed; font-weight: 600; }
   .tx-status-refund-manual { color: #84cc16; font-weight: 600; }
   .tx-badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; white-space: nowrap; border: 1px solid transparent; }
   .tx-badge-fail { background: #fecaca; color: #b91c1c; }
-  .tx-badge-cancel { background: #a7f3d0; color: #047857; }
-  .tx-badge-success { background: #bae6fd; color: #0369a1; }
+  .tx-badge-cancel { background: #e5e7eb; color: #4b5563; }
+  .tx-badge-success { background: #a7f3d0; color: #047857; }
   .tx-badge-void-manual { background: #e9d5ff; color: #6d28d9; }
   .tx-badge-refund-manual { background: #d9f99d; color: #65a30d; }
   .tx-badge-noti { background: #f3f4f6; color: #4b5563; }
