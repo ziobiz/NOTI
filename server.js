@@ -377,6 +377,57 @@ const DEFAULT_AMOUNT_DISPLAY_OP = '/'; // '*', '/', '+', '-'
 const DEFAULT_AMOUNT_DISPLAY_VALUE = 100;
 const DEFAULT_SMTP_PORT = 587;
 const SMTP_PASSWORD_DUMMY = '********';
+/** ChillPay PG callback Route No 중 REDIRECT(Host) 방식으로 분류되는 번호 (환경설정에서 변경 가능) */
+const DEFAULT_CHILLPAY_REDIRECT_ROUTE_NUMBERS = [1, 2, 10, 17, 18];
+
+function normalizeChillpayRedirectRouteNos(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const x of arr || []) {
+    const n = typeof x === 'number' && Number.isFinite(x) ? x : parseInt(x, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 50) continue;
+    if (seen.has(n)) continue;
+    seen.add(n);
+    out.push(n);
+  }
+  out.sort((a, b) => a - b);
+  return out.length ? out : [...DEFAULT_CHILLPAY_REDIRECT_ROUTE_NUMBERS];
+}
+
+function parseChillpayRedirectRouteNosFromText(str) {
+  const parts = String(str || '')
+    .split(/[\s,;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const nums = [];
+  for (const p of parts) {
+    const n = parseInt(p, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 50) nums.push(n);
+  }
+  return normalizeChillpayRedirectRouteNos(nums);
+}
+
+/** callback/8 또는 레거시 숫자만 */
+function extractChillpayCallbackRouteNo(routeCallbackKey) {
+  const s = String(routeCallbackKey || '').trim();
+  if (!s) return null;
+  const m = s.match(/callback\/(\d+)/i);
+  if (m) return parseInt(m[1], 10);
+  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  return null;
+}
+
+function getChillpayRedirectRouteNosForUi() {
+  const cfg = loadChillPayTransactionConfig();
+  return normalizeChillpayRedirectRouteNos(cfg.redirectRouteNos);
+}
+
+function isChillpayRedirectHostedPayment(routeCallbackKey) {
+  const n = extractChillpayCallbackRouteNo(routeCallbackKey);
+  if (n == null) return false;
+  const set = new Set(getChillpayRedirectRouteNosForUi());
+  return set.has(n);
+}
 
 function loadChillPayTransactionConfig() {
   try {
@@ -411,6 +462,9 @@ function loadChillPayTransactionConfig() {
       pgTransactionIncrementalDays: Number.isFinite(o && o.pgTransactionIncrementalDays) && o.pgTransactionIncrementalDays > 0 ? Math.min(365, o.pgTransactionIncrementalDays) : DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
       logKeepDaysMem: Number.isFinite(o && o.logKeepDaysMem) && o.logKeepDaysMem > 0 ? o.logKeepDaysMem : DEFAULT_LOG_KEEP_DAYS_MEM,
       logKeepDaysDisk: Number.isFinite(o && o.logKeepDaysDisk) && o.logKeepDaysDisk > 0 ? o.logKeepDaysDisk : DEFAULT_LOG_KEEP_DAYS_DISK,
+      redirectRouteNos: normalizeChillpayRedirectRouteNos(
+        Array.isArray(o && o.redirectRouteNos) ? o.redirectRouteNos : DEFAULT_CHILLPAY_REDIRECT_ROUTE_NUMBERS,
+      ),
       timezone: (o && o.timezone && String(o.timezone).trim()) ? String(o.timezone).trim() : DEFAULT_CHILLPAY_TIMEZONE,
       useSandbox: !!(o && o.useSandbox === true),
       emailFrom: (o && o.emailFrom != null) ? String(o.emailFrom).trim() : '',
@@ -441,6 +495,7 @@ function loadChillPayTransactionConfig() {
       pgTransactionIncrementalDays: DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
       logKeepDaysMem: DEFAULT_LOG_KEEP_DAYS_MEM,
       logKeepDaysDisk: DEFAULT_LOG_KEEP_DAYS_DISK,
+      redirectRouteNos: normalizeChillpayRedirectRouteNos([...DEFAULT_CHILLPAY_REDIRECT_ROUTE_NUMBERS]),
       timezone: DEFAULT_CHILLPAY_TIMEZONE,
       useSandbox: APP_ENV === 'test',
       emailFrom: '',
@@ -476,6 +531,12 @@ function saveChillPayTransactionConfig(o) {
     pgTransactionIncrementalDays: o && Number.isFinite(o.pgTransactionIncrementalDays) && o.pgTransactionIncrementalDays > 0 ? Math.min(365, o.pgTransactionIncrementalDays) : cur.pgTransactionIncrementalDays || DEFAULT_PG_TRANSACTION_INCREMENTAL_DAYS,
     logKeepDaysMem: o && Number.isFinite(o.logKeepDaysMem) && o.logKeepDaysMem > 0 ? o.logKeepDaysMem : cur.logKeepDaysMem || DEFAULT_LOG_KEEP_DAYS_MEM,
     logKeepDaysDisk: o && Number.isFinite(o.logKeepDaysDisk) && o.logKeepDaysDisk > 0 ? o.logKeepDaysDisk : cur.logKeepDaysDisk || DEFAULT_LOG_KEEP_DAYS_DISK,
+    redirectRouteNos:
+      o && Array.isArray(o.redirectRouteNos)
+        ? normalizeChillpayRedirectRouteNos(o.redirectRouteNos)
+        : cur.redirectRouteNos && cur.redirectRouteNos.length
+          ? normalizeChillpayRedirectRouteNos(cur.redirectRouteNos)
+          : normalizeChillpayRedirectRouteNos([...DEFAULT_CHILLPAY_REDIRECT_ROUTE_NUMBERS]),
     timezone: (o && o.timezone != null && String(o.timezone).trim()) ? String(o.timezone).trim() : cur.timezone,
     amountDisplayOp: (o && typeof o.amountDisplayOp === 'string' && ['*', '/', '+', '-'].includes(o.amountDisplayOp)) ? o.amountDisplayOp : cur.amountDisplayOp || DEFAULT_AMOUNT_DISPLAY_OP,
     amountDisplayValue: o && Number.isFinite(o.amountDisplayValue) ? o.amountDisplayValue : cur.amountDisplayValue,
@@ -5706,6 +5767,11 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
     alertHtml = '<div class="alert alert-fail">' + reason + '</div>';
   } else if (q.icopaySaved === '1') {
     alertHtml = '<div class="alert alert-ok">' + escQ(t(locale, 'settings_icopay_saved') || 'ICOPAY 금액 규칙을 저장했습니다.') + '</div>';
+  } else if (q.redirectRoutes === '1') {
+    alertHtml =
+      '<div class="alert alert-ok">' +
+      escQ(t(locale, 'settings_chillpay_redirect_routes_saved') || 'REDIRECT Route 번호를 저장했습니다.') +
+      '</div>';
   }
   const titleVal = (site.sidebarTitle || '').replace(/"/g, '&quot;');
   const subVal = (site.sidebarSub || '').replace(/"/g, '&quot;');
@@ -5842,6 +5908,21 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
           + '<button type="button" id="chillpay-cred-cancel-btn" style="display:none;">' + t(locale, 'common_cancel') + '</button>'
           + '</div></form>'
           + '<script>(function(){ var f=document.getElementById("chillpay-cred-form"); if(!f) return; var inps=f.querySelectorAll("input[type=\'text\']"); var editBtn=document.getElementById("chillpay-cred-edit-btn"); var saveBtn=document.getElementById("chillpay-cred-save-btn"); var cancelBtn=document.getElementById("chillpay-cred-cancel-btn"); var confirmEdit="' + (t(locale, 'chillpay_confirm_edit') || '').replace(/"/g, '&quot;') + '"; editBtn.onclick=function(){ if(!confirm(confirmEdit)) return; inps.forEach(function(i){ i.removeAttribute("readonly"); }); editBtn.style.display="none"; saveBtn.style.display="inline-block"; cancelBtn.style.display="inline-block"; }; cancelBtn.onclick=function(){ inps.forEach(function(i){ var v=i.getAttribute("data-initial"); if(v!==null) i.value=v; i.setAttribute("readonly","readonly"); }); editBtn.style.display="inline-block"; saveBtn.style.display="none"; cancelBtn.style.display="none"; }; })();</script></div>'
+          + '<div class="card card-chillpay"><h2>' +
+          t(locale, 'settings_chillpay_redirect_routes_title') +
+          '</h2><p class="chillpay-desc">' +
+          t(locale, 'settings_chillpay_redirect_routes_desc') +
+          '</p><form method="post" action="/admin/settings/chillpay-redirect-routes" onsubmit="return confirm(\'' +
+          (t(locale, 'chillpay_time_confirm_save') || '').replace(/'/g, "\\'") +
+          '\');"><label class="chillpay-cell" style="display:block;width:100%;max-width:640px;"><span class="chillpay-label">' +
+          t(locale, 'settings_chillpay_redirect_routes_label') +
+          '</span><textarea name="redirectRouteNosText" rows="2" style="width:100%;max-width:640px;padding:8px;border-radius:6px;border:1px solid #d1d5db;font-size:13px;box-sizing:border-box;">' +
+          q((c.redirectRouteNos || []).join(', ')) +
+          '</textarea></label><p class="chillpay-hint">' +
+          t(locale, 'settings_chillpay_redirect_routes_hint') +
+          '</p><div class="chillpay-submit"><button type="submit">' +
+          t(locale, 'common_save') +
+          '</button></div></form></div>'
           + renderJpayEnvironmentCard(locale, req.query || {})
           + '<div class="card card-chillpay"><h2>' + t(locale, 'chillpay_time_title') + '</h2><p class="admin-page-desc">' + t(locale, 'chillpay_time_desc') + '</p>'
           + '<form method="post" action="/admin/settings/chillpay-time" onsubmit="return confirm(\'' + (t(locale, 'chillpay_time_confirm_save') || '').replace(/'/g, "\\'") + '\');">'
@@ -6075,6 +6156,13 @@ app.post('/admin/settings/chillpay-credentials', requireAuth, requireSettingsOrR
     production: { mid: productionMid, apiKey: productionApiKey, md5: productionMd5 },
   });
   return res.redirect('/admin/settings');
+});
+
+app.post('/admin/settings/chillpay-redirect-routes', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
+  const text = req.body && req.body.redirectRouteNosText != null ? String(req.body.redirectRouteNosText) : '';
+  const nos = parseChillpayRedirectRouteNosFromText(text);
+  saveChillPayTransactionConfig({ redirectRouteNos: nos });
+  return res.redirect('/admin/settings?redirectRoutes=1');
 });
 
 app.post('/admin/settings/chillpay-time', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
@@ -7022,6 +7110,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 
   const sortType = (req.query.sort || 'recent').toString();
   const sortedEntries = getSortedMerchantEntries(sortType);
+  const chillpayRedirectRouteNosJson = JSON.stringify(getChillpayRedirectRouteNosForUi());
+  const chillpayRedirectAlertJson = JSON.stringify(t(locale, 'merchants_alert_redirect_hosted'));
 
   const rows = Array.from(sortedEntries)
     .map(([id, m]) => {
@@ -7072,6 +7162,14 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
             : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
         }</td>
+        <td style="font-size:12px;">${String(merchantChillpayPayModeLabel(locale, m))
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')}</td>
+        <td>${String(merchantChillpayRecurringCell(m))
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')}</td>
         <td>${relay}</td>
         <td>${internal}</td>
         <td>${devInternal}</td>
@@ -7095,6 +7193,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
               data-merchant-pg-kind="${merchantPgKind}"
               data-jpay-route-callback-key="${jpayCbKey}"
               data-jpay-route-result-key="${jpayRsKey}"
+              data-chillpay-recurring="${m.chillpayRecurring === 'Y' ? 'Y' : 'N'}"
               style="padding:4px 8px;font-size:12px;background:#facc15;color:#111827;border:none;border-radius:4px;cursor:pointer;"
             >${t(locale, 'merchants_edit')}</button>
             <form method="post" action="/admin/merchants/delete" onsubmit="return confirm('${confirmDel}') && confirm('${confirmDel2}');" style="margin:0;">
@@ -7175,6 +7274,16 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             ${internalOptions}
           </select>
         </label>
+        <div id="merch-subscription-service-wrap">
+        <label>
+          ${t(locale, 'merchants_label_subscription_service')}
+          <select name="chillpayRecurring" id="merchant-chillpay-recurring">
+            <option value="N">${t(locale, 'merchants_option_subscription_n')}</option>
+            <option value="Y">${t(locale, 'merchants_option_subscription_y')}</option>
+          </select>
+        </label>
+        <p class="admin-page-desc">${t(locale, 'merchants_subscription_service_hint')}</p>
+        </div>
         <div style="margin-top:16px;padding:12px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
           <div style="font-size:13px;font-weight:700;color:#1e293b;margin-bottom:8px;">${t(locale, 'merchants_pg_route_title')}</div>
           <label style="display:inline-flex;align-items:center;gap:8px;margin-right:20px;">
@@ -7312,6 +7421,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             <th style="width:90px;">CustomerId</th>
             <th style="width:100px;">${t(locale, 'merchants_th_target')}</th>
             <th style="width:88px;">${t(locale, 'merchants_th_pg_acquirer')}</th>
+            <th style="width:110px;">${t(locale, 'merchants_th_pay_mode')}</th>
+            <th style="width:56px;">${t(locale, 'merchants_th_recurring')}</th>
             <th style="width:50px;">${t(locale, 'merchants_relay')}</th>
             <th style="width:50px;">${t(locale, 'merchants_internal')}</th>
             <th style="width:50px;">${t(locale, 'common_dev')}</th>
@@ -7321,7 +7432,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <tbody>
           ${
             rows ||
-            `<tr><td colspan="13" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
+            `<tr><td colspan="15" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
           }
         </tbody>
       </table>
@@ -7349,6 +7460,22 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       var warningBox = document.getElementById('route-warning');
       var form = document.getElementById('merchant-form');
       var editButtons = document.querySelectorAll('.edit-merchant');
+      var chillpayRedirectRouteNos = ${chillpayRedirectRouteNosJson};
+      var chillpayRedirectHostedMsg = ${chillpayRedirectAlertJson};
+
+      function routeNoFromCbSelectVal(val) {
+        if (!val) return null;
+        var m = String(val).match(/callback\\/(\\d+)/i);
+        return m ? parseInt(m[1], 10) : null;
+      }
+      function maybeAlertChillpayRedirectHosted() {
+        if (!cbSelect || !radChill || !radChill.checked) return;
+        var n = routeNoFromCbSelectVal(cbSelect.value);
+        if (n == null || !chillpayRedirectRouteNos || !chillpayRedirectRouteNos.length) return;
+        if (chillpayRedirectRouteNos.indexOf(n) !== -1) {
+          alert(chillpayRedirectHostedMsg);
+        }
+      }
 
       // 항상 이 도메인 기준으로 전체 주소 생성
       var baseUrl = 'https://noti.icopay.net';
@@ -7384,9 +7511,11 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var wrapRoute = document.getElementById('merch-chillpay-route-fields');
         var rn = document.getElementById('merchant-route-no');
         var cid = document.getElementById('merchant-internal-customer-id');
+        var subWrap = document.getElementById('merch-subscription-service-wrap');
         if (wrapRoute) wrapRoute.style.display = j ? 'none' : 'block';
         if (rn) rn.disabled = !!j;
         if (cid) cid.disabled = !!j;
+        if (subWrap) subWrap.style.display = j ? 'none' : 'block';
       }
 
       function jnotiUrlFromRouteKey(rk) {
@@ -7438,7 +7567,11 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         alert('${(t(locale, 'merchants_copied') || '').replace(/'/g, "\\'")}');
       }
 
-      if (cbSelect) cbSelect.addEventListener('change', updatePreviews);
+      if (cbSelect)
+        cbSelect.addEventListener('change', function () {
+          maybeAlertChillpayRedirectHosted();
+          updatePreviews();
+        });
       if (rsSelect) rsSelect.addEventListener('change', updatePreviews);
       if (jpayCbSelect) jpayCbSelect.addEventListener('change', updatePreviews);
       if (jpayRsSelect) jpayRsSelect.addEventListener('change', updatePreviews);
@@ -7540,6 +7673,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         if (jpayCbSelect) jpayCbSelect.value = button.dataset.jpayRouteCallbackKey || '';
         if (jpayRsSelect) jpayRsSelect.value = button.dataset.jpayRouteResultKey || '';
 
+        var recSel = document.getElementById('merchant-chillpay-recurring');
+        if (recSel) recSel.value = (button.dataset.chillpayRecurring || 'N') === 'Y' ? 'Y' : 'N';
+
         updatePreviews();
       }
 
@@ -7577,6 +7713,20 @@ function resolveMerchantListPgAcquirer(m) {
   const jpayRs = String(m.jpayRouteResultKey || '').trim();
   if (jpayCb || jpayRs) return 'jpay';
   return 'chillpay';
+}
+
+/** 가맹점 목록: ChillPay 결제 방식(A/B). JPAY는 표시용 대시 */
+function merchantChillpayPayModeLabel(locale, m) {
+  if (resolveMerchantListPgAcquirer(m) === 'jpay') return t(locale, 'merchants_mode_jpay_dash');
+  const cb = String(m.routeCallbackKey || '').trim();
+  if (isChillpayRedirectHostedPayment(cb)) return t(locale, 'merchants_mode_a_redirect');
+  return t(locale, 'merchants_mode_b_inline');
+}
+
+/** 가맹점 목록: Recurring Y/N (ChillPay만; JPAY는 —) */
+function merchantChillpayRecurringCell(m) {
+  if (resolveMerchantListPgAcquirer(m) === 'jpay') return '—';
+  return m.chillpayRecurring === 'Y' ? 'Y' : 'N';
 }
 
 // 가맹점 목록 Excel(CSV) 내보내기 (현재 정렬 기준)
@@ -7627,6 +7777,8 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
     'Internal CustomerId',
     t(locale, 'merchants_th_target'),
     t(locale, 'merchants_th_pg_acquirer'),
+    t(locale, 'merchants_th_pay_mode'),
+    t(locale, 'merchants_th_recurring'),
     t(locale, 'merchants_relay'),
     t(locale, 'merchants_internal'),
     t(locale, 'common_dev'),
@@ -7668,6 +7820,8 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
         pgKind === 'jpay'
           ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
           : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY'),
+        merchantChillpayPayModeLabel(locale, m),
+        merchantChillpayRecurringCell(m),
         relay,
         internal,
         devInternal,
@@ -7700,6 +7854,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     jpayRouteCallbackKey,
     jpayRouteResultKey,
     merchantPgKind: rawPgKind,
+    chillpayRecurring: rawChillpayRecurring,
   } = req.body;
 
   const merchantId = (rawMerchantId || '').trim();
@@ -7762,6 +7917,9 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
   const rsSaved = enableRelayOn ? String(resultUrl || '').trim() : '';
   const rnSaved = pgKind === 'jpay' ? '' : String(routeNo || '').trim();
   const icSaved = pgKind === 'jpay' ? '' : String(internalCustomerId || '').trim();
+  const recRaw = String(rawChillpayRecurring || '').trim().toUpperCase();
+  const chillpayRecurringYn = pgKind === 'jpay' ? 'N' : recRaw === 'Y' ? 'Y' : 'N';
+
   MERCHANTS.set(merchantId, {
     ...prev,
     merchantId,
@@ -7780,6 +7938,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     jpayRouteResultKey: jpayRs,
     jpayCallbackUrl: '',
     jpayResultUrl: '',
+    chillpayRecurring: chillpayRecurringYn,
   });
 
   console.log('[관리자] 가맹점 저장:', merchantId, MERCHANTS.get(merchantId));
