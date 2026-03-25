@@ -13,6 +13,7 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const QRCode = require('qrcode');
 const crypto = require('crypto');
+const os = require('os');
 const nodemailer = require('nodemailer');
 const { t } = require('./locales');
 
@@ -62,6 +63,44 @@ const ADMIN_PAGE_DESC_BOX_CSS = `
     p.page-desc a { color: #2563eb; }
     .admin-page-desc strong,
     p.page-desc strong { color: #374151; }
+`;
+
+/** 관리자 레이아웃 공통: 사이드바·네비·상단바·main (getAdminSidebar 앞에 삽입) */
+const ADMIN_LAYOUT_SHELL_CSS = `
+    .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .sidebar-lang { margin-top:12px; font-size:12px; color:#9ca3af; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav-group { margin-bottom:2px; border:1px solid transparent; border-radius:6px; }
+    .nav-group-summary { font-size:14px; font-weight:600; color:#e5e7eb; padding:6px 8px; cursor:pointer; list-style:none; text-transform:uppercase; letter-spacing:0.06em; display:flex; align-items:center; justify-content:space-between; border-radius:6px; }
+    .nav-group-summary::-webkit-details-marker { display:none; }
+    .nav-group-summary::marker { content:""; }
+    .nav-group-summary::after { content:"\\25BC"; font-size:14px; opacity:0.7; transition:transform 0.15s ease; flex-shrink:0; }
+    .nav-group[open] .nav-group-summary::after { transform:rotate(-180deg); }
+    .nav-group-summary .nav-group-summary-link { flex:1; min-width:0; display:block; text-align:left; padding:0; margin:0; font:inherit; color:inherit; text-decoration:none; }
+    .nav-group-items { padding-left:4px; padding-bottom:6px; display:flex; flex-direction:column; gap:2px; }
+    .nav-group-items a { display:block; padding:6px 10px; color:#e5e7eb; text-decoration:none; font-size:13px; line-height:1.4; border-radius:6px; box-sizing:border-box; }
+    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(59, 130, 246, 0.35); color:#dbeafe; }
+    .nav-group-items a:hover, .nav-group-items a.active { background:rgba(59, 130, 246, 0.35); color:#dbeafe; }
+    .nav-github-style .nav-item-small { font-size:12px; white-space:nowrap; }
+    .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; min-width:0; }
+    .topbar { background:linear-gradient(180deg, #f8fafc 0%, #e0f2fe 100%); border-radius:10px; padding:10px 16px; font-size:13px; color:#1e293b; border:1px solid #bae6fd; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px 16px; box-shadow:0 1px 2px rgba(15,23,42,0.05); }
+    .topbar-meta, .topbar-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; }
+    .topbar-actions { margin-left:auto; }
+    .topbar-chip { display:inline-flex; flex-wrap:wrap; align-items:center; gap:4px 8px; padding:6px 12px; background:#fff; border:1px solid #bae6fd; border-radius:8px; line-height:1.35; }
+    .topbar-chip.topbar-chip-plain { background:transparent; border-color:transparent; box-shadow:none; padding:4px 4px 4px 8px; }
+    .topbar-k { font-weight:600; color:#0369a1; font-size:11px; text-transform:uppercase; letter-spacing:0.04em; }
+    .topbar-v { font-weight:500; color:#0f172a; word-break:break-word; }
+    .topbar-lang-links a { color:#0369a1; text-decoration:none; font-weight:600; margin:0 3px; font-size:12px; }
+    .topbar-lang-links a:hover { text-decoration:underline; color:#1d4ed8; }
+    .topbar-logout { color:#0369a1; text-decoration:none; font-weight:600; font-size:13px; padding:5px 12px; border-radius:6px; border:1px solid #7dd3fc; background:#fff; }
+    .topbar-logout:hover { background:#e0f2fe; color:#1e40af; }
+    .sidebar-lang a { color:#93c5fd; text-decoration:none; margin:0 2px; font-weight:600; }
+    .sidebar-lang a:hover { color:#dbeafe; text-decoration:underline; }
 `;
 
 /** multipart/form-data (파일 필드 제외, 텍스트 필드만) */
@@ -206,6 +245,7 @@ app.use(
 const staticDir = path.join(__dirname, 'static');
 if (!fs.existsSync(staticDir)) fs.mkdirSync(staticDir, { recursive: true });
 app.use('/static', express.static(staticDir));
+app.use(systemMonitorTrafficMiddleware);
 
 // 루트(/) 접속 시 관리자 로그인으로 이동
 app.get('/', (req, res) => res.redirect('/admin/login'));
@@ -273,6 +313,7 @@ const PAGE_KEYS = [
   'cr_noti',
   'cr_void_deleted',
   'mail_logs',
+  'advanced_system_monitor',
 ];
 /** 페이지 키별 로그인 후 기본 이동 URL (운영자 등 접근 가능한 첫 페이지로 리다이렉트용) */
 const PAGE_KEY_TO_DEFAULT_URL = {
@@ -303,6 +344,7 @@ const PAGE_KEY_TO_DEFAULT_URL = {
   cr_noti: '/admin/cancel-refund/noti',
   cr_void_deleted: '/admin/cancel-refund/void-deleted-list',
   mail_logs: '/admin/mail-logs',
+  advanced_system_monitor: '/admin/system-monitor',
 };
 function getFirstAllowedRedirectUrl(permissions) {
   if (!Array.isArray(permissions) || permissions.length === 0) return '/admin/merchants';
@@ -1520,7 +1562,7 @@ function saveTestConfigs() {
   saveJsonConfig(TEST_CONFIGS_CONFIG_PATH, obj);
 }
 
-// ========== 가맹점 라우팅 설정 (merchantId -> { routeCallbackKey, routeResultKey, callbackUrl, resultUrl, routeNo, internalCustomerId, internalTargetId, enableRelay, enableInternal, enableDevInternal }) ==========
+// ========== 가맹점 라우팅 설정 (merchantId -> { …, resultDeliveryMode?: auto|no_browser_redirect }) ==========
 // routeCallbackKey / routeResultKey 는 PG에 등록할 우리 쪽 노티 URL의 마지막 경로입니다.
 // 예) PG callback URL: https://api.our-system.com/noti/rount_c1  → routeCallbackKey = 'rount_c1'
 function loadMerchants() {
@@ -1612,8 +1654,294 @@ const CONFIG_LOG_PATH = path.join(DATA_DIR, 'config-change.log');
 const VOID_REFUND_NOTI_LOG_PATH = path.join(DATA_DIR, 'void-refund-noti.log');
 const VOID_UI_DELETED_PATH = path.join(DATA_DIR, 'void-ui-deleted.log');
 const MAIL_LOG_PATH = path.join(DATA_DIR, 'mail-logs.log');
+const SYSTEM_MONITOR_STATE_PATH = path.join(DATA_DIR, 'system-monitor-state.json');
+const SSL_MONITOR_STATE_PATH = path.join(DATA_DIR, 'ssl-monitor-state.json');
 const RECURRING_CALLBACK_LOG_PATH = path.join(DATA_DIR, 'recurring-callback.log');
 const VOID_UI_DELETED_RETENTION_DAYS = 31;
+
+/** 저장값이 없을 때만 사용: 환경변수 SYSTEM_MONITOR_MONTHLY_QUOTA_GB (기본 300GB) */
+function systemMonitorDefaultQuotaGb() {
+  const n = Number(process.env.SYSTEM_MONITOR_MONTHLY_QUOTA_GB);
+  if (Number.isFinite(n) && n >= 1) return Math.min(1000000, Math.floor(n));
+  return 300;
+}
+function parseSystemMonitorQuotaGbInput(raw) {
+  const n = Number(String(raw == null ? '' : raw).replace(/,/g, '.').trim());
+  if (!Number.isFinite(n) || n < 1 || n > 1000000) return null;
+  return Math.round(n);
+}
+function getEffectiveMonthlyQuotaGb() {
+  const st = getSystemMonitorState();
+  const parsed = parseSystemMonitorQuotaGbInput(st.monthlyQuotaGb);
+  if (parsed != null) return parsed;
+  return systemMonitorDefaultQuotaGb();
+}
+function getEffectiveMonthlyQuotaBytes() {
+  return getEffectiveMonthlyQuotaGb() * 1024 * 1024 * 1024;
+}
+function systemMonitorUsingSavedQuota() {
+  const st = getSystemMonitorState();
+  return parseSystemMonitorQuotaGbInput(st.monthlyQuotaGb) != null;
+}
+
+const systemMonitorRuntime = { state: null, saveTimer: null };
+function loadSystemMonitorState() {
+  try {
+    const raw = fs.readFileSync(SYSTEM_MONITOR_STATE_PATH, 'utf8');
+    const o = JSON.parse(raw);
+    if (!o || typeof o !== 'object') throw new Error('bad');
+    if (!Array.isArray(o.days)) o.days = [];
+    if (!Array.isArray(o.samples)) o.samples = [];
+    return o;
+  } catch (_) {
+    return { v: 1, days: [], samples: [], serverStartedAt: new Date().toISOString() };
+  }
+}
+function getSystemMonitorState() {
+  if (!systemMonitorRuntime.state) systemMonitorRuntime.state = loadSystemMonitorState();
+  return systemMonitorRuntime.state;
+}
+function saveSystemMonitorStateNow() {
+  const s = systemMonitorRuntime.state;
+  if (!s) return;
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(SYSTEM_MONITOR_STATE_PATH, JSON.stringify(s), 'utf8');
+  } catch (e) {
+    console.error('[system-monitor] save failed', e.message);
+  }
+}
+function scheduleSaveSystemMonitorState() {
+  if (systemMonitorRuntime.saveTimer) return;
+  systemMonitorRuntime.saveTimer = setTimeout(() => {
+    systemMonitorRuntime.saveTimer = null;
+    saveSystemMonitorStateNow();
+  }, 25000);
+}
+function recordSystemMonitorTraffic(bytesIn, bytesOut) {
+  const bi = Math.max(0, Math.floor(Number(bytesIn) || 0));
+  const bo = Math.max(0, Math.floor(Number(bytesOut) || 0));
+  if (bi === 0 && bo === 0) return;
+  const st = getSystemMonitorState();
+  const dKey = new Date().toISOString().slice(0, 10);
+  let row = st.days.find((x) => x && x.d === dKey);
+  if (!row) {
+    row = { d: dKey, in: 0, out: 0, memPeak: 0 };
+    st.days.push(row);
+    st.days.sort((a, b) => String(a.d).localeCompare(String(b.d)));
+    while (st.days.length > 500) st.days.shift();
+  }
+  row.in += bi;
+  row.out += bo;
+  scheduleSaveSystemMonitorState();
+}
+function systemMonitorTrafficMiddleware(req, res, next) {
+  const sock = req.socket;
+  if (!sock || typeof sock.bytesRead !== 'number') return next();
+  const br0 = sock.bytesRead;
+  const bw0 = sock.bytesWritten;
+  res.on('finish', () => {
+    try {
+      recordSystemMonitorTraffic(sock.bytesRead - br0, sock.bytesWritten - bw0);
+    } catch (_) {}
+  });
+  next();
+}
+function sampleSystemMonitorResources() {
+  const st = getSystemMonitorState();
+  const total = os.totalmem();
+  const used = total - os.freemem();
+  const memPct = total > 0 ? used / total : 0;
+  const pm = process.memoryUsage();
+  const la = os.loadavg();
+  const dKey = new Date().toISOString().slice(0, 10);
+  let row = st.days.find((x) => x && x.d === dKey);
+  if (!row) {
+    row = { d: dKey, in: 0, out: 0, memPeak: 0 };
+    st.days.push(row);
+    st.days.sort((a, b) => String(a.d).localeCompare(String(b.d)));
+    while (st.days.length > 500) st.days.shift();
+  }
+  if (memPct > (row.memPeak || 0)) row.memPeak = memPct;
+  st.samples.push({
+    t: Date.now(),
+    memPct,
+    heap: pm.heapUsed,
+    rss: pm.rss,
+    l1: la[0] || 0,
+    l5: la[1] || 0,
+    l15: la[2] || 0,
+  });
+  while (st.samples.length > 20000) st.samples.shift();
+  scheduleSaveSystemMonitorState();
+}
+setInterval(sampleSystemMonitorResources, 5 * 60 * 1000);
+setTimeout(sampleSystemMonitorResources, 8000);
+
+function systemMonitorMondayKeyUtc(ymd) {
+  const d = new Date(ymd + 'T12:00:00.000Z');
+  const dow = d.getUTCDay();
+  const diff = (dow + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - diff);
+  return d.toISOString().slice(0, 10);
+}
+function buildSystemMonitorAggregates(state) {
+  const days = [...(state.days || [])].filter((x) => x && x.d).sort((a, b) => String(a.d).localeCompare(String(b.d)));
+  const lastDays = (n) => days.slice(-n);
+  const daily = lastDays(31).map((x) => ({
+    label: x.d,
+    bytes: (x.in || 0) + (x.out || 0),
+    memPeakPct: Math.round((x.memPeak || 0) * 1000) / 10,
+  }));
+  const byWeek = new Map();
+  for (const x of days) {
+    const wk = systemMonitorMondayKeyUtc(x.d);
+    const cur = byWeek.get(wk) || { bytes: 0, memMax: 0 };
+    cur.bytes += (x.in || 0) + (x.out || 0);
+    cur.memMax = Math.max(cur.memMax, x.memPeak || 0);
+    byWeek.set(wk, cur);
+  }
+  const weekly = [...byWeek.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-12)
+    .map(([label, v]) => ({ label, bytes: v.bytes, memPeakPct: Math.round(v.memMax * 1000) / 10 }));
+  const byMonth = new Map();
+  for (const x of days) {
+    const mk = String(x.d).slice(0, 7);
+    const cur = byMonth.get(mk) || { bytes: 0, memMax: 0 };
+    cur.bytes += (x.in || 0) + (x.out || 0);
+    cur.memMax = Math.max(cur.memMax, x.memPeak || 0);
+    byMonth.set(mk, cur);
+  }
+  const monthly = [...byMonth.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-14)
+    .map(([label, v]) => ({ label, bytes: v.bytes, memPeakPct: Math.round(v.memMax * 1000) / 10 }));
+  const now = new Date();
+  const ym = now.toISOString().slice(0, 7);
+  let monthBytes = 0;
+  for (const x of days) {
+    if (String(x.d).startsWith(ym)) monthBytes += (x.in || 0) + (x.out || 0);
+  }
+  return { daily, weekly, monthly, monthBytes };
+}
+
+function replaceMonitorSummaryPlaceholders(str, map) {
+  let s = String(str || '');
+  if (!map || typeof map !== 'object') return s;
+  Object.keys(map).forEach((k) => {
+    const v = map[k] != null ? String(map[k]) : '';
+    s = s.split(`{{${k}}}`).join(v);
+  });
+  return s;
+}
+
+function buildTrafficComparePhrase(locale, prevBytes, curBytes, fmtB, noPrevKey) {
+  if (prevBytes == null) return t(locale, noPrevKey);
+  const diff = curBytes - prevBytes;
+  const absStr = fmtB(Math.abs(diff));
+  let word;
+  if (diff > 0) word = t(locale, 'monitor_traffic_word_up');
+  else if (diff < 0) word = t(locale, 'monitor_traffic_word_down');
+  else word = t(locale, 'monitor_traffic_word_same');
+  let pctPart = '';
+  if (prevBytes > 0) {
+    const sign = diff > 0 ? '+' : '';
+    pctPart = ` (${sign}${((diff / prevBytes) * 100).toFixed(1)}%)`;
+  }
+  return replaceMonitorSummaryPlaceholders(t(locale, 'monitor_traffic_cmp_line'), { word, abs: absStr, pctPart });
+}
+
+function buildTrafficChartSummaries(locale, agg) {
+  const fmtB = formatMonitorBytes;
+  const empty = t(locale, 'monitor_traffic_summary_empty');
+  const dailyRows = Array.isArray(agg.daily) ? agg.daily : [];
+  const weeklyRows = Array.isArray(agg.weekly) ? agg.weekly : [];
+  const monthlyRows = Array.isArray(agg.monthly) ? agg.monthly : [];
+
+  const dailyText =
+    dailyRows.length === 0
+      ? empty
+      : (() => {
+          const dn = dailyRows.length;
+          const last = dailyRows[dn - 1];
+          const prev = dn >= 2 ? dailyRows[dn - 2] : null;
+          const maxRow = dailyRows.reduce((a, b) => (b.bytes > a.bytes ? b : a), dailyRows[0]);
+          const last7 = dailyRows.slice(-7);
+          const sum7 = last7.reduce((s, r) => s + r.bytes, 0);
+          const sumAll = dailyRows.reduce((s, r) => s + r.bytes, 0);
+          const daysNonZero = dailyRows.filter((r) => r.bytes > 0).length;
+          const avg = daysNonZero > 0 ? sumAll / daysNonZero : 0;
+          const cmp = buildTrafficComparePhrase(locale, prev ? prev.bytes : null, last.bytes, fmtB, 'monitor_traffic_no_prev_day');
+          return replaceMonitorSummaryPlaceholders(t(locale, 'monitor_traffic_summary_daily'), {
+            count: String(dn),
+            sum7: fmtB(sum7),
+            sumAll: fmtB(sumAll),
+            lastLabel: last.label,
+            lastB: fmtB(last.bytes),
+            prevB: prev ? fmtB(prev.bytes) : '—',
+            cmp,
+            maxL: maxRow.label,
+            maxB: fmtB(maxRow.bytes),
+            avg: fmtB(avg),
+            memLast: last.memPeakPct != null ? String(last.memPeakPct) : '—',
+            memMax: maxRow.memPeakPct != null ? String(maxRow.memPeakPct) : '—',
+          });
+        })();
+
+  const weeklyText =
+    weeklyRows.length === 0
+      ? empty
+      : (() => {
+          const wn = weeklyRows.length;
+          const wLast = weeklyRows[wn - 1];
+          const wPrev = wn >= 2 ? weeklyRows[wn - 2] : null;
+          const sumAll = weeklyRows.reduce((s, r) => s + r.bytes, 0);
+          const maxW = weeklyRows.reduce((a, b) => (b.bytes > a.bytes ? b : a), weeklyRows[0]);
+          const cmp = buildTrafficComparePhrase(locale, wPrev ? wPrev.bytes : null, wLast.bytes, fmtB, 'monitor_traffic_no_prev_week');
+          return replaceMonitorSummaryPlaceholders(t(locale, 'monitor_traffic_summary_weekly'), {
+            count: String(wn),
+            sum: fmtB(sumAll),
+            lastLabel: wLast.label,
+            lastB: fmtB(wLast.bytes),
+            cmp,
+            maxL: maxW.label,
+            maxB: fmtB(maxW.bytes),
+            memLast: wLast.memPeakPct != null ? String(wLast.memPeakPct) : '—',
+            memMax: maxW.memPeakPct != null ? String(maxW.memPeakPct) : '—',
+          });
+        })();
+
+  const monthlyText =
+    monthlyRows.length === 0
+      ? empty
+      : (() => {
+          const mn = monthlyRows.length;
+          const mLast = monthlyRows[mn - 1];
+          const mPrev = mn >= 2 ? monthlyRows[mn - 2] : null;
+          const sumAll = monthlyRows.reduce((s, r) => s + r.bytes, 0);
+          const maxM = monthlyRows.reduce((a, b) => (b.bytes > a.bytes ? b : a), monthlyRows[0]);
+          const cmp = buildTrafficComparePhrase(locale, mPrev ? mPrev.bytes : null, mLast.bytes, fmtB, 'monitor_traffic_no_prev_month');
+          const ym = new Date().toISOString().slice(0, 7);
+          const thisRow = monthlyRows.find((r) => r.label === ym);
+          const monthUtc = fmtB(thisRow ? thisRow.bytes : agg.monthBytes || 0);
+          return replaceMonitorSummaryPlaceholders(t(locale, 'monitor_traffic_summary_monthly'), {
+            count: String(mn),
+            sum: fmtB(sumAll),
+            lastLabel: mLast.label,
+            lastB: fmtB(mLast.bytes),
+            cmp,
+            maxL: maxM.label,
+            maxB: fmtB(maxM.bytes),
+            ym,
+            monthUtc,
+            memLast: mLast.memPeakPct != null ? String(mLast.memPeakPct) : '—',
+            memMax: maxM.memPeakPct != null ? String(maxM.memPeakPct) : '—',
+          });
+        })();
+
+  return { daily: dailyText, weekly: weeklyText, monthly: monthlyText };
+}
 
 // ChillPay PG 거래 동기화용 최근 API 오류 (페이지 상단 안내용)
 let PG_TRANSACTIONS_LAST_ERROR_PROD = null;
@@ -3748,6 +4076,63 @@ function transformForDevInternal(original, merchant, options) {
   return payload;
 }
 
+/** RESULT: 브라우저 POST 시 302 리다이렉트 생략(가맹점으로 POST 릴레이만). PG 서버 노티·GET 리다이렉트 경로는 영향 없음. */
+function merchantSkipsResultBrowserRedirect(merchant) {
+  if (!merchant || typeof merchant !== 'object') return false;
+  const v = String(merchant.resultDeliveryMode || 'auto').trim().toLowerCase();
+  return v === 'no_browser_redirect' || v === 'post_only';
+}
+function merchantForcesResultBrowserRedirect(merchant) {
+  if (!merchant || typeof merchant !== 'object') return false;
+  const v = String(merchant.resultDeliveryMode || 'auto').trim().toLowerCase();
+  return v === 'post_force_redirect' || v === 'post_with_browser_redirect';
+}
+
+/** HTML 속성용 이스케이프 (자동 폼 POST) */
+function escapeHtmlAttr(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * 브라우저를 가맹점 resultUrl 로 넘길 때 302+GET 쿼리 대신, 칠페이 직결과 동일하게
+ * application/x-www-form-urlencoded POST 가 되도록 HTML 폼 자동 제출.
+ * (가맹점이 GET 복귀가 아닌 POST 복귀만 처리하는 경우 대응)
+ */
+function sendMerchantResultBrowserPostFormPage(res, targetUrl, body) {
+  let u;
+  try {
+    u = new URL(String(targetUrl || '').trim());
+  } catch (e) {
+    return res.status(500).send('Invalid result URL');
+  }
+  const merged = new Map();
+  u.searchParams.forEach((val, key) => {
+    merged.set(key, val);
+  });
+  if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
+    for (const [k, v] of Object.entries(body)) {
+      if (v === undefined || v === null || v === '') continue;
+      merged.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+    }
+  }
+  u.search = '';
+  const action = u.toString();
+  const inputs = [];
+  for (const [k, v] of merged) {
+    inputs.push(`<input type="hidden" name="${escapeHtmlAttr(k)}" value="${escapeHtmlAttr(v)}" />`);
+  }
+  const html = `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>…</title></head><body>
+<form id="icopay-result-relay" method="post" action="${escapeHtmlAttr(action)}">${inputs.join('')}</form>
+<script>document.getElementById('icopay-result-relay').submit();</script>
+<noscript><p><button type="submit" form="icopay-result-relay">Continue</button></p></noscript>
+</body></html>`;
+  return res.status(200).type('html').send(html);
+}
+
 /**
  * 가맹점으로 원본 그대로 릴레이
  * - options.rawBody 가 있으면 수신한 원문 그대로 전송 (가공 없음)
@@ -4016,13 +4401,31 @@ async function handleNotiRequest(routeKey, req, res) {
     }
   } catch (_) {}
 
-  // POST로 들어온 요청이 브라우저(고객 리다이렉트)인지 판단. 브라우저면 결과 페이지로 302 리다이렉트.
-  // 칠페이 서버 노티는 Api-Key를 보내고, 브라우저 폼 전송은 보내지 않음. Accept가 없어도 User-Agent로 보완.
+  // POST로 들어온 요청이 브라우저(고객 리다이렉트)인지 판단. 브라우저면 가맹점 resultUrl 로 302.
+  // ChillPay 는 Result URL 브라우저 폼 POST 에도 Api-Key 를 붙이는 경우가 있어, Api-Key 만으로 서버 노티로 단정하면 안 됨.
+  // Chrome 등은 결제 복귀 시 Sec-Fetch-Dest: document / Sec-Fetch-Mode: navigate 를 보냄(서버-투-서버 클라이언트에는 보통 없음).
   function isLikelyBrowserResultReturn(req) {
     const accept = (req.get && req.get('Accept')) || (req.headers && req.headers.accept) || '';
     const ua = (req.get && req.get('User-Agent')) || (req.headers && req.headers['user-agent']) || '';
-    const hasApiKey = (apiKeyHeader && String(apiKeyHeader).trim().length > 0);
-    if (hasApiKey) return false;
+    const hasApiKey = !!(apiKeyHeader && String(apiKeyHeader).trim().length > 0);
+    const secDest = String((req.get && req.get('Sec-Fetch-Dest')) || (req.headers && req.headers['sec-fetch-dest']) || '').toLowerCase();
+    const secMode = String((req.get && req.get('Sec-Fetch-Mode')) || (req.headers && req.headers['sec-fetch-mode']) || '').toLowerCase();
+    const secUser = String((req.get && req.get('Sec-Fetch-User')) || (req.headers && req.headers['sec-fetch-user']) || '').trim();
+    if (secDest === 'document' || secMode === 'navigate' || secUser === '?1') return true;
+
+    const refLow = String(refererOrOrigin || '').toLowerCase();
+    // 프록시가 Sec-Fetch 를 지워도, 결제창(칠페이 도메인)에서 온 폼 POST 는 브라우저 복귀로 본다.
+    if (refLow.includes('chillpay')) return true;
+
+    if (hasApiKey) {
+      const ctLow = String(incomingContentType || '').toLowerCase();
+      const uaLower = String(ua).toLowerCase();
+      const looksLikeBrowserUa =
+        /mozilla|chrome|safari|msie|edge|opera|firefox|version\/[\d.]+\s*safari/i.test(uaLower);
+      // 서버 노티는 JSON 이 많고, 브라우저 폼 전송은 x-www-form-urlencoded 인 경우가 많음.
+      if (ctLow.includes('application/x-www-form-urlencoded') && looksLikeBrowserUa) return true;
+      return false;
+    }
     if (typeof accept === 'string' && accept.toLowerCase().includes('text/html')) return true;
     const uaLower = String(ua).toLowerCase();
     if (/mozilla|chrome|safari|msie|edge|opera|firefox/i.test(uaLower)) return true;
@@ -4322,14 +4725,23 @@ async function handleNotiRequest(routeKey, req, res) {
     console.log('[개발 전산 전송 스킵] enableDevInternal=false');
   }
 
-  if (kind === 'result' && isLikelyBrowserResultReturn(req)) {
+  const shouldRedirectResultBrowser =
+    kind === 'result' &&
+    (merchantForcesResultBrowserRedirect(merchant) || isLikelyBrowserResultReturn(req)) &&
+    !merchantSkipsResultBrowserRedirect(merchant);
+  if (shouldRedirectResultBrowser) {
     const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
     const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
     let redirectTo = routeKey === 'result/20' ? baseUrl + '/noti/test-result' : targetUrl;
     if (redirectTo && isOurTestReturnUrl(redirectTo, reqHost)) {
       redirectTo = baseUrl + '/noti/test-result' + (redirectTo.includes('?') ? redirectTo.slice(redirectTo.indexOf('?')) : '');
     }
-    if (redirectTo) return redirectResultToUrl(res, redirectTo, body);
+    if (redirectTo) {
+      if (merchantForcesResultBrowserRedirect(merchant)) {
+        return sendMerchantResultBrowserPostFormPage(res, redirectTo, body);
+      }
+      return redirectResultToUrl(res, redirectTo, body);
+    }
   }
   res.status(200).json({ ok: true, relay: relaySuccess });
 }
@@ -4344,6 +4756,11 @@ async function handleNotiRequest(routeKey, req, res) {
 async function handleJpayNotiRequest(routeKey, req, res) {
   const rawBodyStr = req.rawBodyBuffer ? req.rawBodyBuffer.toString('utf8') : '';
   const incomingContentType = (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
+  const refererOrOriginJpay =
+    (req.get && req.get('Referer')) ||
+    (req.get && req.get('Origin')) ||
+    (req.headers && (req.headers.referer || req.headers.origin)) ||
+    '';
   let body = req.body;
   if (!body || typeof body !== 'object') body = {};
   if (Object.keys(body).length === 0 && req.rawBodyBuffer && req.rawBodyBuffer.length) {
@@ -4396,8 +4813,23 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   function isLikelyBrowserResultReturnJpay(req2) {
     const accept = (req2.get && req2.get('Accept')) || (req2.headers && req2.headers.accept) || '';
     const ua = (req2.get && req2.get('User-Agent')) || (req2.headers && req2.headers['user-agent']) || '';
-    const hasApiKey = apiKeyHeader && String(apiKeyHeader).trim().length > 0;
-    if (hasApiKey) return false;
+    const hasApiKey = !!(apiKeyHeader && String(apiKeyHeader).trim().length > 0);
+    const secDest = String((req2.get && req2.get('Sec-Fetch-Dest')) || (req2.headers && req2.headers['sec-fetch-dest']) || '').toLowerCase();
+    const secMode = String((req2.get && req2.get('Sec-Fetch-Mode')) || (req2.headers && req2.headers['sec-fetch-mode']) || '').toLowerCase();
+    const secUser = String((req2.get && req2.get('Sec-Fetch-User')) || (req2.headers && req2.headers['sec-fetch-user']) || '').trim();
+    if (secDest === 'document' || secMode === 'navigate' || secUser === '?1') return true;
+
+    const refLow = String(refererOrOriginJpay || '').toLowerCase();
+    if (refLow.includes('chillpay')) return true;
+
+    if (hasApiKey) {
+      const ctLow = String(incomingContentType || '').toLowerCase();
+      const uaLower = String(ua).toLowerCase();
+      const looksLikeBrowserUa =
+        /mozilla|chrome|safari|msie|edge|opera|firefox|version\/[\d.]+\s*safari/i.test(uaLower);
+      if (ctLow.includes('application/x-www-form-urlencoded') && looksLikeBrowserUa) return true;
+      return false;
+    }
     if (typeof accept === 'string' && accept.toLowerCase().includes('text/html')) return true;
     const uaLower = String(ua).toLowerCase();
     if (/mozilla|chrome|safari|msie|edge|opera|firefox/i.test(uaLower)) return true;
@@ -4644,14 +5076,23 @@ async function handleJpayNotiRequest(routeKey, req, res) {
     console.log('[JPAY 개발 전산 스킵] enableDevInternal=false');
   }
 
-  if (kind === 'result' && isLikelyBrowserResultReturnJpay(req)) {
+  const shouldRedirectResultBrowserJpay =
+    kind === 'result' &&
+    (merchantForcesResultBrowserRedirect(merchant) || isLikelyBrowserResultReturnJpay(req)) &&
+    !merchantSkipsResultBrowserRedirect(merchant);
+  if (shouldRedirectResultBrowserJpay) {
     const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
     const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
     let redirectTo = targetUrl;
     if (redirectTo && isOurTestReturnUrl(redirectTo, reqHost)) {
       redirectTo = baseUrl + '/noti/test-result' + (redirectTo.includes('?') ? redirectTo.slice(redirectTo.indexOf('?')) : '');
     }
-    if (redirectTo) return redirectResultToUrlJpay(res, redirectTo, body);
+    if (redirectTo) {
+      if (merchantForcesResultBrowserRedirect(merchant)) {
+        return sendMerchantResultBrowserPostFormPage(res, redirectTo, body);
+      }
+      return redirectResultToUrlJpay(res, redirectTo, body);
+    }
   }
   return res.status(200).send('OK');
 }
@@ -4920,7 +5361,7 @@ function getAdminSidebar(locale, adminUser, member, currentPath) {
   };
   const langLinks = SUPPORTED_LOCALES.map((l) => {
     const label = l === 'zh' ? 'CH' : l.toUpperCase();
-    return `<a href="/admin/set-locale?lang=${l}" style="color:#93c5fd;text-decoration:none;margin:0 2px;">${label}</a>`;
+    return `<a href="/admin/set-locale?lang=${l}">${label}</a>`;
   }).join(' ');
   const role = member && member.role ? member.role : null;
   const canSeeMembers = role === ROLES.SUPER_ADMIN || role === ROLES.ADMIN;
@@ -4986,20 +5427,21 @@ function getAdminSidebar(locale, adminUser, member, currentPath) {
     if (can('test_history')) testItems.push(link('/admin/test-logs', t(locale, 'nav_test_history')));
     nav.push(navGroup(t(locale, 'nav_test'), testPaths, testItems.join('')));
   }
-  if (canSeeMembers || can('settings') || can('account') || can('account_reset')) {
-    const sysPaths = ['/admin/members', '/admin/account-reset', '/admin/settings', '/admin/account'];
+  if (canSeeMembers || can('settings') || can('account') || can('account_reset') || can('advanced_system_monitor')) {
+    const sysPaths = ['/admin/members', '/admin/account', '/admin/account-reset', '/admin/settings', '/admin/system-monitor'];
     const sysItems = [];
     if (canSeeMembers) sysItems.push(link('/admin/members', t(locale, 'nav_account_manage')));
+    if (can('account')) sysItems.push(link('/admin/account', t(locale, 'nav_account')));
     if (can('account_reset')) sysItems.push(link('/admin/account-reset', t(locale, 'nav_account_reset')));
     if (can('settings')) sysItems.push(link('/admin/settings', t(locale, 'nav_settings')));
-    if (can('account')) sysItems.push(link('/admin/account', t(locale, 'nav_account')));
+    if (can('advanced_system_monitor')) sysItems.push(link('/admin/system-monitor', t(locale, 'nav_server_manage')));
     nav.push(navGroup(t(locale, 'nav_system'), sysPaths, sysItems.join('')));
   }
   const titleText = (site.sidebarTitle || '').replace(/</g, '&lt;').replace(/"/g, '&quot;') || DEFAULT_SIDEBAR_TITLE;
   const subText = (site.sidebarSub || '').replace(/</g, '&lt;').replace(/"/g, '&quot;') || DEFAULT_SIDEBAR_SUB;
   const forbiddenSettingsMsg = (t(locale, 'err_forbidden_contact_admin') || '해당 전산 대상에 대한 접근 권한이 없습니다. 관리자에게 문의하세요.').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' ');
   return `
-    <style>.nav-group-summary .nav-group-summary-link{flex:1;min-width:0;display:block;text-align:left;padding:0;margin:0;font:inherit;color:inherit;text-decoration:none;}</style>
+    <style>${ADMIN_LAYOUT_SHELL_CSS}</style>
     <aside class="sidebar">
       <a href="/admin/merchants" style="color:inherit;text-decoration:none;display:block;">
         <div class="sidebar-title" style="font-size:18px;">${titleText}</div>
@@ -5007,7 +5449,7 @@ function getAdminSidebar(locale, adminUser, member, currentPath) {
       </a>
       <div class="sidebar-user" style="font-size:13px;margin-top:18px;margin-bottom:18px;">${t(locale, 'user_label')}: ${adminUser || '-'}</div>
       <nav class="nav nav-github-style">${nav.join('')}</nav>
-      <div style="margin-top:12px;font-size:12px;color:#9ca3af;">${t(locale, 'lang_switch')}: ${langLinks}</div>
+      <div class="sidebar-lang">${t(locale, 'lang_switch')}: ${langLinks}</div>
     </aside>
     <script>
     (function(){ var q = location.search; if (q.indexOf('err=forbidden_settings') !== -1) { alert('${forbiddenSettingsMsg}'); var s = q.replace(/[?&]err=forbidden_settings(&|$)/g, '$1').replace(/^&/, '?'); history.replaceState(null, '', location.pathname + (s === '?' ? '' : s) + location.hash); } })();
@@ -5023,21 +5465,26 @@ function formatTimeForLocale(date, locale) {
   }
 }
 function getAdminTopbar(locale, clientIp, nowDateOrLocal, nowTh, adminUser, currentPath) {
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const nowDate = nowDateOrLocal instanceof Date ? nowDateOrLocal : new Date();
   const nowLocal = nowDateOrLocal instanceof Date ? formatTimeForLocale(nowDate, locale) : nowDateOrLocal;
   const back = currentPath || '/admin/merchants';
   const langLinks = SUPPORTED_LOCALES.map((l) => {
     const label = l === 'zh' ? 'CH' : l.toUpperCase();
-    return `<a href="/admin/set-locale?lang=${l}&back=${encodeURIComponent(back)}" style="color:#0369a1;text-decoration:none;margin:0 4px;">${label}</a>`;
-  }).join(' ');
-  const logoutLink = '<a href="/admin/logout" style="color:#0369a1;text-decoration:none;">' + t(locale, 'common_logout') + '</a>';
-  return `<div class="topbar">
-    <span>${t(locale, 'topbar_ip')}: ${clientIp || '-'}</span>
-    <span> ㅣ ${t(locale, 'topbar_time')}: ${nowLocal}</span>
-    <span> ㅣ ${t(locale, 'topbar_time_th')}: ${nowTh}</span>
-    <span style="margin-left:auto;">${t(locale, 'lang_switch')}: ${langLinks}</span>
-    <span> ㅣ ${t(locale, 'user_label')}: ${adminUser || '-'}</span>
-    <span> ㅣ ${logoutLink}</span>
+    return `<a href="/admin/set-locale?lang=${l}&back=${encodeURIComponent(back)}">${label}</a>`;
+  }).join('');
+  const logoutLink = '<a href="/admin/logout" class="topbar-logout">' + esc(t(locale, 'common_logout')) + '</a>';
+  return `<div class="topbar" role="banner">
+    <div class="topbar-meta">
+      <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'topbar_ip'))}</span> <span class="topbar-v">${esc(clientIp || '-')}</span></div>
+      <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'topbar_time'))}</span> <span class="topbar-v">${esc(nowLocal)}</span></div>
+      <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'topbar_time_th'))}</span> <span class="topbar-v">${esc(nowTh)}</span></div>
+    </div>
+    <div class="topbar-actions">
+      <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'lang_switch'))}</span> <span class="topbar-lang-links">${langLinks}</span></div>
+      <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'user_label'))}</span> <span class="topbar-v">${esc(adminUser || '-')}</span></div>
+      <div class="topbar-chip topbar-chip-plain">${logoutLink}</div>
+    </div>
   </div>`;
 }
 
@@ -6318,6 +6765,7 @@ const PAGE_KEY_TO_LABEL = {
   cr_noti: 'nav_cancel_refund_noti',
   cr_void_deleted: 'cr_void_deleted_list',
   mail_logs: 'nav_mail_logs',
+  advanced_system_monitor: 'nav_server_manage',
 };
 
 // 권한 페이지 구조. 주요설정(신규등록/노티설정/테스트)=한 섹션에 모아 표시·각 단일선택, 나머지=페이지별 개별 선택.
@@ -6330,7 +6778,7 @@ const PERM_GROUPS = [
   { id: 'noti', labelKey: 'perm_group_noti', type: 'single', keys: ['internal_targets', 'internal_noti_settings', 'dev_internal_noti_settings'], color: '#dbeafe', borderColor: '#60a5fa' },
   { id: 'cancel_refund', labelKey: 'perm_group_cancel_refund', type: 'multi', keys: ['cr_transactions', 'cr_pg_transactions', 'cr_cancel', 'cr_void', 'cr_void_summary', 'cr_refund', 'cr_force_refund', 'cr_noti', 'cr_void_deleted'], color: '#d1fae5', borderColor: '#6ee7b7' },
   { id: 'test', labelKey: 'perm_group_test', type: 'single', keys: ['test_config', 'test_run', 'test_history'], color: '#fce7f3', borderColor: '#f472b6' },
-  { id: 'system', labelKey: 'perm_group_system', type: 'multi', keys: ['account', 'settings', 'account_reset'], color: '#f1f5f9', borderColor: '#cbd5e1' },
+  { id: 'system', labelKey: 'perm_group_system', type: 'multi', keys: ['account', 'account_reset', 'settings', 'advanced_system_monitor'], color: '#f1f5f9', borderColor: '#cbd5e1' },
 ];
 
 function collectPermsFromBody(body) {
@@ -7162,10 +7610,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
             : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
         }</td>
-        <td style="font-size:12px;">${String(merchantChillpayPayModeLabel(locale, m))
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')}</td>
+        <td style="width:96px;vertical-align:middle;">${merchantNotiStyleCellHtml(locale, m)}</td>
         <td>${String(merchantChillpayRecurringCell(m))
           .replace(/&/g, '&amp;')
           .replace(/</g, '&lt;')
@@ -7194,6 +7639,13 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
               data-jpay-route-callback-key="${jpayCbKey}"
               data-jpay-route-result-key="${jpayRsKey}"
               data-chillpay-recurring="${m.chillpayRecurring === 'Y' ? 'Y' : 'N'}"
+              data-result-delivery-mode="${
+                m.resultDeliveryMode === 'no_browser_redirect'
+                  ? 'no_browser_redirect'
+                  : m.resultDeliveryMode === 'post_force_redirect'
+                  ? 'post_force_redirect'
+                  : 'auto'
+              }"
               style="padding:4px 8px;font-size:12px;background:#facc15;color:#111827;border:none;border-radius:4px;cursor:pointer;"
             >${t(locale, 'merchants_edit')}</button>
             <form method="post" action="/admin/merchants/delete" onsubmit="return confirm('${confirmDel}') && confirm('${confirmDel2}');" style="margin:0;">
@@ -7248,7 +7700,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
     .card { background:#ffffff; padding:18px 22px; border-radius:10px; box-shadow:0 10px 25px rgba(15,23,42,0.06); margin-bottom:8px; border:1px solid #e5e7eb; }
     .cell-url { word-break: break-all; overflow-wrap: break-word; white-space: normal; max-width: 200px; text-align: center; }
     .merchants-table-wrap { overflow-x: auto; }
-    .merchants-table-wrap table { min-width: 1120px; }
+    .merchants-table-wrap table { min-width: 1180px; }
   </style>
 </head>
 <body>
@@ -7354,10 +7806,19 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           <select name="relayFormat" id="merchant-relay-format">
             <option value="raw">${t(locale, 'merchants_relay_format_raw')}</option>
             <option value="json">JSON</option>
-            <option value="form">FORM (application/x-www-form-urlencoded)</option>
+            <option value="form">FORM</option>
           </select>
         </label>
         <p class="admin-page-desc">${t(locale, 'merchants_relay_format_hint')}</p>
+        <label>
+          ${t(locale, 'merchants_label_result_delivery_mode')}
+          <select name="resultDeliveryMode" id="merchant-result-delivery-mode">
+            <option value="auto">${t(locale, 'merchants_result_delivery_auto')}</option>
+            <option value="no_browser_redirect">${t(locale, 'merchants_result_delivery_no_browser_redirect')}</option>
+            <option value="post_force_redirect">${t(locale, 'merchants_result_delivery_post_force_redirect')}</option>
+          </select>
+        </label>
+        <p class="admin-page-desc">${t(locale, 'merchants_result_delivery_hint')}</p>
         </div>
         <div id="merch-relay-url-block">
         <label>
@@ -7417,11 +7878,11 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             <th class="cell-url">${t(locale, 'merchants_th_pg_reurl')}</th>
             <th class="cell-url">${t(locale, 'merchants_th_origin_cburl')}</th>
             <th class="cell-url">${t(locale, 'merchants_th_origin_reurl')}</th>
+            <th style="width:96px;font-size:11px;line-height:1.25;">${t(locale, 'merchants_th_noti_mode')}</th>
             <th style="width:70px;">${t(locale, 'merchants_th_route')}</th>
             <th style="width:90px;">CustomerId</th>
             <th style="width:100px;">${t(locale, 'merchants_th_target')}</th>
             <th style="width:88px;">${t(locale, 'merchants_th_pg_acquirer')}</th>
-            <th style="width:110px;">${t(locale, 'merchants_th_pay_mode')}</th>
             <th style="width:56px;">${t(locale, 'merchants_th_recurring')}</th>
             <th style="width:50px;">${t(locale, 'merchants_relay')}</th>
             <th style="width:50px;">${t(locale, 'merchants_internal')}</th>
@@ -7667,6 +8128,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         }
         var relayFormatSelect = form.querySelector('select[name="relayFormat"]');
         if (relayFormatSelect) relayFormatSelect.value = button.dataset.relayFormat || 'raw';
+        var rdmSelect = form.querySelector('select[name="resultDeliveryMode"]');
+        if (rdmSelect) rdmSelect.value = button.dataset.resultDeliveryMode || 'auto';
 
         if (cbSelect) cbSelect.value = button.dataset.routeCallbackKey || '';
         if (rsSelect) rsSelect.value = button.dataset.routeResultKey || '';
@@ -7729,6 +8192,45 @@ function merchantChillpayRecurringCell(m) {
   return m.chillpayRecurring === 'Y' ? 'Y' : 'N';
 }
 
+/** 목록·CSV: 노티 수신 형식 짧은 표기 (일반 / JSON / FORM) */
+function merchantRelayFormatCellShort(locale, m) {
+  const rf = String(m.relayFormat || 'raw').toLowerCase();
+  if (rf === 'json') return 'JSON';
+  if (rf === 'form') return 'FORM';
+  return t(locale, 'merchants_relay_cell_short_raw');
+}
+
+/** 등록 가맹점 테이블 한 셀: 1행 INLINE|REDIRECT|—, 2행 수신형식 / RESULT전달 */
+function merchantNotiStyleCellHtml(locale, m) {
+  const escMini = (s) =>
+    String(s || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  const line1 = escMini(merchantChillpayPayModeLabel(locale, m));
+  const rf = escMini(merchantRelayFormatCellShort(locale, m));
+  const rdm = escMini(
+    merchantSkipsResultBrowserRedirect(m)
+      ? t(locale, 'merchants_result_delivery_cell_no_redirect')
+      : merchantForcesResultBrowserRedirect(m)
+      ? t(locale, 'merchants_result_delivery_cell_post_force_redirect')
+      : t(locale, 'merchants_result_delivery_cell_auto'),
+  );
+  return `<div style="line-height:1.4;font-size:11px;text-align:center;"><div style="font-weight:700;">${line1}</div><div style="color:#4b5563;margin-top:2px;">${rf} / ${rdm}</div></div>`;
+}
+
+function merchantNotiStyleCsvSummary(locale, m) {
+  const l1 = merchantChillpayPayModeLabel(locale, m);
+  const l2 = `${merchantRelayFormatCellShort(locale, m)} / ${
+    merchantSkipsResultBrowserRedirect(m)
+      ? t(locale, 'merchants_result_delivery_cell_no_redirect')
+      : merchantForcesResultBrowserRedirect(m)
+      ? t(locale, 'merchants_result_delivery_cell_post_force_redirect')
+      : t(locale, 'merchants_result_delivery_cell_auto')
+  }`;
+  return `${l1} | ${l2}`;
+}
+
 // 가맹점 목록 Excel(CSV) 내보내기 (현재 정렬 기준)
 function getSortedMerchantEntries(sortType) {
   let entries = [...MERCHANTS.entries()];
@@ -7777,7 +8279,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
     'Internal CustomerId',
     t(locale, 'merchants_th_target'),
     t(locale, 'merchants_th_pg_acquirer'),
-    t(locale, 'merchants_th_pay_mode'),
+    t(locale, 'merchants_th_noti_mode'),
     t(locale, 'merchants_th_recurring'),
     t(locale, 'merchants_relay'),
     t(locale, 'merchants_internal'),
@@ -7820,7 +8322,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
         pgKind === 'jpay'
           ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
           : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY'),
-        merchantChillpayPayModeLabel(locale, m),
+        merchantNotiStyleCsvSummary(locale, m),
         merchantChillpayRecurringCell(m),
         relay,
         internal,
@@ -7851,6 +8353,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     enableInternal,
     enableDevInternal,
     relayFormat,
+    resultDeliveryMode: rawResultDeliveryMode,
     jpayRouteCallbackKey,
     jpayRouteResultKey,
     merchantPgKind: rawPgKind,
@@ -7912,6 +8415,13 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
   }
 
   const fmt = enableRelayOn && (relayFormat === 'json' || relayFormat === 'form') ? relayFormat : 'raw';
+  const rdmRaw = String(rawResultDeliveryMode || 'auto').trim().toLowerCase();
+  const resultDeliveryModeSaved =
+    rdmRaw === 'no_browser_redirect' || rdmRaw === 'post_only'
+      ? 'no_browser_redirect'
+      : rdmRaw === 'post_force_redirect' || rdmRaw === 'post_with_browser_redirect'
+      ? 'post_force_redirect'
+      : 'auto';
   const prev = MERCHANTS.get(merchantId) || before || {};
   const cbSaved = enableRelayOn ? String(callbackUrl || '').trim() : '';
   const rsSaved = enableRelayOn ? String(resultUrl || '').trim() : '';
@@ -7939,6 +8449,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     jpayCallbackUrl: '',
     jpayResultUrl: '',
     chillpayRecurring: chillpayRecurringYn,
+    resultDeliveryMode: resultDeliveryModeSaved,
   });
 
   console.log('[관리자] 가맹점 저장:', merchantId, MERCHANTS.get(merchantId));
@@ -8526,9 +9037,10 @@ const cancelRefundLayoutCss = ADMIN_PAGE_DESC_BOX_CSS + `
   .void-list-table th:nth-child(11), .void-list-table th:nth-child(12), .void-list-table th:nth-child(13) { white-space: nowrap; }
   .cancel-list-table { table-layout: fixed; width: 100%; }
   .cancel-list-table .cancel-resend-cell { white-space: nowrap; }
-  .col-void-refund-detail { min-width: 160px; max-width: 280px; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tx-list-table { table-layout: fixed; }
-  .tx-list-table th, .tx-list-table td { padding: 4px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; vertical-align: middle; }
+  .tx-list-table th, .tx-list-table td { padding: 4px 6px; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; vertical-align: middle; }
+  .tx-list-table td.col-time { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.3; }
+  .tx-list-table td.col-void-refund-detail { min-width: 160px; max-width: 36rem; font-size: 11px; white-space: pre-wrap; word-break: break-word; overflow: visible; text-overflow: clip; text-align: center; vertical-align: middle; }
   .tx-list-table th { position: relative; }
   .tx-col-resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 1; }
   .tx-col-resizer:hover { background: rgba(37, 99, 235, 0.2); }
@@ -8536,11 +9048,13 @@ const cancelRefundLayoutCss = ADMIN_PAGE_DESC_BOX_CSS + `
   .tx-legend-grid { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 2px 10px; font-size: 10px; margin-bottom: 12px; align-items: start; }
   .tx-legend-grid .tx-legend-term-cell { padding: 3px 6px; border: 1px solid #e5e7eb; border-radius: 4px; background: #f3f4f6; font-weight: 600; color: #1f2937; white-space: nowrap; }
   .tx-legend-grid .tx-legend-desc-cell { padding: 3px 6px; border: 1px solid #e5e7eb; border-radius: 4px; background: #f9fafb; color: #4b5563; }
-  .tx-date-form { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; vertical-align: middle; }
+  .tx-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; row-gap: 4px; font-size: 10px; margin-bottom: 16px; line-height: 1.25; }
+  .tx-toolbar .tx-toolbar-sep { color: #9ca3af; margin: 0 2px; flex-shrink: 0; user-select: none; }
+  .tx-date-form { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; vertical-align: middle; }
   .tx-date-form .tx-date-label { font-weight: 500; color: #374151; margin: 0; }
-  .tx-date-form .tx-date-input { padding: 2px 4px; font-size: 11px; border: 1px solid #d1d5db; border-radius: 4px; line-height: 1.2; }
-  .tx-date-form .tx-date-sep { color: #6b7280; font-size: 11px; }
-  .tx-date-form .tx-date-btn { padding: 2px 8px; font-size: 11px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; line-height: 1.2; }
+  .tx-date-form .tx-date-input { padding: 1px 3px; font-size: 10px; border: 1px solid #d1d5db; border-radius: 3px; line-height: 1.2; }
+  .tx-date-form .tx-date-sep { color: #6b7280; font-size: 10px; }
+  .tx-date-form .tx-date-btn { padding: 2px 6px; font-size: 10px; background: #2563eb; color: #fff; border: none; border-radius: 3px; cursor: pointer; line-height: 1.2; }
   .time-jp { color: #2563eb; }
   .btn-void { padding: 6px 12px; font-size: 12px; background: #7c3aed; color: #fff; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }
   .btn-void:hover { background: #6d28d9; }
@@ -8870,17 +9384,17 @@ const TRANSACTION_LIST_COLUMNS = [
   { type: 'fixed', id: 'no' },
   { type: 'fixed', id: 'received_date' },
   { type: 'fixed', id: 'received_time' },
-  { type: 'fixed', id: 'route_no' },
+  { type: 'body', keys: ['TransactionId', 'transactionId', 'transaction_id'] },
   { type: 'fixed', id: 'pg_acquirer' },
   { type: 'fixed', id: 'merchant' },
-  { type: 'body', keys: ['TransactionId', 'transactionId', 'transaction_id'] },
+  { type: 'fixed', id: 'route_no' },
+  { type: 'body', keys: ['CustomerId', 'customerId'] },
   { type: 'body', keys: ['OrderNo', 'orderNo', 'orderid', 'orderID'] },
+  { type: 'body', keys: ['PaymentDate', 'paymentDate', 'datetime'] },
   { type: 'body', keys: ['Amount', 'amount', 'true_amount', 'trueAmount'] },
   { type: 'fixed', id: 'internal_amount' },
-  { type: 'body', keys: ['PaymentStatus', 'paymentStatus', 'status', 'returncode'] },
-  { type: 'body', keys: ['PaymentDate', 'paymentDate', 'datetime'] },
   { type: 'body', keys: ['Currency', 'currency'], display: 'currency' },
-  { type: 'body', keys: ['CustomerId', 'customerId'] },
+  { type: 'body', keys: ['PaymentStatus', 'paymentStatus', 'status', 'returncode'] },
   { type: 'fixed', id: 'status' },
   { type: 'fixed', id: 'noti' },
   { type: 'fixed', id: 'void_refund_detail' },
@@ -8911,8 +9425,9 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   const perPage = Math.max(10, Math.min(200, parseInt(q.perPage, 10) || 25));
   const page = Math.max(1, parseInt(q.page, 10) || 1);
   const txSource = parseTxSourceFromReq(req);
+  const notiKindFilter = parseTxNotiKindFilter(req);
   // 거래 내역: ChillPay는 log.env, JPAY는 jpaySandbox 로 프로덕션/샌드박스 구분
-  let list = [...getTransactionListLogs(req)].slice().reverse();
+  let list = filterTransactionLogsByNotiKind([...getTransactionListLogs(req)].slice().reverse(), notiKindFilter);
   // "칠리페이 기준" = ChillPay 환경설정 timezone 기준으로 날짜를 끊는다 (피지거래내역과 동일)
   const cfgTx = loadChillPayTransactionConfig();
   const chillTz = (cfgTx && cfgTx.timezone) ? String(cfgTx.timezone).trim() : 'Asia/Bangkok';
@@ -9239,11 +9754,17 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     t(locale, 'tx_th_no'),
     t(locale, 'cr_th_received_date'),
     t(locale, 'cr_th_received_time'),
-    'Route',
+    'TransactionId',
     t(locale, 'tx_th_acquirer'),
     t(locale, 'cr_th_merchant'),
-    'TransactionId', 'OrderNo', 'Amount', t(locale, 'tx_th_internal_amount'), 'status', 'PaymentDate', 'Currency',
+    'Route',
     'CustomerId',
+    'OrderNo',
+    'PaymentDate',
+    'Amount',
+    t(locale, 'tx_th_internal_amount'),
+    'Currency',
+    t(locale, 'tx_th_status_raw'),
     t(locale, 'tx_th_status'),
     t(locale, 'tx_th_noti'),
     t(locale, 'tx_th_detail_reason'),
@@ -9276,6 +9797,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       env,
       period,
       statusFilter,
+      notiKind: notiKindFilter,
       source: txSource,
       ...overrides,
     };
@@ -9290,11 +9812,21 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     if (o.page && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     if (o.period && o.period !== 'all') parts.push('period=' + encodeURIComponent(o.period));
     if (o.statusFilter) parts.push('statusFilter=' + encodeURIComponent(o.statusFilter));
+    if (o.notiKind && o.notiKind !== 'call') parts.push('notiKind=' + encodeURIComponent(o.notiKind));
     if (o.source === 'chillpay') parts.push('source=' + encodeURIComponent('chillpay'));
     else if (o.source === 'jpay') parts.push('source=' + encodeURIComponent('jpay'));
     if (o.env === 'sandbox') parts.push('env=' + encodeURIComponent('sandbox'));
     return parts.length ? '?' + parts.join('&') : '';
   };
+  const notiKindOptionsHtml = [
+    { key: 'call', label: t(locale, 'tx_noti_kind_call') },
+    { key: 'result', label: t(locale, 'tx_noti_kind_result') },
+    { key: 'both', label: t(locale, 'tx_noti_kind_both') },
+  ].map((opt) => '<option value="' + esc(opt.key) + '"' + (notiKindFilter === opt.key ? ' selected' : '') + '>' + esc(opt.label) + '</option>').join('');
+  const notiKindSelectHtml =
+    '<select style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;flex-shrink:0;" title="CALL / RESULT / BOTH" aria-label="CALL / RESULT / BOTH" onchange="var p=new URLSearchParams(window.location.search||\'\');p.set(\'notiKind\',this.value);p.set(\'page\',\'1\');window.location.search=p.toString()">' +
+    notiKindOptionsHtml +
+    '</select>';
   const sortLinks = [
     { key: 'time', label: t(locale, 'tx_filter_time') },
     { key: 'date', label: t(locale, 'tx_filter_date') },
@@ -9304,9 +9836,9 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   ].map((o) => {
     const url = baseUrl + qs({ sort: o.key, page: 1 });
     const active = sortBy === o.key;
-    return '<a href="' + url + '" style="padding:4px 10px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-right:4px;">' + esc(o.label) + '</a>';
+    return '<a href="' + url + '" style="padding:2px 6px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-right:2px;">' + esc(o.label) + '</a>';
   }).join('');
-  const sortDirLinks = '<a href="' + baseUrl + qs({ sortDir: 'asc', page: 1 }) + '" style="padding:4px 8px;font-size:11px;border-radius:4px;text-decoration:none;background:' + (sortDir === 'asc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'asc' ? '#fff' : '#374151') + ';">' + t(locale, 'tx_sort_asc') + '</a><a href="' + baseUrl + qs({ sortDir: 'desc', page: 1 }) + '" style="padding:4px 8px;font-size:11px;border-radius:4px;text-decoration:none;margin-left:4px;background:' + (sortDir === 'desc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'desc' ? '#fff' : '#374151') + ';">' + t(locale, 'tx_sort_desc') + '</a>';
+  const sortDirLinks = '<a href="' + baseUrl + qs({ sortDir: 'asc', page: 1 }) + '" style="padding:2px 6px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' + (sortDir === 'asc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'asc' ? '#fff' : '#374151') + ';">' + t(locale, 'tx_sort_asc') + '</a><a href="' + baseUrl + qs({ sortDir: 'desc', page: 1 }) + '" style="padding:2px 6px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;margin-left:2px;background:' + (sortDir === 'desc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'desc' ? '#fff' : '#374151') + ';">' + t(locale, 'tx_sort_desc') + '</a>';
 
   const periodOptions = [
     { key: 'today', label: t(locale, 'tx_filter_today') },
@@ -9319,7 +9851,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   const periodLinks = periodOptions.map((o) => {
     const url = baseUrl + qs({ period: o.key, page: 1, dateFrom: '', dateTo: '' });
     const active = period === o.key;
-    return '<a href="' + url + '" style="padding:4px 10px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-left:4px;">' + esc(o.label) + '</a>';
+    return '<a href="' + url + '" style="padding:2px 6px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-left:2px;">' + esc(o.label) + '</a>';
   }).join('');
 
   const transactionSearchFieldsWithLocale = [
@@ -9361,7 +9893,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   const searchForm =
     '<form method="get" action="' +
     baseUrl +
-    '" style="display:inline;margin-left:8px;">' +
+    '" style="display:inline-flex;align-items:center;flex-wrap:wrap;gap:2px 4px;margin-left:4px;">' +
     txSourceHidden +
     '<input type="hidden" name="sort" value="' +
     esc(sortBy) +
@@ -9375,17 +9907,19 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     esc(perPage) +
     '" /><input type="hidden" name="env" value="' +
     esc(getEnvFromReq(req)) +
+    '" /><input type="hidden" name="notiKind" value="' +
+    esc(notiKindFilter) +
     '" /><input type="hidden" name="period" value="' +
     esc(period) +
-    '" /><select name="searchField" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;">' +
+    '" /><select name="searchField" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;max-width:7.5rem;">' +
     searchFieldOptions +
     '</select><input type="text" name="search" value="' +
     esc(searchKw) +
     '" placeholder="' +
     esc(t(locale, 'common_search')) +
-    '" style="padding:4px 8px;font-size:12px;width:140px;border:1px solid #d1d5db;border-radius:4px;margin-left:4px;" /><select name="statusFilter" style="margin-left:6px;padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;">' +
+    '" style="padding:2px 5px;font-size:10px;width:100px;min-width:0;border:1px solid #d1d5db;border-radius:3px;" /><select name="statusFilter" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;max-width:9rem;">' +
     statusFilterOptions +
-    '</select><button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:4px;">' +
+    '</select><button type="submit" style="padding:2px 7px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:3px;cursor:pointer;">' +
     esc(t(locale, 'common_search')) +
     '</button></form>';
 
@@ -9408,6 +9942,8 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     esc(getEnvFromReq(req)) +
     '" /><input type="hidden" name="period" value="' +
     esc(period) +
+    '" /><input type="hidden" name="notiKind" value="' +
+    esc(notiKindFilter) +
     '" /><input type="hidden" name="statusFilter" value="' +
     esc(statusFilter) +
     '" /><input type="date" name="dateFrom" value="' +
@@ -9418,8 +9954,8 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     esc(t(locale, 'tx_apply')) +
     '</button></form>';
   const exportUrl = baseUrl + '/export' + qs({ page: 1 });
-  const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:6px 12px;font-size:12px;background:#0d9488;color:#fff;border-radius:4px;text-decoration:none;">' + esc(t(locale, 'tx_export_excel')) + '</a>';
-  const toolbarHtml = '<div style="margin-bottom:20px;font-size:12px;display:flex;flex-wrap:nowrap;align-items:center;gap:6px;overflow-x:auto;white-space:nowrap;">' + sortLinks + sortDirLinks + '<span style="margin:0 6px;color:#9ca3af;">|</span>' + periodLinks + dateForm + '<span style="margin:0 6px;color:#9ca3af;">|</span>' + searchForm + excelBtn + '</div>';
+  const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:2px 8px;font-size:10px;background:#0d9488;color:#fff;border-radius:3px;text-decoration:none;white-space:nowrap;flex-shrink:0;">' + esc(t(locale, 'tx_export_excel')) + '</a>';
+  const toolbarHtml = '<div class="tx-toolbar">' + notiKindSelectHtml + sortLinks + sortDirLinks + '<span class="tx-toolbar-sep">|</span>' + periodLinks + dateForm + '<span class="tx-toolbar-sep">|</span>' + searchForm + excelBtn + '</div>';
   const hubHtmlTx = buildCrHubToolbarHtml(locale, esc, req.session.member, {
     inline: true,
     navEnv: getEnvFromReq(req) === 'sandbox' ? 'sandbox' : undefined,
@@ -9459,7 +9995,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   })();
   const legendHtml = '<div class="admin-page-desc" style="margin-bottom:16px;"><div class="tx-legend-grid">' + legendCells + '</div></div>';
   const notiRowStatusStyles = { success: { rowBg: '#f0fdf4', cellBg: '#dcfce7', color: '#166534' }, fail: { rowBg: '#fef2f2', cellBg: '#fecaca', color: '#991b1b' }, void: { rowBg: '#fff7ed', cellBg: '#fed7aa', color: '#9a3412' }, refund: { rowBg: '#eff6ff', cellBg: '#bfdbfe', color: '#1e40af' }, other: { rowBg: '#f9fafb', cellBg: '#e5e7eb', color: '#4b5563' } };
-  const txColDefaults = [40, 72, 95, 52, 72, 95, 100, 120, 80, 78, 58, 88, 42, 98, 68, 52, 200];
+  const txColDefaults = [40, 72, 95, 100, 72, 95, 52, 90, 120, 88, 80, 78, 52, 48, 68, 52, 200];
   const colgroupHtml = '<colgroup>' + thLabels.map((_, i) => '<col id="tx-col-' + i + '" style="width:' + (txColDefaults[i] || 80) + 'px;min-width:40px;">').join('') + '</colgroup>';
   const thead = '<thead><tr>' + thLabels.map((l, i) => '<th class="col-body-key">' + esc(l) + '<div class="tx-col-resizer" data-col="' + i + '" title="' + esc(t(locale, 'tx_col_resize_title')) + '"></div></th>').join('') + '</tr></thead>';
   const rows = list.map((log, index) => {
@@ -9504,7 +10040,9 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     const vrEntry = (txId && voidRefundByTxId[txId]) || (orderNo && voidRefundByOrderNoForFilter[String(orderNo).trim()]) || null;
     const hasVoidLike = !!((txId && hasVoidNotiSent(txId)) || (vrEntry && (vrEntry.type === 'void' || vrEntry.type === 'void_manual_email')));
     const hasRefundLike = !!((txId && hasRefundNotiSent(txId)) || (vrEntry && vrEntry.type === 'refund'));
-    if (hasVoidLike) notiLabel = t(locale, 'cr_type_void');
+    // PG 취소 노티는 상태가 취소이므로 노티 열도 무효·환불 이력보다 우선해 「취소」로 구분
+    if (isCancel) notiLabel = t(locale, 'tx_status_cancel');
+    else if (hasVoidLike) notiLabel = t(locale, 'cr_type_void');
     else if (hasRefundLike) notiLabel = t(locale, 'cr_type_refund');
     const isVoidedOrRefunded = isSuccess && (hasVoidLike || hasRefundLike);
     const rowClass = isVoidedOrRefunded ? ' tx-row-voided-refunded' : '';
@@ -9517,7 +10055,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       if (col.type === 'fixed') {
         if (col.id === 'no') cells.push('<td class="col-no">' + esc(String((pageNum - 1) * perPage + index + 1)) + '</td>');
         else if (col.id === 'received_date') cells.push('<td class="col-date">' + esc(dt.date) + '</td>');
-        else if (col.id === 'received_time') cells.push('<td class="col-time">TH:' + esc(dt.timeTh) + ' JP:' + esc(dt.timeJp) + '</td>');
+        else if (col.id === 'received_time') cells.push('<td class="col-time">TH:' + esc(dt.timeTh) + '<br><span class="time-jp">JP:' + esc(dt.timeJp) + '</span></td>');
         else if (col.id === 'route_no') cells.push('<td class="col-route">' + esc(routeNoDisplay) + '</td>');
         else if (col.id === 'pg_acquirer') cells.push('<td class="col-acquirer">' + esc(acquirerLabelFromLog(locale, log)) + '</td>');
         else if (col.id === 'merchant') cells.push('<td class="col-merchant">' + esc(log.merchantId || '') + '</td>');
@@ -9533,6 +10071,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
         } else if (col.id === 'status') cells.push('<td class="col-narrow" style="background:' + rowSt.cellBg + ';color:' + rowSt.color + ';font-weight:600;"><span class="tx-badge ' + esc(badgeClass) + '">' + esc(t(locale, statusKey)) + '</span></td>');
         else if (col.id === 'noti') cells.push('<td class="col-narrow"><span class="tx-badge tx-badge-noti">' + esc(notiLabel) + '</span></td>');
         else if (col.id === 'void_refund_detail') {
+          const normDetailNl = (s) => String(s ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
           let detailHtml = '-';
           if (isVoidedOrRefunded) {
             const entry = vrEntry || (txId ? voidRefundByTxId[txId] : null) || (orderNo ? voidRefundByOrderNo[String(orderNo).trim()] : null);
@@ -9548,8 +10087,10 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
             } else {
               detailHtml = t(locale, 'tx_detail_label') + ': ' + kindLabel + ' ' + t(locale, 'tx_detail_done') + ' / ' + t(locale, 'tx_reason_label') + ': ' + reason;
             }
+          } else if (isCancel) {
+            detailHtml = buildCancelDetailCellText(locale, t, body);
           }
-          cells.push('<td class="col-void-refund-detail">' + esc(detailHtml) + '</td>');
+          cells.push('<td class="col-void-refund-detail">' + esc(normDetailNl(detailHtml)) + '</td>');
         }
       } else {
         let v = getBodyVal(body, col.keys);
@@ -9564,12 +10105,36 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     }
     return '<tr style="background:' + rowSt.rowBg + ';"' + (rowClass ? ' class="' + rowClass.trim() + '"' : '') + '>' + cells.join('') + '</tr>';
   }).join('');
+  const TX_PAGE_LINK_BLOCK = 20;
+  const pageNumStyle = (active) =>
+    'padding:2px 6px;margin:0 1px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' +
+    (active ? '#2563eb' : '#e5e7eb') +
+    ';color:' +
+    (active ? '#fff' : '#374151') +
+    ';';
+  const pageNavArrowStyle =
+    'padding:2px 8px;margin:0 4px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:#dbeafe;color:#1e40af;font-weight:600;';
   const pageLinks = [];
-  for (let i = 1; i <= totalPages; i++) {
-    const url = baseUrl + qs({ page: i });
-    pageLinks.push('<a href="' + url + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (i === pageNum ? '#2563eb' : '#e5e7eb') + ';color:' + (i === pageNum ? '#fff' : '#374151') + ';">' + i + '</a>');
+  if (totalPages > 0) {
+    const blockStart = Math.floor((pageNum - 1) / TX_PAGE_LINK_BLOCK) * TX_PAGE_LINK_BLOCK + 1;
+    const blockEnd = Math.min(blockStart + TX_PAGE_LINK_BLOCK - 1, totalPages);
+    if (blockStart > 1) {
+      const prevUrl = baseUrl + qs({ page: blockStart - 1 });
+      pageLinks.push('<a href="' + prevUrl + '" style="' + pageNavArrowStyle + '" title="' + esc(t(locale, 'tx_page_prev_block') || '이전') + '">&lt;</a>');
+    }
+    for (let i = blockStart; i <= blockEnd; i++) {
+      const url = baseUrl + qs({ page: i });
+      pageLinks.push('<a href="' + url + '" style="' + pageNumStyle(i === pageNum) + '">' + i + '</a>');
+    }
+    if (blockEnd < totalPages) {
+      const nextUrl = baseUrl + qs({ page: blockEnd + 1 });
+      pageLinks.push('<a href="' + nextUrl + '" style="' + pageNavArrowStyle + '" title="' + esc(t(locale, 'tx_page_next_block') || '다음') + '">&gt;</a>');
+    }
   }
-  const paginationCenter = totalPages > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinks.join('') + '</div>' : '';
+  const paginationCenter =
+    totalPages > 0
+      ? '<div style="display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:2px;margin:12px 0;">' + pageLinks.join('') + '</div>'
+      : '';
   const perPageOptions = [10, 25, 50, 100].map((n) => '<a href="' + baseUrl + qs({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPage === n ? '#059669' : '#e5e7eb') + ';color:' + (perPage === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
   const perPageBar = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptions + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCount + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
   const txResizeScript = '<script>(function(){var table=document.querySelector(".tx-list-table");if(!table)return;var cols=table.querySelectorAll("col");var headers=table.querySelectorAll("thead th");var resizer=null,startX=0,startW=0,colIdx=0;function onMove(e){if(resizer==null)return;var dx=e.clientX-startX;var newW=Math.max(40,startW+dx);cols[colIdx].style.width=newW+"px";}function onUp(){resizer=null;document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);document.body.style.cursor="";document.body.style.userSelect="";}table.querySelectorAll(".tx-col-resizer").forEach(function(el){el.addEventListener("mousedown",function(e){e.preventDefault();colIdx=parseInt(el.getAttribute("data-col"),10);startX=e.clientX;startW=headers[colIdx]?headers[colIdx].offsetWidth:80;resizer=el;document.body.style.cursor="col-resize";document.body.style.userSelect="none";document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);});});})();</script>';
@@ -10598,7 +11163,8 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
   const searchField = (q.searchField || 'all').toString();
   const dateFrom = (q.dateFrom || '').toString().trim();
   const dateTo = (q.dateTo || '').toString().trim();
-  let list = [...getTransactionListLogs(req)].slice().reverse();
+  const notiKindFilter = parseTxNotiKindFilter(req);
+  let list = filterTransactionLogsByNotiKind([...getTransactionListLogs(req)].slice().reverse(), notiKindFilter);
   if (dateFrom || dateTo) {
     const fromTs = dateFrom ? Date.parse(dateFrom) : 0;
     const toTs = dateTo ? (Date.parse(dateTo) + 86400000) : Infinity;
@@ -10681,7 +11247,25 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
   } else {
     list.sort((a, b) => ((Date.parse(b.receivedAtIso || b.receivedAt) || 0) - (Date.parse(a.receivedAtIso || a.receivedAt) || 0)) * rev);
   }
-  const headerRow = [t(locale, 'pg_tx_header_no'), t(locale, 'pg_tx_header_received_date'), t(locale, 'pg_tx_header_received_time'), 'Route', t(locale, 'tx_th_acquirer'), t(locale, 'cr_th_merchant'), 'TransactionId', 'OrderNo', 'Amount', t(locale, 'tx_th_internal_amount'), 'status', 'PaymentDate', 'Currency', 'CustomerId', t(locale, 'pg_tx_header_status'), t(locale, 'pg_tx_header_noti'), t(locale, 'tx_th_detail_reason')];
+  const headerRow = [
+    t(locale, 'tx_th_no'),
+    t(locale, 'cr_th_received_date'),
+    t(locale, 'cr_th_received_time'),
+    'TransactionId',
+    t(locale, 'tx_th_acquirer'),
+    t(locale, 'cr_th_merchant'),
+    'Route',
+    'CustomerId',
+    'OrderNo',
+    'PaymentDate',
+    'Amount',
+    t(locale, 'tx_th_internal_amount'),
+    'Currency',
+    t(locale, 'tx_th_status_raw'),
+    t(locale, 'tx_th_status'),
+    t(locale, 'tx_th_noti'),
+    t(locale, 'tx_th_detail_reason'),
+  ];
   const exportVoidRefundByTxId = buildVoidRefundNotiMap(30);
   const formatExportSentAt = (iso) => {
     if (!iso) return '';
@@ -10711,10 +11295,15 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
     const isJpExport = getNotiLogPgAcquirer(log) === 'jpay';
     let notiLabel = '';
     const exportEntry = txId ? exportVoidRefundByTxId[txId] : null;
-    const hasVoidLike = !!(txId && (hasVoidNotiSent(txId) || (exportEntry && exportEntry.type === 'void')));
+    const hasVoidLike = !!(
+      txId &&
+      (hasVoidNotiSent(txId) || (exportEntry && (exportEntry.type === 'void' || exportEntry.type === 'void_manual_email')))
+    );
     const hasRefundLike = !!(txId && (hasRefundNotiSent(txId) || (exportEntry && exportEntry.type === 'refund')));
-    if (hasVoidLike) notiLabel = t(locale, 'cr_type_void');
+    if (isCancel) notiLabel = t(locale, 'tx_status_cancel');
+    else if (hasVoidLike) notiLabel = t(locale, 'cr_type_void');
     else if (hasRefundLike) notiLabel = t(locale, 'cr_type_refund');
+    else notiLabel = '-';
     const isVoidedOrRefunded = isSuccess && txId && (hasVoidLike || hasRefundLike);
     const pgExport = isJpExport ? 'jpay' : 'chillpay';
     const amountVal = getNotiBodyAmountRawForIcopay(body, pgExport);
@@ -10740,22 +11329,25 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
       } else {
         detailStr = t(locale, 'tx_detail_label') + ': ' + kindLabel + ' ' + t(locale, 'tx_detail_done') + ' / ' + t(locale, 'tx_reason_label') + ': ' + reason;
       }
+    } else if (isCancel) {
+      detailStr = buildCancelDetailCellText(locale, t, body);
     }
+    detailStr = String(detailStr).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     return [
       idx + 1,
       dt.date,
       'TH:' + dt.timeTh + ' JP:' + dt.timeJp,
-      routeNo,
+      txId,
       acquirerLabelFromLog(locale, log),
       log.merchantId || '',
-      txId,
+      routeNo,
+      body.CustomerId ?? body.customerId ?? '',
       body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID ?? '',
+      body.PaymentDate ?? body.paymentDate ?? body.datetime ?? '',
       amountStr,
       internalAmtStr,
-      ps ?? body.returncode ?? '',
-      body.PaymentDate ?? body.paymentDate ?? body.datetime ?? '',
       formatCurrencyForDisplay(body.Currency || body.currency) || body.Currency || body.currency || '',
-      body.CustomerId ?? body.customerId ?? '',
+      ps ?? body.returncode ?? '',
       statusLabel,
       notiLabel,
       detailStr,
@@ -10811,6 +11403,54 @@ function getEnvFilteredLogs(req) {
     result = result.filter((log) => filterLogByMemberInternalTarget(log, member));
   }
   return result;
+}
+
+/** 노티거래내역: callback / result 구분. 쿼리 notiKind=call|result|both (기본 call). */
+function parseTxNotiKindFilter(req) {
+  let raw = req && req.query && req.query.notiKind;
+  if (Array.isArray(raw)) raw = raw[0];
+  const v = String(raw || '').toLowerCase().trim();
+  if (v === 'both' || v === 'all') return 'both';
+  if (v === 'result') return 'result';
+  return 'call';
+}
+
+function inferTransactionNotiCallbackResultFromRouteKey(routeKey) {
+  const rk = String(routeKey || '').trim();
+  if (!rk) return '';
+  if (rk.startsWith('jpay/result/')) return 'result';
+  if (rk.startsWith('jpay/callback/')) return 'callback';
+  if (rk.startsWith('result/') || rk.includes('/result/')) return 'result';
+  if (rk.startsWith('callback/') || rk.includes('/callback/')) return 'callback';
+  try {
+    const m = findMerchantByRouteKey(rk);
+    if (m && m.kind === 'result') return 'result';
+    if (m && m.kind === 'callback') return 'callback';
+  } catch (_) {}
+  try {
+    const jm = findMerchantByJpayRouteKey(rk);
+    if (jm && jm.kind === 'result') return 'result';
+    if (jm && jm.kind === 'callback') return 'callback';
+  } catch (_) {}
+  return '';
+}
+
+function getTransactionLogCallbackResultKind(log) {
+  if (!log || typeof log !== 'object') return '';
+  const k = log.kind != null ? String(log.kind).trim().toLowerCase() : '';
+  if (k === 'callback' || k === 'result') return k;
+  return inferTransactionNotiCallbackResultFromRouteKey(log.routeKey);
+}
+
+function filterTransactionLogsByNotiKind(logs, mode) {
+  if (!Array.isArray(logs)) return [];
+  if (mode === 'both') return logs;
+  return logs.filter((log) => {
+    const k = getTransactionLogCallbackResultKind(log);
+    if (mode === 'call') return k === 'callback';
+    if (mode === 'result') return k === 'result';
+    return true;
+  });
 }
 
 /** 종합거래: ChillPay(프로덕션/샌드박스) vs JPAY 를 분리 */
@@ -10870,6 +11510,76 @@ function isDefinitelyCancelPaymentStatus(ps) {
   return ps === 2 || ps === '2' || ps === 3 || ps === '3'
     || ps === 'Cancel' || ps === 'Canceled' || ps === 'Cancelled'
     || (typeof ps === 'string' && ps.toLowerCase() === 'cancel');
+}
+
+/**
+ * 취소 노티 본문에서 내역/사유 열용 문구 추출. ChillPay·JPAY 필드명이 통일돼 있지 않아 휴리스틱이며,
+ * PG가 사유 필드를 안내면 비어 있음(→ UI에서 "세부 사유 없음" 등).
+ */
+function extractCancelSupplementFromNotiBody(body) {
+  if (!body || typeof body !== 'object') return { primary: '', refDesc: '' };
+  const tryKeys = [
+    'ResponseText',
+    'responseText',
+    'ResponseMessage',
+    'responseMessage',
+    'FailReason',
+    'failReason',
+    'FailureMessage',
+    'failureMessage',
+    'CancelReason',
+    'cancelReason',
+    'ErrorMessage',
+    'errorMessage',
+    'ErrorDesc',
+    'errorDesc',
+    'ErrMsg',
+    'err_msg',
+    'StatusMessage',
+    'statusMessage',
+    'status_message',
+    'statusDesc',
+    'status_desc',
+    'returnmessage',
+    'returnMessage',
+    'return_msg',
+    'trade_msg',
+    'Remark',
+    'remark',
+  ];
+  let primary = '';
+  for (const k of tryKeys) {
+    const v = body[k];
+    if (v == null) continue;
+    const s = String(v).trim();
+    if (s) {
+      primary = s;
+      break;
+    }
+  }
+  const desc = body.PaymentDescription ?? body.paymentDescription ?? body.Description ?? body.description;
+  const refDesc = desc != null ? String(desc).trim() : '';
+  const cap = (s, max) => (s.length > max ? s.slice(0, max) : s);
+  const primTrim = cap(primary.replace(/\r\n/g, '\n').replace(/\r/g, '\n'), 8000);
+  const refTrim = cap(refDesc.replace(/\r\n/g, '\n').replace(/\r/g, '\n'), 8000);
+  const refOut = refTrim && refTrim !== primTrim ? refTrim : '';
+  return { primary: primTrim, refDesc: refOut };
+}
+
+function buildCancelDetailReasonLine(locale, tFn, body) {
+  const sup = extractCancelSupplementFromNotiBody(body);
+  if (sup.primary) {
+    let line = sup.primary;
+    if (sup.refDesc) line += ' / ' + tFn(locale, 'tx_cancel_ref_desc_label') + ' ' + sup.refDesc;
+    return line;
+  }
+  if (sup.refDesc) return tFn(locale, 'tx_cancel_reason_desc_only_prefix') + sup.refDesc;
+  return tFn(locale, 'tx_cancel_reason_none');
+}
+
+/** 노티거래내역 내역/사유 열 — 취소 행: 「내역:」「사유:」 없이 `취소 / …` 형식 */
+function buildCancelDetailCellText(locale, tFn, body) {
+  return tFn(locale, 'tx_status_cancel') + ' / ' + buildCancelDetailReasonLine(locale, tFn, body);
 }
 // 오류 상태로 간주할 PaymentStatus (API 4=Error, 콜백 3=Error, 문자열 'Error')
 function isErrorPaymentStatus(ps) {
@@ -16613,6 +17323,717 @@ function aggregatePaymentStatsFromNotiLogs() {
     jpay: finish(acc.jpay),
   };
 }
+
+function formatMonitorBytes(n) {
+  const x = Number(n) || 0;
+  if (x >= 1073741824) return (x / 1073741824).toFixed(3) + ' GB';
+  if (x >= 1048576) return (x / 1048576).toFixed(2) + ' MB';
+  if (x >= 1024) return (x / 1024).toFixed(1) + ' KB';
+  return String(Math.round(x)) + ' B';
+}
+
+/** data/ 등 디렉터리 전체 파일 크기 합산 (심볼릭 링크는 건너뜀) */
+function sumDirectoryBytesSync(rootDir) {
+  let total = 0;
+  const stack = [path.resolve(rootDir)];
+  while (stack.length) {
+    const d = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const name = e && e.name;
+      if (!name || name === '.' || name === '..') continue;
+      const p = path.join(d, name);
+      try {
+        if (e.isSymbolicLink()) continue;
+        if (e.isDirectory()) stack.push(p);
+        else if (e.isFile()) total += fs.statSync(p).size;
+      } catch {
+        /* skip */
+      }
+    }
+  }
+  return total;
+}
+
+function getDiskUsageWin32ForPath(basePath) {
+  const root = path.parse(path.resolve(basePath)).root;
+  const letterM = /^([a-zA-Z]):/i.exec(root.replace(/\\/g, '/'));
+  const letter = letterM ? letterM[1].toUpperCase() : null;
+  if (!letter) return null;
+  try {
+    const { execFileSync } = require('child_process');
+    const ps = `$d = Get-PSDrive -Name '${letter}' -PSProvider FileSystem -ErrorAction SilentlyContinue; if ($null -eq $d) { exit 1 }; [string]($d.Used) + ' ' + [string]($d.Free)`;
+    const out = String(
+      execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps], {
+        encoding: 'utf8',
+        timeout: 8000,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024,
+      }),
+    ).trim();
+    const parts = out.split(/\s+/);
+    if (parts.length < 2) return null;
+    const used = Number(parts[0]);
+    const free = Number(parts[1]);
+    if (!Number.isFinite(used) || !Number.isFinite(free)) return null;
+    const total = used + free;
+    if (total <= 0) return null;
+    return { total, used, free, pct: (used / total) * 100 };
+  } catch {
+    return null;
+  }
+}
+
+/** data/ 가 올라간 디스크 볼륨의 사용량 (가능 시). Linux 등: fs.statfsSync, Windows: PowerShell 보조 */
+function getHostDiskUsageNearPath(basePath) {
+  const resolved = path.resolve(basePath);
+  try {
+    if (typeof fs.statfsSync === 'function') {
+      const s = fs.statfsSync(resolved);
+      const bsize = Number(s.bsize) || Number(s.frsize) || 512;
+      const blocks = Number(s.blocks);
+      const bavailRaw = s.bavail != null ? s.bavail : s.bfree;
+      const bavail = Number(bavailRaw);
+      if (Number.isFinite(blocks) && Number.isFinite(bsize) && blocks > 0) {
+        const total = blocks * bsize;
+        const avail = Number.isFinite(bavail) ? bavail * bsize : 0;
+        const used = Math.max(0, total - avail);
+        const pct = total > 0 ? (used / total) * 100 : 0;
+        return { total, used, free: avail, pct };
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  if (process.platform === 'win32') return getDiskUsageWin32ForPath(resolved);
+  return null;
+}
+function formatMonitorUptime(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return d + 'd ' + h + 'h ' + m + 'm';
+}
+
+function truncateMonitorText(str, maxLen) {
+  const t = String(str || '').replace(/\r/g, '');
+  if (t.length <= maxLen) return t;
+  return t.slice(0, maxLen) + '…';
+}
+
+// ===== SSL 인증서 (Let's Encrypt 등 PEM fullchain/leaf) 모니터링 · 선택적 갱신 명령 =====
+const sslMonitorRuntime = { state: null };
+
+/**
+ * DEPLOY.md 기준 스택: Nginx + certbot --nginx → PEM은 보통 /etc/letsencrypt/live/<도메인>/fullchain.pem
+ * 환경변수가 비어 있을 때만 사용. MONITOR_SSL_LE_DOMAIN 으로 도메인 고정 가능(다중 인증서 서버).
+ */
+function resolveLetsEncryptLiveFullchainFallback() {
+  if (process.platform === 'win32') return '';
+  const liveRoot = '/etc/letsencrypt/live';
+  try {
+    if (!fs.existsSync(liveRoot) || !fs.statSync(liveRoot).isDirectory()) return '';
+  } catch {
+    return '';
+  }
+  const explicit = String(process.env.MONITOR_SSL_LE_DOMAIN || '').trim();
+  if (explicit) {
+    const p = path.join(liveRoot, explicit, 'fullchain.pem');
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+    } catch {
+      return '';
+    }
+    return '';
+  }
+  let names;
+  try {
+    names = fs.readdirSync(liveRoot, { withFileTypes: true });
+  } catch {
+    return '';
+  }
+  const dirs = names.filter((d) => d.isDirectory() && d.name !== 'README').map((d) => d.name);
+  const withPem = dirs.filter((name) => {
+    try {
+      const fp = path.join(liveRoot, name, 'fullchain.pem');
+      return fs.existsSync(fp) && fs.statSync(fp).isFile();
+    } catch {
+      return false;
+    }
+  });
+  if (withPem.length === 1) return path.join(liveRoot, withPem[0], 'fullchain.pem');
+  return '';
+}
+
+function resolveMonitorSslCertPathMeta() {
+  const a = String(process.env.MONITOR_SSL_CERT_PATH || '').trim();
+  const b = String(process.env.SSL_CERTIFICATE_FILE || process.env.NGINX_SSL_CERT || '').trim();
+  const c = String(process.env.LETSENCRYPT_FULLCHAIN_PATH || '').trim();
+  const p = a || b || c;
+  if (p) return { path: path.resolve(p), source: 'env' };
+  const le = resolveLetsEncryptLiveFullchainFallback();
+  if (le) return { path: path.resolve(le), source: 'letsencrypt_auto' };
+  return { path: '', source: 'none' };
+}
+
+function resolveMonitorSslCertPath() {
+  return resolveMonitorSslCertPathMeta().path;
+}
+
+function sslRenewCommandConfigured() {
+  return String(process.env.MONITOR_SSL_RENEW_CMD || '').trim();
+}
+
+function sslAutoRenewEnabled() {
+  return String(process.env.MONITOR_SSL_AUTO_RENEW_ENABLED || '') === '1' && !!sslRenewCommandConfigured();
+}
+
+function extractFirstPemCertificateBlock(pemText) {
+  const m = /-----BEGIN CERTIFICATE-----[\r\n]+([\s\S]*?)[\r\n]+-----END CERTIFICATE-----/.exec(pemText || '');
+  if (!m) return null;
+  const body = m[1].replace(/\r\n/g, '\n').trim();
+  return `-----BEGIN CERTIFICATE-----\n${body}\n-----END CERTIFICATE-----\n`;
+}
+
+function readLeafCertificateInfo(certPath) {
+  try {
+    if (!certPath || !fs.existsSync(certPath)) return { ok: false, error: 'missing_file' };
+    const raw = fs.readFileSync(certPath, 'utf8');
+    const block = extractFirstPemCertificateBlock(raw);
+    if (!block) return { ok: false, error: 'no_pem' };
+    const cert = new crypto.X509Certificate(block);
+    const notBefore = new Date(cert.validFrom);
+    const notAfter = new Date(cert.validTo);
+    if (Number.isNaN(notBefore.getTime()) || Number.isNaN(notAfter.getTime())) return { ok: false, error: 'bad_dates' };
+    const now = Date.now();
+    const daysRemaining = Math.floor((notAfter.getTime() - now) / 86400000);
+    return {
+      ok: true,
+      subject: cert.subject,
+      issuer: cert.issuer,
+      fingerprint256: cert.fingerprint256,
+      serialNumber: cert.serialNumber,
+      validFromMs: notBefore.getTime(),
+      validToMs: notAfter.getTime(),
+      validFromIso: notBefore.toISOString(),
+      validToIso: notAfter.toISOString(),
+      daysRemaining,
+    };
+  } catch (e) {
+    return { ok: false, error: e.message || 'parse_error' };
+  }
+}
+
+function loadSslMonitorState() {
+  try {
+    const raw = fs.readFileSync(SSL_MONITOR_STATE_PATH, 'utf8');
+    const o = JSON.parse(raw);
+    if (!o || typeof o !== 'object') throw new Error('bad');
+    return o;
+  } catch {
+    return {
+      v: 1,
+      previousNotAfterMs: null,
+      previousNotAfterIso: null,
+      lastRenewalDetectedAtIso: null,
+      lastCheckAtIso: null,
+      lastVerifiedNotAfterIso: null,
+      lastRenewAttemptAtIso: null,
+      lastRenewAttemptOk: null,
+      lastRenewAttemptExitCode: null,
+      lastRenewAttemptMessage: '',
+      lastCertFingerprint256: null,
+      renewalVerifiedAfterAttempt: null,
+    };
+  }
+}
+
+function getSslMonitorState() {
+  if (!sslMonitorRuntime.state) sslMonitorRuntime.state = loadSslMonitorState();
+  return sslMonitorRuntime.state;
+}
+
+function saveSslMonitorStateNow() {
+  const s = sslMonitorRuntime.state;
+  if (!s) return;
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(SSL_MONITOR_STATE_PATH, JSON.stringify(s), 'utf8');
+  } catch (e) {
+    console.error('[ssl-monitor] save failed', e.message);
+  }
+}
+
+function applySslCertificateReadToState(info) {
+  if (!info || !info.ok) return;
+  const st = getSslMonitorState();
+  const prev = st.previousNotAfterMs;
+  if (prev != null && info.validToMs > prev) {
+    st.lastRenewalDetectedAtIso = new Date().toISOString();
+  }
+  st.previousNotAfterMs = info.validToMs;
+  st.previousNotAfterIso = info.validToIso;
+  st.lastCheckAtIso = new Date().toISOString();
+  st.lastVerifiedNotAfterIso = info.validToIso;
+  st.lastCertFingerprint256 = info.fingerprint256 || null;
+  saveSslMonitorStateNow();
+}
+
+function sslRenewDaysBefore() {
+  const n = Number(process.env.MONITOR_SSL_RENEW_DAYS_BEFORE);
+  return Number.isFinite(n) && n >= 1 ? Math.min(89, Math.floor(n)) : 30;
+}
+
+function sslRenewCooldownMs() {
+  const h = Number(process.env.MONITOR_SSL_RENEW_COOLDOWN_HOURS);
+  const hrs = Number.isFinite(h) && h >= 1 ? Math.min(168, h) : 22;
+  return hrs * 3600000;
+}
+
+/** 갱신 명령 실행 전후 PEM을 읽어 만료일이 연장되었는지 검증 */
+function runSslRenewShellSync(reason, actor, reqForLog) {
+  const cmd = sslRenewCommandConfigured();
+  if (!cmd) return { ok: false, renewalVerified: false, exitCode: -1, message: 'no_cmd' };
+  const certPath = resolveMonitorSslCertPath();
+  const before = readLeafCertificateInfo(certPath);
+  const beforeMs = before.ok ? before.validToMs : null;
+  const { execSync } = require('child_process');
+  let stdout = '';
+  let stderr = '';
+  let exitCode = 0;
+  try {
+    stdout = String(
+      execSync(cmd, {
+        encoding: 'utf8',
+        timeout: 300000,
+        maxBuffer: 4 * 1024 * 1024,
+        windowsHide: true,
+        shell: true,
+      }),
+    );
+  } catch (e) {
+    stdout = String(e.stdout || '');
+    stderr = String(e.stderr || e.message || '');
+    exitCode = typeof e.status === 'number' ? e.status : 1;
+  }
+  const after = readLeafCertificateInfo(certPath);
+  const renewalVerified = beforeMs != null && after.ok && after.validToMs > beforeMs;
+  const msg = truncateMonitorText(`${stdout}\n${stderr}`, 4000);
+  const st = getSslMonitorState();
+  st.lastRenewAttemptAtIso = new Date().toISOString();
+  st.lastRenewAttemptOk = exitCode === 0;
+  st.lastRenewAttemptExitCode = exitCode;
+  st.lastRenewAttemptMessage = msg;
+  st.renewalVerifiedAfterAttempt = renewalVerified;
+  if (renewalVerified) {
+    st.lastRenewalDetectedAtIso = st.lastRenewAttemptAtIso;
+    st.previousNotAfterMs = after.validToMs;
+    st.previousNotAfterIso = after.validToIso;
+    st.lastVerifiedNotAfterIso = after.validToIso;
+    st.lastCertFingerprint256 = after.fingerprint256 || null;
+  }
+  if (after.ok) applySslCertificateReadToState(after);
+  else saveSslMonitorStateNow();
+  const clientIp = reqForLog
+    ? (reqForLog.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || reqForLog.ip || ''
+    : '';
+  appendConfigChangeLog({
+    action: 'ssl_renew_attempt',
+    detail: 'SSL 갱신 명령 실행',
+    actor: actor || 'system',
+    clientIp,
+    payload: { reason, exitCode, renewalVerified, ok: exitCode === 0 },
+  });
+  return { ok: exitCode === 0, exitCode, renewalVerified, message: msg };
+}
+
+function performSslMonitorScheduledTick() {
+  const certPath = resolveMonitorSslCertPath();
+  if (!certPath || !fs.existsSync(certPath)) return;
+  const info = readLeafCertificateInfo(certPath);
+  if (info.ok) applySslCertificateReadToState(info);
+  if (!sslAutoRenewEnabled()) return;
+  if (!info.ok || info.daysRemaining == null) return;
+  if (info.daysRemaining > sslRenewDaysBefore()) return;
+  const st = getSslMonitorState();
+  const last = st.lastRenewAttemptAtIso ? Date.parse(st.lastRenewAttemptAtIso) : 0;
+  if (Date.now() - last < sslRenewCooldownMs()) return;
+  runSslRenewShellSync('scheduled', 'system', null);
+}
+
+setInterval(performSslMonitorScheduledTick, 60 * 60 * 1000);
+setTimeout(performSslMonitorScheduledTick, 20000);
+
+app.get('/admin/system-monitor', requireAuth, requirePage('advanced_system_monitor'), (req, res) => {
+  const locale = getLocale(req);
+  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+  const adminUser = req.session.adminUser || '';
+  const nowDate = new Date();
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const state = getSystemMonitorState();
+  const agg = buildSystemMonitorAggregates(state);
+  const totalM = os.totalmem();
+  const freeM = os.freemem();
+  const usedM = totalM - freeM;
+  const sysMemPct = totalM ? ((usedM / totalM) * 100).toFixed(1) : '0';
+  const pm = process.memoryUsage();
+  const la = os.loadavg();
+  const loadStr =
+    process.platform === 'win32'
+      ? '—'
+      : [(la[0] || 0).toFixed(2), (la[1] || 0).toFixed(2), (la[2] || 0).toFixed(2)].join(' / ');
+  const dataDirBytes = sumDirectoryBytesSync(DATA_DIR);
+  const diskUsage = getHostDiskUsageNearPath(DATA_DIR);
+  const diskPctStr = diskUsage && Number.isFinite(diskUsage.pct) ? diskUsage.pct.toFixed(1) : null;
+  const diskBarClass = diskUsage && diskUsage.pct >= 95 ? ' danger' : diskUsage && diskUsage.pct >= 80 ? ' warn' : '';
+  const diskBarW =
+    diskUsage && Number.isFinite(diskUsage.pct) ? String(Math.min(100, Math.max(0, diskUsage.pct))) : '0';
+  const quotaBytes = getEffectiveMonthlyQuotaBytes();
+  const quotaGb = getEffectiveMonthlyQuotaGb();
+  const defaultQuotaGb = systemMonitorDefaultQuotaGb();
+  const usedMonthGb = agg.monthBytes / 1073741824;
+  const quotaUsedPct = quotaBytes > 0
+    ? Math.min(100, (agg.monthBytes / quotaBytes) * 100)
+    : 0;
+  const quotaSaved = systemMonitorUsingSavedQuota();
+  const quotaFlashOk = String(req.query.quotaSaved || '') === '1';
+  const quotaFlashErr = String(req.query.quotaErr || '') === '1';
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const trafficSum = buildTrafficChartSummaries(locale, agg);
+  const chartPayload = {
+    daily: agg.daily,
+    weekly: agg.weekly,
+    monthly: agg.monthly,
+    lt: t(locale, 'monitor_chart_traffic'),
+    lm: t(locale, 'monitor_chart_mem_peak'),
+    lx: t(locale, 'monitor_chart_axis_gb'),
+    ly: t(locale, 'monitor_chart_axis_pct'),
+  };
+  const chartJson = JSON.stringify(chartPayload).replace(/</g, '\\u003c');
+  const sidebar = getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl || '/admin/system-monitor');
+  const topbar = getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl || '/admin/system-monitor');
+  const title = t(locale, 'nav_server_manage');
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${esc(title)}</title>
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #edf2f7; color: #111827; }
+    .card { background: #fff; padding: 18px 22px; border-radius: 10px; border: 1px solid #e5e7eb; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+    h1 { margin: 0 0 8px 0; font-size: 1.35rem; }
+    .mon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-top: 12px; }
+    .mon-stat { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 14px; }
+    .mon-stat .k { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+    .mon-stat .v { font-size: 18px; font-weight: 700; color: #111827; }
+    .quota-bar { height: 22px; background: #e5e7eb; border-radius: 6px; overflow: hidden; margin-top: 8px; }
+    .quota-bar > div { height: 100%; background: linear-gradient(90deg, #22c55e, #eab308 70%, #ef4444); width: 0; transition: width 0.3s; }
+    .quota-bar.warn > div { background: #f59e0b; }
+    .quota-bar.danger > div { background: #ef4444; }
+    .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0 8px; }
+    .tabs button { padding: 8px 16px; border: 1px solid #d1d5db; background: #fff; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    .tabs button.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 900px) { .chart-row { grid-template-columns: 1fr; } }
+    .chart-box { position: relative; height: 280px; }
+    .mon-chart-summary-title { margin: 20px 0 8px; font-size: 13px; font-weight: 700; color: #374151; }
+    .mon-chart-summary { font-size: 12px; color: #4b5563; line-height: 1.55; white-space: pre-line; padding: 12px 14px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; margin-top: 4px; }
+    .mon-quota-flash { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 13px; max-width: 560px; }
+    .mon-quota-flash.ok { background: #ecfdf5; border: 1px solid #6ee7b7; color: #065f46; }
+    .mon-quota-flash.err { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .mon-quota-form { margin-top: 14px; padding-top: 14px; border-top: 1px solid #e5e7eb; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; max-width: 560px; }
+    .mon-quota-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #374151; font-weight: 600; }
+    .mon-quota-form input { width: 120px; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; box-sizing: border-box; }
+    .mon-quota-form button { padding: 8px 16px; background: #111827; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    .mon-quota-form button:hover { background: #374151; }
+    .mon-quota-hint { font-size: 11px; color: #6b7280; margin-top: 8px; max-width: 560px; line-height: 1.45; }
+    .mon-ssl-dl { display: grid; grid-template-columns: minmax(120px, 200px) 1fr; gap: 8px 16px; font-size: 13px; margin-top: 12px; align-items: start; }
+    .mon-ssl-dl dt { color: #6b7280; font-weight: 600; margin: 0; }
+    .mon-ssl-dl dd { margin: 0; word-break: break-word; }
+    .mon-ssl-warn { color: #b45309; font-weight: 600; }
+    .mon-ssl-warn-danger { color: #b91c1c; font-weight: 700; }
+    .mon-ssl-pre { margin-top: 12px; padding: 10px 12px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto; }
+    .mon-ssl-guide-title { margin: 12px 0 6px; font-size: 12px; font-weight: 700; color: #0369a1; }
+    .mon-ssl-guide { font-size: 11px; color: #374151; line-height: 1.55; white-space: pre-line; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 10px 12px; }
+    .mon-ssl-autodetect-tag { font-size: 11px; color: #0369a1; font-weight: 600; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="layout">
+    ${sidebar}
+    <main class="main">
+      ${topbar}
+      <div class="card">
+        <h1>${esc(title)}</h1>
+        <p class="admin-page-desc">${esc(t(locale, 'monitor_page_desc'))}</p>
+        <div class="mon-grid">
+          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_sys_mem'))}</div><div class="v">${esc(sysMemPct)}%</div><div style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(formatMonitorBytes(usedM))} / ${esc(formatMonitorBytes(totalM))}</div></div>
+          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_node_heap'))}</div><div class="v">${esc(formatMonitorBytes(pm.heapUsed))}</div></div>
+          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_node_rss'))}</div><div class="v">${esc(formatMonitorBytes(pm.rss))}</div></div>
+          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_load'))}</div><div class="v" style="font-size:15px;">${esc(loadStr)}</div></div>
+          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_uptime'))}</div><div class="v" style="font-size:15px;">${esc(formatMonitorUptime(process.uptime()))}</div></div>
+          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_db_store'))}</div><div class="v">${esc(formatMonitorBytes(dataDirBytes))}</div><div style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(t(locale, 'monitor_stat_db_store_hint'))}</div></div>
+          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_disk_volume'))}</div>${diskUsage ? `<div class="v">${esc(diskPctStr)}%</div><div style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(formatMonitorBytes(diskUsage.used))} / ${esc(formatMonitorBytes(diskUsage.total))}</div><div class="quota-bar${diskBarClass}" style="max-width:100%;margin-top:8px;height:10px;"><div style="width:${esc(diskBarW)}%;"></div></div>` : `<div class="v" style="font-size:15px;">—</div><div style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(t(locale, 'monitor_stat_disk_unavailable'))}</div>`}</div>
+        </div>
+        <div style="margin-top:18px;">
+          <div class="k" style="font-size:12px;font-weight:600;color:#374151;">${esc(t(locale, 'monitor_monthly_traffic'))} (${esc(String(quotaGb))} GB ${esc(t(locale, 'monitor_quota_plan'))})</div>
+          <div style="font-size:14px;margin-top:6px;">${esc(formatMonitorBytes(agg.monthBytes))} (${esc(usedMonthGb.toFixed(3))} GB) · ${esc(quotaUsedPct.toFixed(1))}%</div>
+          <div class="quota-bar${quotaUsedPct >= 95 ? ' danger' : quotaUsedPct >= 80 ? ' warn' : ''}" style="max-width:560px;"><div style="width:${String(quotaUsedPct)}%;"></div></div>
+          ${quotaFlashOk ? `<div class="mon-quota-flash ok" role="status">${esc(t(locale, 'monitor_quota_saved'))}</div>` : ''}
+          ${quotaFlashErr ? `<div class="mon-quota-flash err" role="alert">${esc(t(locale, 'monitor_quota_invalid'))}</div>` : ''}
+          <p class="mon-quota-hint">${esc(quotaSaved ? t(locale, 'monitor_quota_form_hint_saved') : t(locale, 'monitor_quota_form_hint_default').replace(/\{\{n\}\}/g, String(defaultQuotaGb)))}</p>
+          <form class="mon-quota-form" method="post" action="/admin/system-monitor/quota">
+            <label>${esc(t(locale, 'monitor_quota_edit_label'))}<input type="number" name="monthlyQuotaGb" min="1" max="1000000" step="1" required value="${esc(String(quotaGb))}" /></label>
+            <button type="submit">${esc(t(locale, 'monitor_quota_save'))}</button>
+          </form>
+        </div>
+      </div>
+      <div class="card">
+        <div class="tabs">
+          <button type="button" class="active" data-tab="d">${esc(t(locale, 'monitor_tab_daily'))}</button>
+          <button type="button" data-tab="w">${esc(t(locale, 'monitor_tab_weekly'))}</button>
+          <button type="button" data-tab="m">${esc(t(locale, 'monitor_tab_monthly'))}</button>
+        </div>
+        <div id="panel-d" class="tab-panel active">
+          <div class="chart-row">
+            <div><div style="font-size:12px;font-weight:600;margin-bottom:8px;">${esc(t(locale, 'monitor_chart_traffic'))}</div><div class="chart-box"><canvas id="cD1"></canvas></div></div>
+            <div><div style="font-size:12px;font-weight:600;margin-bottom:8px;">${esc(t(locale, 'monitor_chart_mem_peak'))}</div><div class="chart-box"><canvas id="cD2"></canvas></div></div>
+          </div>
+          <div class="mon-chart-summary-title">${esc(t(locale, 'monitor_traffic_summary_heading'))}</div>
+          <div class="mon-chart-summary">${esc(trafficSum.daily)}</div>
+        </div>
+        <div id="panel-w" class="tab-panel">
+          <div class="chart-row">
+            <div><div style="font-size:12px;font-weight:600;margin-bottom:8px;">${esc(t(locale, 'monitor_chart_traffic'))}</div><div class="chart-box"><canvas id="cW1"></canvas></div></div>
+            <div><div style="font-size:12px;font-weight:600;margin-bottom:8px;">${esc(t(locale, 'monitor_chart_mem_peak'))}</div><div class="chart-box"><canvas id="cW2"></canvas></div></div>
+          </div>
+          <div class="mon-chart-summary-title">${esc(t(locale, 'monitor_traffic_summary_heading'))}</div>
+          <div class="mon-chart-summary">${esc(trafficSum.weekly)}</div>
+        </div>
+        <div id="panel-m" class="tab-panel">
+          <div class="chart-row">
+            <div><div style="font-size:12px;font-weight:600;margin-bottom:8px;">${esc(t(locale, 'monitor_chart_traffic'))}</div><div class="chart-box"><canvas id="cM1"></canvas></div></div>
+            <div><div style="font-size:12px;font-weight:600;margin-bottom:8px;">${esc(t(locale, 'monitor_chart_mem_peak'))}</div><div class="chart-box"><canvas id="cM2"></canvas></div></div>
+          </div>
+          <div class="mon-chart-summary-title">${esc(t(locale, 'monitor_traffic_summary_heading'))}</div>
+          <div class="mon-chart-summary">${esc(trafficSum.monthly)}</div>
+        </div>
+      </div>
+      ${(() => {
+        const sslMeta = resolveMonitorSslCertPathMeta();
+        const sslCertPath = sslMeta.path;
+        const sslInfo = sslCertPath ? readLeafCertificateInfo(sslCertPath) : { ok: false, error: 'no_path' };
+        if (sslInfo.ok) applySslCertificateReadToState(sslInfo);
+        const sslSt = getSslMonitorState();
+        const rd = sslRenewDaysBefore();
+        let renewByIso = '';
+        let renewByLocal = '';
+        if (sslInfo.ok) {
+          const rb = new Date(sslInfo.validToMs - rd * 86400000);
+          renewByIso = rb.toISOString();
+          try {
+            renewByLocal = rb.toLocaleString(LOCALE_TO_INTL[locale] || 'ko-KR', { hour12: false });
+          } catch {
+            renewByLocal = renewByIso;
+          }
+        }
+        const sslCmdOn = !!sslRenewCommandConfigured();
+        const sslAutoOn = sslAutoRenewEnabled();
+        const dRem = sslInfo.ok ? sslInfo.daysRemaining : null;
+        const sslExpCls = dRem != null && dRem <= 7 ? ' mon-ssl-warn-danger' : dRem != null && dRem <= 14 ? ' mon-ssl-warn' : '';
+        const qRen = String(req.query.sslRenew || '');
+        const flashSsl =
+          qRen === '1'
+            ? `<div class="mon-quota-flash ok" role="status">${esc(t(locale, 'monitor_ssl_flash_ok'))}</div>`
+            : qRen === '2'
+              ? `<div class="mon-quota-flash err" role="alert">${esc(t(locale, 'monitor_ssl_flash_fail'))}</div>`
+              : qRen === '3'
+                ? `<div class="mon-quota-flash err" role="alert">${esc(t(locale, 'monitor_ssl_flash_busy'))}</div>`
+                : qRen === '4'
+                  ? `<div class="mon-quota-flash err" role="alert">${esc(t(locale, 'monitor_ssl_flash_nocmd'))}</div>`
+                  : '';
+        const subj = sslInfo.ok ? sslInfo.subject : '';
+        const iss = sslInfo.ok ? sslInfo.issuer : '';
+        const fp = sslInfo.ok && sslInfo.fingerprint256 ? sslInfo.fingerprint256 : (sslSt.lastCertFingerprint256 || '');
+        const fromLocal = sslInfo.ok
+          ? (() => {
+              try {
+                return new Date(sslInfo.validFromMs).toLocaleString(LOCALE_TO_INTL[locale] || 'ko-KR', { hour12: false });
+              } catch {
+                return sslInfo.validFromIso;
+              }
+            })()
+          : '';
+        const toLocal = sslInfo.ok
+          ? (() => {
+              try {
+                return new Date(sslInfo.validToMs).toLocaleString(LOCALE_TO_INTL[locale] || 'ko-KR', { hour12: false });
+              } catch {
+                return sslInfo.validToIso;
+              }
+            })()
+          : '';
+        const lastCh = sslSt.lastCheckAtIso || '';
+        const lastSuccessIso = sslSt.lastRenewalDetectedAtIso || '';
+        let lastSuccessHtml = '';
+        if (lastSuccessIso) {
+          try {
+            const d = new Date(lastSuccessIso);
+            if (!Number.isNaN(d.getTime())) {
+              const loc = d.toLocaleString(LOCALE_TO_INTL[locale] || 'ko-KR', { hour12: false });
+              lastSuccessHtml = esc(loc) + ' <span style="color:#9ca3af;">(UTC ' + esc(d.toISOString()) + ')</span>';
+            } else lastSuccessHtml = esc(lastSuccessIso);
+          } catch {
+            lastSuccessHtml = esc(lastSuccessIso);
+          }
+        }
+        const attIso = sslSt.lastRenewAttemptAtIso || '';
+        const attOk = sslSt.lastRenewAttemptOk;
+        const attV = sslSt.renewalVerifiedAfterAttempt;
+        const attMsg = sslSt.lastRenewAttemptMessage || '';
+        const manualForm =
+          sslCmdOn
+            ? `<form class="mon-quota-form" method="post" action="/admin/system-monitor/ssl-renew" style="border-top:none;padding-top:0;margin-top:8px;"><button type="submit">${esc(t(locale, 'monitor_ssl_btn_renew'))}</button></form>`
+            : '';
+        return `<div class="card mon-ssl-card">
+        <h2 style="margin:0 0 8px;font-size:1.1rem;">${esc(t(locale, 'monitor_ssl_title'))}</h2>
+        <p class="admin-page-desc">${esc(t(locale, 'monitor_ssl_section_desc'))}</p>
+        <div class="mon-ssl-guide-title">${esc(t(locale, 'monitor_ssl_guide_title'))}</div>
+        <div class="mon-ssl-guide">${esc(t(locale, 'monitor_ssl_how_to_find'))}</div>
+        ${flashSsl}
+        <dl class="mon-ssl-dl">
+          <dt>${esc(t(locale, 'monitor_ssl_cert_path'))}</dt><dd>${sslCertPath ? esc(sslCertPath) + (sslMeta.source === 'letsencrypt_auto' ? ' <span class="mon-ssl-autodetect-tag">(' + esc(t(locale, 'monitor_ssl_autodetect_badge')) + ')</span>' : '') : esc(t(locale, 'monitor_ssl_path_empty'))}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_env_hint'))}</dt><dd><code style="font-size:11px;word-break:break-all;">MONITOR_SSL_CERT_PATH</code> · <code style="font-size:11px;">MONITOR_SSL_LE_DOMAIN</code> · <code style="font-size:11px;">MONITOR_SSL_RENEW_CMD</code> · <code style="font-size:11px;">MONITOR_SSL_AUTO_RENEW_ENABLED=1</code></dd>
+          <dt>${esc(t(locale, 'monitor_ssl_subject'))}</dt><dd>${sslInfo.ok ? esc(subj) : esc('—')}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_issuer'))}</dt><dd>${sslInfo.ok ? esc(iss) : esc('—')}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_valid_from'))}</dt><dd>${sslInfo.ok ? esc(fromLocal) + ' <span style="color:#9ca3af;">(UTC ' + esc(sslInfo.validFromIso) + ')</span>' : esc('—')}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_valid_to'))}</dt><dd class="${sslExpCls.trim()}">${sslInfo.ok ? esc(toLocal) + ' <span style="color:#9ca3af;">(UTC ' + esc(sslInfo.validToIso) + ')</span>' : esc('—')}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_days_left'))}</dt><dd class="${sslExpCls.trim()}">${sslInfo.ok ? esc(String(dRem)) + ' ' + esc(t(locale, 'monitor_ssl_days_unit')) : esc('—')}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_renew_by'))}</dt><dd>${sslInfo.ok ? esc(renewByLocal) + ' <span style="color:#9ca3af;">(' + esc(t(locale, 'monitor_ssl_renew_by_note').replace(/\{\{n\}\}/g, String(rd))) + ')</span>' : esc('—')}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_last_check'))}</dt><dd>${lastCh ? esc(lastCh) : esc('—')}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_last_renew_success'))}</dt><dd>${lastSuccessHtml ? lastSuccessHtml : esc(t(locale, 'monitor_ssl_never'))}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_last_attempt'))}</dt><dd>${attIso ? esc(attIso) + ' · ' + esc(attOk ? t(locale, 'monitor_ssl_attempt_ok') : t(locale, 'monitor_ssl_attempt_fail')) + (attV === true ? ' · ' + esc(t(locale, 'monitor_ssl_verified_yes')) : attV === false ? ' · ' + esc(t(locale, 'monitor_ssl_verified_no')) : '') : esc('—')}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_fingerprint'))}</dt><dd style="word-break:break-all;font-size:11px;">${fp ? esc(fp) : esc('—')}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_auto_status'))}</dt><dd>${esc(sslAutoOn ? t(locale, 'monitor_ssl_auto_on') : t(locale, 'monitor_ssl_auto_off'))} · ${esc(sslCmdOn ? t(locale, 'monitor_ssl_cmd_on') : t(locale, 'monitor_ssl_cmd_off'))}</dd>
+          <dt>${esc(t(locale, 'monitor_ssl_schedule'))}</dt><dd>${esc(t(locale, 'monitor_ssl_schedule_desc'))}</dd>
+        </dl>
+        ${attMsg ? `<pre class="mon-ssl-pre" aria-label="log">${esc(attMsg)}</pre>` : ''}
+        ${manualForm}
+        </div>`;
+      })()}
+    </main>
+  </div>
+  <script>window.__MON = ${chartJson};</script>
+  <script>
+(function(){
+  var P = window.__MON || {};
+  function gb(bytes){ return bytes / 1073741824; }
+  function barLine(canvasId, labels, bytesArr, memArr){
+    var ctx = document.getElementById(canvasId);
+    if (!ctx || !window.Chart) return;
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [
+          { label: P.lt, data: bytesArr.map(gb), backgroundColor: 'rgba(37, 99, 235, 0.55)', yAxisID: 'y', order: 2 },
+          { type: 'line', label: P.lm, data: memArr, borderColor: '#dc2626', backgroundColor: 'rgba(220,38,38,0.1)', yAxisID: 'y1', tension: 0.2, order: 1 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          y: { position: 'left', title: { display: true, text: P.lx }, beginAtZero: true },
+          y1: { position: 'right', title: { display: true, text: P.ly }, grid: { drawOnChartArea: false }, min: 0, suggestedMax: 100 }
+        },
+        plugins: { legend: { position: 'bottom' } }
+      }
+    });
+  }
+  function lineMem(canvasId, labels, memArr){
+    var ctx = document.getElementById(canvasId);
+    if (!ctx || !window.Chart) return;
+    new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{ label: P.lm, data: memArr, borderColor: '#dc2626', fill: true, backgroundColor: 'rgba(220,38,38,0.08)', tension: 0.2 }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: { y: { min: 0, suggestedMax: 100, title: { display: true, text: P.ly } } },
+        plugins: { legend: { position: 'bottom' } }
+      }
+    });
+  }
+  function pair(rows, idBar, idLine){
+    rows = rows || [];
+    var labels = rows.map(function(r){ return r.label; });
+    var bytes = rows.map(function(r){ return r.bytes; });
+    var mem = rows.map(function(r){ return r.memPeakPct; });
+    barLine(idBar, labels, bytes, mem);
+    lineMem(idLine, labels, mem);
+  }
+  pair(P.daily, 'cD1', 'cD2');
+  pair(P.weekly, 'cW1', 'cW2');
+  pair(P.monthly, 'cM1', 'cM2');
+  document.querySelectorAll('.tabs button').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var t = btn.getAttribute('data-tab');
+      document.querySelectorAll('.tabs button').forEach(function(b){ b.classList.toggle('active', b === btn); });
+      document.querySelectorAll('.tab-panel').forEach(function(p){ p.classList.remove('active'); });
+      var el = document.getElementById('panel-' + t);
+      if (el) el.classList.add('active');
+    });
+  });
+})();
+  </script>
+</body>
+</html>`);
+});
+
+app.post('/admin/system-monitor/quota', requireAuth, requirePage('advanced_system_monitor'), (req, res) => {
+  const parsed = parseSystemMonitorQuotaGbInput(req.body && req.body.monthlyQuotaGb);
+  if (parsed == null) {
+    return res.redirect('/admin/system-monitor?quotaErr=1');
+  }
+  const st = getSystemMonitorState();
+  const prevGb = parseSystemMonitorQuotaGbInput(st.monthlyQuotaGb);
+  st.monthlyQuotaGb = parsed;
+  saveSystemMonitorStateNow();
+  appendConfigChangeLog({
+    action: 'system_monitor_monthly_quota_gb',
+    detail: '서버 모니터링 월 트래픽 약정(GB) 변경',
+    actor: req.session.adminUser || 'unknown',
+    clientIp: (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '',
+    payload: { previousGb: prevGb, monthlyQuotaGb: parsed },
+  });
+  return res.redirect('/admin/system-monitor?quotaSaved=1');
+});
+
+app.post('/admin/system-monitor/ssl-renew', requireAuth, requirePage('advanced_system_monitor'), (req, res) => {
+  if (!sslRenewCommandConfigured()) {
+    return res.redirect('/admin/system-monitor?sslRenew=4');
+  }
+  const st = getSslMonitorState();
+  const last = st.lastRenewAttemptAtIso ? Date.parse(st.lastRenewAttemptAtIso) : 0;
+  if (Date.now() - last < 120000) {
+    return res.redirect('/admin/system-monitor?sslRenew=3');
+  }
+  const r = runSslRenewShellSync('manual', req.session.adminUser || 'unknown', req);
+  return res.redirect(r.ok ? '/admin/system-monitor?sslRenew=1' : '/admin/system-monitor?sslRenew=2');
+});
 
 app.get('/admin/traffic', requireAuth, requirePage('traffic_analysis'), (req, res) => {
   const locale = getLocale(req);
