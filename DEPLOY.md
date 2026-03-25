@@ -63,6 +63,44 @@ sudo nginx -t && sudo systemctl reload nginx
 
 HTTPS는 Let's Encrypt 사용: `sudo apt install certbot python3-certbot-nginx && sudo certbot --nginx`
 
+#### HTTPS 인증서 방식 정리 (이 프로젝트 문서 기준)
+
+- **TLS 종료**: Nginx가 443에서 받고, Node는 내부 포트(예: 3000)만 사용합니다.
+- **인증서**: Certbot **nginx** 플러그인으로 발급한 Let’s Encrypt PEM이 일반적으로  
+  `/etc/letsencrypt/live/<도메인>/fullchain.pem` 에 있습니다.
+
+#### 자동 갱신 (권장: 운영체제)
+
+Ubuntu/Debian 등에서는 패키지 설치 시 **`certbot.timer`** 가 등록되는 경우가 많습니다.  
+아래로 확인한 뒤 **enabled** 이면 별도 설정 없이 주기적으로 `certbot renew` 가 돌아갑니다.
+
+```bash
+systemctl status certbot.timer
+```
+
+갱신 후 Nginx에 새 인증서를 쓰게 하려면, 발급 당시 `--nginx` 플러그인을 썼다면 renewal 설정에 훅이 잡혀 있는 경우가 많습니다.  
+수동으로 맞추려면 `/etc/letsencrypt/renewal/*.conf` 의 `[renewalparams]` / 훅 문서를 참고하거나,  
+갱신 후 `sudo systemctl reload nginx` 를 renewal hook에 넣으면 됩니다.
+
+#### 관리 화면(서버 관리)에서 만료일 보기
+
+Node 프로세스가 PEM 파일을 **읽을 수 있어야** 합니다. 환경변수 예시는 `deploy/ssl-monitor.env.example` 를 참고하세요.
+
+- **`MONITOR_SSL_CERT_PATH`**: `fullchain.pem` 절대 경로(가장 명확).
+- **자동 탐지(Linux)**: 위 변수를 비우면 `/etc/letsencrypt/live` 아래에 **인증서 디렉터리가 하나뿐**일 때 그 `fullchain.pem` 을 씁니다.  
+  서버에 여러 도메인 인증서가 있으면 **`MONITOR_SSL_LE_DOMAIN=your-domain.com`** 으로 고정하세요.
+
+#### 앱에서 갱신 명령까지 돌리기 (선택)
+
+기본 권장은 **시스템 타이머만** 사용하는 것입니다.  
+그래도 관리 화면의 스케줄/버튼으로 `certbot renew` 를 호출하려면:
+
+1. `MONITOR_SSL_RENEW_CMD` 에 실행할 셸 한 줄을 넣고  
+2. `MONITOR_SSL_AUTO_RENEW_ENABLED=1` 로 켭니다.  
+3. Node 사용자가 `certbot`(및 필요 시 `systemctl reload nginx`)을 **비대화형**으로 실행할 수 있게 sudoers 등을 맞춰야 합니다.
+
+예시 스크립트: `scripts/ssl-renew-certbot-nginx.sh` (서버에서 실행 권한 부여 후 경로를 `MONITOR_SSL_RENEW_CMD`에 지정).
+
 ---
 
 ## 방법 2: Docker로 배포
@@ -123,3 +161,4 @@ docker run -d --name pg-noti-relay -p 3000:3000 \
 | **환경 변수** | `INTERNAL_NOTI_URL`, 필요 시 `PORT` 설정 |
 | **가맹점 정보** | 실제 가맹점은 `server.js`의 `MERCHANTS` 또는 추후 DB로 이전 |
 | **HTTPS** | PG사/가맹점이 HTTPS만 허용하면 Nginx 등으로 SSL 적용 |
+| **인증서 자동 갱신** | Linux+VPS면 `certbot.timer` 활성화 확인(위 "HTTPS 인증서 및 자동 갱신"). 관리 화면 연동은 `deploy/ssl-monitor.env.example` 참고 |
