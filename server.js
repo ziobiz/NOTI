@@ -65,6 +65,68 @@ const ADMIN_PAGE_DESC_BOX_CSS = `
     p.page-desc strong { color: #374151; }
 `;
 
+/** 피지/전산/개발 로그·결과 필터 바 (검색·초기화 ｜ 일자·적용 ｜ 프리셋) */
+const ADMIN_LOG_FILTER_BAR_CSS = `
+    .admin-log-filter-form { margin-bottom: 10px; font-size: 12px; }
+    .admin-log-filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 10px;
+    }
+    .admin-log-filter-seg {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    .admin-log-filter-sep {
+      color: #d1d5db;
+      font-weight: 300;
+      user-select: none;
+      padding: 0 2px;
+      flex-shrink: 0;
+    }
+    .admin-log-filter-input {
+      padding: 6px 8px;
+      font-size: 12px;
+      border-radius: 6px;
+      border: 1px solid #d1d5db;
+      min-width: 160px;
+      max-width: 280px;
+      box-sizing: border-box;
+    }
+    .admin-log-filter-date {
+      padding: 6px 8px;
+      font-size: 12px;
+      border-radius: 6px;
+      border: 1px solid #d1d5db;
+      box-sizing: border-box;
+    }
+    .admin-log-filter-apply {
+      padding: 6px 10px;
+      font-size: 12px;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .admin-log-filter-reset {
+      font-size: 12px;
+      color: #2563eb;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .admin-log-filter-reset:hover { text-decoration: underline; }
+    mark.log-search-hit {
+      background: #fef08a;
+      color: #1f2937;
+      padding: 0 2px;
+      border-radius: 2px;
+    }
+`;
+
 /** 관리자 레이아웃 공통: 사이드바·네비·상단바·main (getAdminSidebar 앞에 삽입) */
 const ADMIN_LAYOUT_SHELL_CSS = `
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
@@ -2593,6 +2655,263 @@ function parseLogDateRangeFromQuery(q) {
   return { startDate, endDate, preset: presetQ };
 }
 
+/** 피지·전산 결과/노티 로그 공통: 전체 열 텍스트 검색어 (logSearch 우선, 구 txId 호환) */
+function adminLogFullSearchRaw(q) {
+  const ls = (q && q.logSearch != null ? String(q.logSearch) : '').trim();
+  if (ls) return ls;
+  return (q && q.txId != null ? String(q.txId) : '').trim();
+}
+
+/** 검색어와 일치하는 구간만 esc 후 노란 배경 mark (대소문자 무시). 검색어 없으면 전체 esc만 */
+function highlightLogSearchHtml(raw, searchRaw, escFn) {
+  const q = String(searchRaw || '').trim();
+  if (!q) return escFn(raw);
+  let escRe;
+  try {
+    escRe = q.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+  } catch {
+    return escFn(raw);
+  }
+  let re;
+  try {
+    re = new RegExp('(' + escRe + ')', 'gi');
+  } catch {
+    return escFn(raw);
+  }
+  const str = String(raw ?? '');
+  const parts = str.split(re);
+  return parts
+    .map((part, i) => {
+      if (!part) return '';
+      if (i % 2 === 1) return '<mark class="log-search-hit">' + escFn(part) + '</mark>';
+      return escFn(part);
+    })
+    .join('');
+}
+
+/** 노티거래내역 Route 검색용: 가맹점 route → 본문 RouteNo → routeKey 숫자 */
+function notiTransactionRouteNoForSearch(log, body, merchant) {
+  const routeFromBody =
+    body.RouteNo != null && String(body.RouteNo).trim() !== ''
+      ? String(body.RouteNo).trim()
+      : body.routeNo != null && String(body.routeNo).trim() !== ''
+        ? String(body.routeNo).trim()
+        : '';
+  if (merchant && merchant.routeNo != null && String(merchant.routeNo).trim() !== '') {
+    return String(merchant.routeNo).trim();
+  }
+  if (routeFromBody) return routeFromBody;
+  return (String(log.routeKey || '').match(/\d+/) || [])[0] || '';
+}
+
+/** ROUTE 필드 검색 시 부분 일치 금지 (예: "1"이 "10"에 걸리지 않음) */
+function routeNoSearchExactMatch(routeVal, wantRaw) {
+  const w = String(wantRaw || '').trim();
+  const r = String(routeVal || '').trim();
+  if (!w) return true;
+  if (r === w) return true;
+  const nw = parseInt(w, 10);
+  const nr = parseInt(r, 10);
+  if (!Number.isNaN(nw) && !Number.isNaN(nr) && String(nw) === w && String(nr) === r && nw === nr) return true;
+  return false;
+}
+
+function notiHaystackPgResultLog(log, locale, logPg) {
+  const body = parseNotiBody(log);
+  const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+  const routeNo = (log.routeKey && (log.routeKey.match(/\/(\d+)$/) || [null, log.routeKey])[1]) || log.routeKey || '';
+  const envLabel = (log.env && String(log.env).toLowerCase()) === 'sandbox' ? 'sandbox' : 'live';
+  const relayStatus = String(log.relayStatus || '');
+  const failReason = String(log.relayFailReason || '');
+  const txId = String(body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : ''));
+  const orderNo = String(body.OrderNo != null ? body.OrderNo : (body.orderNo != null ? body.orderNo : ''));
+  const amtRaw = body.Amount != null ? body.Amount : (body.amount != null ? body.amount : '');
+  const amtDisplay = amtRaw !== '' && amtRaw != null ? String(formatAmountWithSeparator(amtRaw)) : '';
+  const currency = String(formatCurrencyForDisplay(body.Currency || body.currency) || body.Currency || body.currency || '');
+  const pgK = logPg === 'jpay' ? 'jpay' : 'chillpay';
+  const amtRawIcopay = getNotiBodyAmountRawForIcopay(body, pgK);
+  let icopayStr = '';
+  if (amtRawIcopay !== '' && amtRawIcopay != null) {
+    const ic = computeIcopayAmount(amtRawIcopay, body.Currency ?? body.currency, pgK);
+    if (Number.isFinite(ic)) icopayStr = String(formatAmountWithSeparator(ic));
+  }
+  const relayLabel =
+    relayStatus === 'ok'
+      ? t(locale, 'status_ok')
+      : relayStatus === 'fail'
+        ? t(locale, 'status_fail')
+        : relayStatus === 'skip'
+          ? t(locale, 'status_skip')
+          : relayStatus;
+  const resendKindVal = isCancelNotiBody(body) ? 'cancel' : 'payment';
+  const notiKindLabel = resendKindVal === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
+  let bodyJson = '';
+  try {
+    bodyJson = JSON.stringify(body);
+  } catch (_) {
+    bodyJson = '';
+  }
+  const jpayMid = String(jpayMidLabelForLog(log) || '');
+  return [
+    dt.date,
+    dt.timeTh,
+    dt.timeJp,
+    routeNo,
+    envLabel,
+    log.merchantId,
+    txId,
+    orderNo,
+    amtDisplay,
+    currency,
+    icopayStr,
+    relayStatus,
+    relayLabel,
+    failReason,
+    notiKindLabel,
+    jpayMid,
+    log.routeKey || '',
+    bodyJson,
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+function notiHaystackPgNotiLog(log, locale) {
+  const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+  const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+  let jsonCallback = log.kind === 'callback' ? JSON.stringify(log.body, null, 2) : '';
+  let jsonResult = log.kind === 'result' ? JSON.stringify(log.body, null, 2) : '';
+  if (log.kind === 'callback' && jsonCallback === '{}' && log.rawBody) jsonCallback = String(log.rawBody);
+  if (log.kind === 'result' && jsonResult === '{}' && log.rawBody) jsonResult = String(log.rawBody);
+  const relayStatus = log.relayStatus || '';
+  const relayHasTarget = !!log.targetUrl;
+  const relayLabel =
+    relayStatus === 'ok'
+      ? t(locale, 'status_ok')
+      : relayStatus === 'fail'
+        ? t(locale, 'status_fail')
+        : relayStatus === 'skip' && !relayHasTarget
+          ? t(locale, 'status_noti_none')
+          : relayStatus === 'skip'
+            ? t(locale, 'status_skip')
+            : relayStatus;
+  let bodyJson = '';
+  try {
+    bodyJson = JSON.stringify(body);
+  } catch (_) {
+    bodyJson = '';
+  }
+  const resendKindValHay = isCancelNotiBody(body) ? 'cancel' : 'payment';
+  const notiKindLabelHay =
+    resendKindValHay === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
+  return [
+    dt.date,
+    dt.timeTh,
+    dt.timeJp,
+    log.routeKey,
+    log.merchantId,
+    relayStatus,
+    relayLabel,
+    log.relayFailReason || '',
+    jsonCallback,
+    jsonResult,
+    notiKindLabelHay,
+    log.targetUrl || '',
+    jpayMidLabelForLog(log) || '',
+    bodyJson,
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+function internalHaystackAdminLog(log, locale) {
+  const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+  const payload = log.payload || {};
+  const displayPayload = jpayInternalLogDisplayPayload(log);
+  const jsonHeader = Object.keys(displayPayload).join(', ');
+  const jsonValue = JSON.stringify(displayPayload, null, 2);
+  const internalStatus = log.internalDeliveryStatus || '';
+  const internalLabel =
+    internalStatus === 'ok'
+      ? t(locale, 'status_ok')
+      : internalStatus === 'fail'
+        ? t(locale, 'status_fail')
+        : internalStatus === 'skip'
+          ? t(locale, 'status_skip')
+          : internalStatus;
+  const internalTargetName = getInternalTargetName(log.internalTargetId);
+  let payloadJson = '';
+  try {
+    payloadJson = JSON.stringify(payload);
+  } catch (_) {
+    payloadJson = '';
+  }
+  return [
+    dt.date,
+    dt.timeTh,
+    dt.timeJp,
+    internalTargetName,
+    internalLabel,
+    internalStatus,
+    jsonHeader,
+    jsonValue,
+    log.merchantId,
+    log.routeNo,
+    log.internalTargetId,
+    payloadJson,
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+function internalResultHaystackLog(log, locale, envLabel) {
+  const payload = log.payload || {};
+  const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+  const txId = String(payload.TransactionId != null ? payload.TransactionId : (payload.transactionId != null ? payload.transactionId : ''));
+  const payStatus = payload.PaymentStatus != null ? payload.PaymentStatus : '';
+  const statusDesc =
+    payStatus === '2' || payStatus === 2
+      ? t(locale, 'status_void')
+      : payStatus === '9' || payStatus === 9
+        ? t(locale, 'status_refund')
+        : payStatus === '1' || payStatus === 1
+          ? t(locale, 'status_payment')
+          : String(payStatus);
+  const internalStatus = log.internalDeliveryStatus || '';
+  const deliveryLabel =
+    internalStatus === 'ok'
+      ? t(locale, 'status_ok')
+      : internalStatus === 'fail'
+        ? t(locale, 'status_fail')
+        : internalStatus === 'skip'
+          ? t(locale, 'status_skip')
+          : internalStatus;
+  const internalTargetName = getInternalTargetName(log.internalTargetId);
+  let payloadJson = '';
+  try {
+    payloadJson = JSON.stringify(payload);
+  } catch (_) {
+    payloadJson = '';
+  }
+  return [
+    dt.date,
+    dt.timeTh,
+    dt.timeJp,
+    txId,
+    String(payStatus),
+    statusDesc,
+    String(log.routeNo || ''),
+    internalTargetName,
+    envLabel,
+    log.merchantId,
+    internalStatus,
+    deliveryLabel,
+    payloadJson,
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
 function parseAllowedPerPage(qPerPage) {
   const n = parseInt(qPerPage, 10);
   const allowed = [100, 200, 300, 400, 500];
@@ -2608,6 +2927,83 @@ function buildQueryString(obj) {
     parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
   });
   return parts.join('&');
+}
+
+/** 로그/결과 GET 필터: 입력·검색 초기화 ｜ 시작·종료일·적용 ｜ 기간 프리셋 */
+function renderAdminLogFilterBar(locale, cfg) {
+  const esc = cfg.esc;
+  const escAttr = (v) => String(esc(v ?? '')).replace(/"/g, '&quot;');
+  const {
+    logSearchRaw,
+    startDateStr,
+    endDateStr,
+    presetUsed,
+    presetHref,
+    resetHref,
+  } = cfg;
+  const sep = '<span class="admin-log-filter-sep" aria-hidden="true">｜</span>';
+  const presetPairs = [
+    ['today', t(locale, 'tx_filter_today')],
+    ['yesterday', t(locale, 'tx_filter_yesterday')],
+    ['this_week', t(locale, 'tx_filter_this_week')],
+    ['last_week', t(locale, 'tx_filter_last_week')],
+    ['this_month', t(locale, 'tx_filter_this_month')],
+    ['last_month', t(locale, 'tx_filter_last_month')],
+  ];
+  const presetsHtml = presetPairs
+    .map(([key, label]) => {
+      const active = presetUsed === key;
+      const bg = active ? '#2563eb' : '#e5e7eb';
+      const fg = active ? '#fff' : '#374151';
+      return (
+        '<a href="' +
+        presetHref(key) +
+        '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' +
+        bg +
+        ';color:' +
+        fg +
+        ';">' +
+        esc(label) +
+        '</a>'
+      );
+    })
+    .join('');
+  return (
+    '<div class="admin-log-filter-bar">' +
+    '<div class="admin-log-filter-seg">' +
+    '<input type="text" name="logSearch" value="' +
+    escAttr(logSearchRaw) +
+    '" placeholder="' +
+    escAttr(t(locale, 'admin_log_search_placeholder')) +
+    '" class="admin-log-filter-input" />' +
+    '<a href="' +
+    resetHref +
+    '" class="admin-log-filter-reset">' +
+    esc(t(locale, 'common_search_reset')) +
+    '</a>' +
+    '</div>' +
+    sep +
+    '<div class="admin-log-filter-seg">' +
+    '<input type="date" name="startDate" value="' +
+    escAttr(startDateStr) +
+    '" aria-label="' +
+    escAttr(t(locale, 'logs_filter_start_date')) +
+    '" class="admin-log-filter-date" />' +
+    '<input type="date" name="endDate" value="' +
+    escAttr(endDateStr) +
+    '" aria-label="' +
+    escAttr(t(locale, 'logs_filter_end_date')) +
+    '" class="admin-log-filter-date" />' +
+    '<button type="submit" class="admin-log-filter-apply">' +
+    esc(t(locale, 'tx_apply')) +
+    '</button>' +
+    '</div>' +
+    sep +
+    '<div class="admin-log-filter-seg">' +
+    presetsHtml +
+    '</div>' +
+    '</div>'
+  );
 }
 
 // 태국 시간(Asia/Bangkok) 문자열 생성 (노티 로그용)
@@ -7730,8 +8126,20 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   <title>${t(locale, 'merchants_title')}</title>
   <style>${ADMIN_PAGE_DESC_BOX_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; color:#111827; }
-    h1 { margin-bottom: 8px; }
-    h2 { margin-top: 32px; }
+    h1 {
+      margin: 0 0 12px 0;
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: #111827;
+      line-height: 1.25;
+    }
+    h2 {
+      margin: 24px 0 12px 0;
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: #111827;
+      line-height: 1.25;
+    }
     table { border-collapse: collapse; width: 100%; background:#ffffff; border-radius:8px; overflow:hidden; }
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 14px; text-align: center; }
     th { background: #e5f0ff; color:#1f2937; }
@@ -7944,11 +8352,11 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             <th class="cell-url">${t(locale, 'merchants_th_pg_reurl')}</th>
             <th class="cell-url">${t(locale, 'merchants_th_origin_cburl')}</th>
             <th class="cell-url">${t(locale, 'merchants_th_origin_reurl')}</th>
-            <th style="width:96px;font-size:11px;line-height:1.25;">${t(locale, 'merchants_th_noti_mode')}</th>
             <th style="width:70px;">${t(locale, 'merchants_th_route')}</th>
             <th style="width:90px;">CustomerId</th>
             <th style="width:100px;">${t(locale, 'merchants_th_target')}</th>
             <th style="width:88px;">${t(locale, 'merchants_th_pg_acquirer')}</th>
+            <th style="width:96px;">${t(locale, 'merchants_th_noti_mode')}</th>
             <th style="width:56px;">${t(locale, 'merchants_th_recurring')}</th>
             <th style="width:50px;">${t(locale, 'merchants_relay')}</th>
             <th style="width:50px;">${t(locale, 'merchants_internal')}</th>
@@ -8620,6 +9028,11 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       return true;
     });
   }
+  const logSearchRawPg = adminLogFullSearchRaw(q);
+  if (logSearchRawPg) {
+    const kwPg = logSearchRawPg.toLowerCase();
+    reversed = reversed.filter((log) => notiHaystackPgNotiLog(log, locale).indexOf(kwPg) !== -1);
+  }
 
   const perPage = parseAllowedPerPage(q.perPage);
   const page = Math.max(1, parseInt(q.page, 10) || 1);
@@ -8699,9 +9112,9 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       const resendKindVal = isCancelNotiBody(body) ? 'cancel' : 'payment';
       const resendKindLabel = resendKindVal === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
       const resendBtn = canResend
-        ? `<div class="resend-wrap"><span class="resend-kind-label" style="font-size:11px;color:#6b7280;margin-right:4px;">${resendKindLabel}</span><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_plain') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><button type="submit" class="btn-resend">${t(locale, 'pg_logs_btn_plain')}</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_json') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_form') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form">FORM</button></form></div>`
+        ? `<div class="resend-wrap"><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_plain') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><button type="submit" class="btn-resend">${t(locale, 'pg_logs_btn_plain')}</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_json') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_form') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form">FORM</button></form></div>`
         : !relayHasTarget
-        ? '<span class="label-none">' + t(locale, 'status_noti_none') + '</span>'
+        ? '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawPg, esc) + '</span>'
         : '-';
       const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
       const isSuccess = isSuccessPaymentBody(body);
@@ -8715,16 +9128,17 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
         : (windowType === 'refund_only' || windowType === 'void_manual') && canRefundByWindow
         ? `<form method="post" action="/admin/logs/refund-request" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_refund_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><button type="submit" class="btn-refund">${t(locale, 'cr_btn_refund_request')}</button></form>`
         : windowType === 'void_manual'
-        ? '<span class="label-manual">' + t(locale, 'pg_logs_label_manual') + '</span>'
+        ? '<span class="label-manual">' + highlightLogSearchHtml(t(locale, 'pg_logs_label_manual'), logSearchRawPg, esc) + '</span>'
         : '';
       return `<tr>
-        <td class="col-date">${esc(dt.date)}</td>
-        <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
-        <td class="col-narrow">${esc(log.routeKey || '')}</td>
-        <td class="col-narrow">${esc(log.merchantId || '')}</td>
-        <td class="col-status"><span class="${relayClass}">${esc(relayLabel)}</span>${relayStatus === 'fail' && relayFailReason ? `<br /><span class="relay-fail-reason" title="${esc(relayFailReason)}">${esc(relayFailReason)}</span>` : ''}</td>
-        <td class="col-json"><pre>${esc(jsonCallback) || '-'}</pre></td>
-        <td class="col-json"><pre>${esc(jsonResult) || '-'}</pre></td>
+        <td class="col-date">${highlightLogSearchHtml(dt.date, logSearchRawPg, esc)}</td>
+        <td class="col-time">TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawPg, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawPg, esc)}</span></td>
+        <td class="col-narrow">${highlightLogSearchHtml(log.routeKey || '', logSearchRawPg, esc)}</td>
+        <td class="col-narrow">${highlightLogSearchHtml(log.merchantId || '', logSearchRawPg, esc)}</td>
+        <td class="col-status"><span class="${relayClass}">${highlightLogSearchHtml(relayLabel, logSearchRawPg, esc)}</span>${relayStatus === 'fail' && relayFailReason ? `<br /><span class="relay-fail-reason" title="${esc(relayFailReason)}">${highlightLogSearchHtml(relayFailReason, logSearchRawPg, esc)}</span>` : ''}</td>
+        <td class="col-json"><pre>${jsonCallback ? highlightLogSearchHtml(jsonCallback, logSearchRawPg, esc) : esc('-')}</pre></td>
+        <td class="col-json"><pre>${jsonResult ? highlightLogSearchHtml(jsonResult, logSearchRawPg, esc) : esc('-')}</pre></td>
+        <td class="col-noti-state">${highlightLogSearchHtml(resendKindLabel, logSearchRawPg, esc)}</td>
         <td class="col-action">${resendBtn}</td>
         <td class="col-void-refund">${voidRefundBtns}</td>
       </tr>`;
@@ -8736,7 +9150,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'pg_logs_title')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     h1.cr-page-title {
@@ -8753,10 +9167,11 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
     .col-date { width: 8%; min-width: 70px; }
     .col-time, .col-narrow { width: 9%; min-width: 75px; }
     .col-status { width: 8%; min-width: 70px; }
-    .col-json { width: 26%; text-align: left; }
-    .col-action { width: 8%; min-width: 70px; }
-    .col-action .resend-wrap { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; margin: 6px 0; min-height: 48px; }
-    .col-action form { margin: 4px 0; }
+    .col-json { width: 24%; text-align: left; }
+    .col-noti-state { width: 6%; min-width: 52px; font-weight: 600; color: #374151; }
+    .col-action { width: 10%; min-width: 168px; }
+    .col-action .resend-wrap { display: inline-flex; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; margin: 6px 0; }
+    .col-action form { margin: 0; }
     .time-jp { color: #2563eb; }
     .status-ok { color: #059669; font-weight: 600; }
     .status-ok-normal { color: #2563eb; font-weight: 600; }
@@ -8819,39 +9234,36 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       ${hubHtmlLogs}
       ${jpayLogsNoticeHtml}
       <p class="admin-page-desc">${t(locale, 'pg_logs_desc_full')}</p>
-      <form method="get" action="/admin/logs" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;">
-        ${logPg === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}
-        ${logEnvCurrent === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : ''}
-        <input type="hidden" name="resendKind" value="${esc(resendKind)}" />
-        <input type="hidden" name="perPage" value="${perPage}" />
-        <input type="hidden" name="page" value="1" />
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
-        </label>
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
-        </label>
-        <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          ${(() => {
-            const make = (key, label) => {
-              const active = presetUsed === key;
-              const url = '/admin/logs?' + buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage });
-              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
-            };
-            return [
-              make('today', t(locale, 'tx_filter_today')),
-              make('yesterday', t(locale, 'tx_filter_yesterday')),
-              make('this_week', t(locale, 'tx_filter_this_week')),
-              make('last_week', t(locale, 'tx_filter_last_week')),
-              make('this_month', t(locale, 'tx_filter_this_month')),
-              make('last_month', t(locale, 'tx_filter_last_month')),
-            ].join('');
-          })()}
-        </div>
-      </form>
+      ${(() => {
+        const fh =
+          (logPg === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          (logEnvCurrent === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : '') +
+          '<input type="hidden" name="resendKind" value="' +
+          esc(resendKind) +
+          '" />' +
+          '<input type="hidden" name="perPage" value="' +
+          perPage +
+          '" />' +
+          '<input type="hidden" name="page" value="1" />';
+        return (
+          '<form method="get" action="/admin/logs" class="admin-log-filter-form">' +
+          fh +
+          renderAdminLogFilterBar(locale, {
+            esc,
+            logSearchRaw: logSearchRawPg,
+            startDateStr,
+            endDateStr,
+            presetUsed,
+            resetHref: '/admin/logs?' + buildQueryString({ ...q, logSearch: '', txId: '', page: 1 }),
+            presetHref: (key) =>
+              '/admin/logs?' +
+              buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage }),
+          }) +
+          '</form>'
+        );
+      })()}
       <table>
-        <colgroup><col class="col-date" /><col class="col-time" /><col class="col-narrow" /><col class="col-narrow" /><col class="col-status" /><col class="col-json" /><col class="col-json" /><col class="col-action" /><col class="col-void-refund" /></colgroup>
+        <colgroup><col class="col-date" /><col class="col-time" /><col class="col-narrow" /><col class="col-narrow" /><col class="col-status" /><col class="col-json" /><col class="col-json" /><col class="col-noti-state" /><col class="col-action" /><col class="col-void-refund" /></colgroup>
         <thead>
           <tr>
             <th>${t(locale, 'pg_logs_th_received_date')}</th>
@@ -8861,12 +9273,13 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
             <th>${t(locale, 'pg_logs_th_merchant_recv')}</th>
             <th>${t(locale, 'pg_logs_json_callback')}</th>
             <th>${t(locale, 'pg_logs_json_result')}</th>
+            <th>${t(locale, 'pg_logs_th_state')}</th>
             <th>${t(locale, 'pg_logs_th_resend')}</th>
             <th>${t(locale, 'pg_logs_th_void_refund')}</th>
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="9" style="text-align:center;color:#777;">${t(locale, 'pg_logs_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="10" style="text-align:center;color:#777;">${t(locale, 'pg_logs_empty')}</td></tr>`}
         </tbody>
       </table>
       <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
@@ -9113,13 +9526,13 @@ const cancelRefundLayoutCss = ADMIN_PAGE_DESC_BOX_CSS + `
   .tx-legend-grid { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 2px 10px; font-size: 10px; margin-bottom: 12px; align-items: start; }
   .tx-legend-grid .tx-legend-term-cell { padding: 3px 6px; border: 1px solid #e5e7eb; border-radius: 4px; background: #f3f4f6; font-weight: 600; color: #1f2937; white-space: nowrap; }
   .tx-legend-grid .tx-legend-desc-cell { padding: 3px 6px; border: 1px solid #e5e7eb; border-radius: 4px; background: #f9fafb; color: #4b5563; }
-  .tx-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; row-gap: 4px; font-size: 10px; margin-bottom: 16px; line-height: 1.25; }
+  .tx-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; row-gap: 4px; font-size: 12px; margin-bottom: 16px; line-height: 1.25; }
   .tx-toolbar .tx-toolbar-sep { color: #9ca3af; margin: 0 2px; flex-shrink: 0; user-select: none; }
-  .tx-date-form { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; vertical-align: middle; }
+  .tx-date-form { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; vertical-align: middle; }
   .tx-date-form .tx-date-label { font-weight: 500; color: #374151; margin: 0; }
-  .tx-date-form .tx-date-input { padding: 1px 3px; font-size: 10px; border: 1px solid #d1d5db; border-radius: 3px; line-height: 1.2; }
-  .tx-date-form .tx-date-sep { color: #6b7280; font-size: 10px; }
-  .tx-date-form .tx-date-btn { padding: 2px 6px; font-size: 10px; background: #2563eb; color: #fff; border: none; border-radius: 3px; cursor: pointer; line-height: 1.2; }
+  .tx-date-form .tx-date-input { padding: 1px 3px; font-size: 12px; border: 1px solid #d1d5db; border-radius: 3px; line-height: 1.2; }
+  .tx-date-form .tx-date-sep { color: #6b7280; font-size: 12px; }
+  .tx-date-form .tx-date-btn { padding: 2px 6px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 3px; cursor: pointer; line-height: 1.2; }
   .time-jp { color: #2563eb; }
   .btn-void { padding: 6px 12px; font-size: 12px; background: #7c3aed; color: #fff; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }
   .btn-void:hover { background: #6d28d9; }
@@ -9650,7 +10063,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     list = list.filter((log) => {
       const body = parseNotiBody(log);
       const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
-      const routeNo = merchant && (merchant.routeNo != null && String(merchant.routeNo).trim() !== '') ? String(merchant.routeNo) : (String(log.routeKey || '').match(/\d+/) || [])[0] || '';
+      const routeNo = notiTransactionRouteNoForSearch(log, body, merchant);
       if (searchField === 'all') {
         const str = [
           log.receivedAtIso || log.receivedAt,
@@ -9664,13 +10077,13 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
         ].filter(Boolean).join(' ').toLowerCase();
         return str.indexOf(kw) !== -1;
       }
+      if (searchField === 'Route' || searchField === 'RouteNo') return routeNoSearchExactMatch(routeNo, searchKw);
       let val = '';
       if (searchField === 'OrderNo') val = (body.OrderNo || body.orderNo || body.orderid || body.orderID || '') + '';
       else if (searchField === 'CustomerId') val = (body.CustomerId || body.customerId || '') + '';
       else if (searchField === 'TransactionId') val = (body.TransactionId || body.transactionId || body.transaction_id || '') + '';
       else if (searchField === 'Amount') val = (body.Amount || body.amount || '') + '';
       else if (searchField === 'merchant') val = (log.merchantId || '') + '';
-      else if (searchField === 'Route') val = routeNo + '';
       else if (searchField === 'Currency') val = (formatCurrencyForDisplay(body.Currency || body.currency) || body.Currency || body.currency || '') + '';
       else if (searchField === 'Description') val = (body.PaymentDescription || body.paymentDescription || body.Description || body.description || '') + '';
       return val.toLowerCase().indexOf(kw) !== -1;
@@ -9889,7 +10302,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     { key: 'both', label: t(locale, 'tx_noti_kind_both') },
   ].map((opt) => '<option value="' + esc(opt.key) + '"' + (notiKindFilter === opt.key ? ' selected' : '') + '>' + esc(opt.label) + '</option>').join('');
   const notiKindSelectHtml =
-    '<select style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;flex-shrink:0;" title="CALL / RESULT / BOTH" aria-label="CALL / RESULT / BOTH" onchange="var p=new URLSearchParams(window.location.search||\'\');p.set(\'notiKind\',this.value);p.set(\'page\',\'1\');window.location.search=p.toString()">' +
+    '<select style="padding:2px 4px;font-size:12px;border:1px solid #d1d5db;border-radius:3px;flex-shrink:0;" title="CALL / RESULT / BOTH" aria-label="CALL / RESULT / BOTH" onchange="var p=new URLSearchParams(window.location.search||\'\');p.set(\'notiKind\',this.value);p.set(\'page\',\'1\');window.location.search=p.toString()">' +
     notiKindOptionsHtml +
     '</select>';
   const sortLinks = [
@@ -9901,9 +10314,9 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   ].map((o) => {
     const url = baseUrl + qs({ sort: o.key, page: 1 });
     const active = sortBy === o.key;
-    return '<a href="' + url + '" style="padding:2px 6px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-right:2px;">' + esc(o.label) + '</a>';
+    return '<a href="' + url + '" style="padding:2px 6px;font-size:12px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-right:2px;">' + esc(o.label) + '</a>';
   }).join('');
-  const sortDirLinks = '<a href="' + baseUrl + qs({ sortDir: 'asc', page: 1 }) + '" style="padding:2px 6px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' + (sortDir === 'asc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'asc' ? '#fff' : '#374151') + ';">' + t(locale, 'tx_sort_asc') + '</a><a href="' + baseUrl + qs({ sortDir: 'desc', page: 1 }) + '" style="padding:2px 6px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;margin-left:2px;background:' + (sortDir === 'desc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'desc' ? '#fff' : '#374151') + ';">' + t(locale, 'tx_sort_desc') + '</a>';
+  const sortDirLinks = '<a href="' + baseUrl + qs({ sortDir: 'asc', page: 1 }) + '" style="padding:2px 6px;font-size:12px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' + (sortDir === 'asc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'asc' ? '#fff' : '#374151') + ';">' + t(locale, 'tx_sort_asc') + '</a><a href="' + baseUrl + qs({ sortDir: 'desc', page: 1 }) + '" style="padding:2px 6px;font-size:12px;border-radius:3px;text-decoration:none;white-space:nowrap;margin-left:2px;background:' + (sortDir === 'desc' ? '#2563eb' : '#e5e7eb') + ';color:' + (sortDir === 'desc' ? '#fff' : '#374151') + ';">' + t(locale, 'tx_sort_desc') + '</a>';
 
   const periodOptions = [
     { key: 'today', label: t(locale, 'tx_filter_today') },
@@ -9916,7 +10329,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   const periodLinks = periodOptions.map((o) => {
     const url = baseUrl + qs({ period: o.key, page: 1, dateFrom: '', dateTo: '' });
     const active = period === o.key;
-    return '<a href="' + url + '" style="padding:2px 6px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-left:2px;">' + esc(o.label) + '</a>';
+    return '<a href="' + url + '" style="padding:2px 6px;font-size:12px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-left:2px;">' + esc(o.label) + '</a>';
   }).join('');
 
   const transactionSearchFieldsWithLocale = [
@@ -9976,15 +10389,15 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     esc(notiKindFilter) +
     '" /><input type="hidden" name="period" value="' +
     esc(period) +
-    '" /><select name="searchField" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;max-width:7.5rem;">' +
+    '" /><select name="searchField" style="padding:2px 4px;font-size:12px;border:1px solid #d1d5db;border-radius:3px;max-width:7.5rem;">' +
     searchFieldOptions +
     '</select><input type="text" name="search" value="' +
     esc(searchKw) +
     '" placeholder="' +
     esc(t(locale, 'common_search')) +
-    '" style="padding:2px 5px;font-size:10px;width:100px;min-width:0;border:1px solid #d1d5db;border-radius:3px;" /><select name="statusFilter" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;max-width:9rem;">' +
+    '" style="padding:2px 5px;font-size:12px;width:100px;min-width:0;border:1px solid #d1d5db;border-radius:3px;" /><select name="statusFilter" style="padding:2px 4px;font-size:12px;border:1px solid #d1d5db;border-radius:3px;max-width:9rem;">' +
     statusFilterOptions +
-    '</select><button type="submit" style="padding:2px 7px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:3px;cursor:pointer;">' +
+    '</select><button type="submit" style="padding:2px 7px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:3px;cursor:pointer;">' +
     esc(t(locale, 'common_search')) +
     '</button></form>';
 
@@ -10019,8 +10432,8 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     esc(t(locale, 'tx_apply')) +
     '</button></form>';
   const exportUrl = baseUrl + '/export' + qs({ page: 1 });
-  const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:2px 8px;font-size:10px;background:#0d9488;color:#fff;border-radius:3px;text-decoration:none;white-space:nowrap;flex-shrink:0;">' + esc(t(locale, 'tx_export_excel')) + '</a>';
-  const toolbarHtml = '<div class="tx-toolbar">' + notiKindSelectHtml + sortLinks + sortDirLinks + '<span class="tx-toolbar-sep">|</span>' + periodLinks + dateForm + '<span class="tx-toolbar-sep">|</span>' + searchForm + excelBtn + '</div>';
+  const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:2px 8px;font-size:12px;background:#0d9488;color:#fff;border-radius:3px;text-decoration:none;white-space:nowrap;flex-shrink:0;">' + esc(t(locale, 'tx_export_excel')) + '</a>';
+  const toolbarHtml = '<div class="tx-toolbar">' + notiKindSelectHtml + '<span class="tx-toolbar-sep">ㅣ</span>' + sortLinks + sortDirLinks + '<span class="tx-toolbar-sep">|</span>' + periodLinks + dateForm + '<span class="tx-toolbar-sep">|</span>' + searchForm + excelBtn + '</div>';
   const hubHtmlTx = buildCrHubToolbarHtml(locale, esc, req.session.member, {
     inline: true,
     navEnv: getEnvFromReq(req) === 'sandbox' ? 'sandbox' : undefined,
@@ -11243,7 +11656,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
     list = list.filter((log) => {
       const body = parseNotiBody(log);
       const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
-      const routeNo = merchant && (merchant.routeNo != null && String(merchant.routeNo).trim() !== '') ? String(merchant.routeNo) : (String(log.routeKey || '').match(/\d+/) || [])[0] || '';
+      const routeNo = notiTransactionRouteNoForSearch(log, body, merchant);
       if (searchField === 'all') {
         const str = [
           log.receivedAtIso || log.receivedAt,
@@ -11257,13 +11670,13 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
         ].filter(Boolean).join(' ').toLowerCase();
         return str.indexOf(kw) !== -1;
       }
+      if (searchField === 'Route' || searchField === 'RouteNo') return routeNoSearchExactMatch(routeNo, searchKw);
       let val = '';
       if (searchField === 'OrderNo') val = (body.OrderNo || body.orderNo || body.orderid || body.orderID || '') + '';
       else if (searchField === 'CustomerId') val = (body.CustomerId || body.customerId || '') + '';
       else if (searchField === 'TransactionId') val = (body.TransactionId || body.transactionId || body.transaction_id || '') + '';
       else if (searchField === 'Amount') val = (body.Amount || body.amount || '') + '';
       else if (searchField === 'merchant') val = (log.merchantId || '') + '';
-      else if (searchField === 'Route') val = routeNo + '';
       else if (searchField === 'Currency') val = (formatCurrencyForDisplay(body.Currency || body.currency) || body.Currency || body.currency || '') + '';
       else if (searchField === 'Description') val = (body.PaymentDescription || body.paymentDescription || body.Description || body.description || '') + '';
       return val.toLowerCase().indexOf(kw) !== -1;
@@ -14340,7 +14753,7 @@ app.get('/admin/noti-analysis', requireAuth, requirePage('test_run'), (req, res)
 app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) => {
   const locale = getLocale(req);
   const q = req.query || {};
-  const txFilter = (q.txId || '').toString().trim();
+  const logSearchRaw = adminLogFullSearchRaw(q);
   const resendKind = (q.resendKind || 'payment').toString().toLowerCase();
   const resendOkLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_ok') : t(locale, 'pg_logs_resend_pay_ok');
   const resendFailLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_fail') : t(locale, 'pg_logs_resend_pay_fail');
@@ -14363,13 +14776,6 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
   const logPgResult = parseTxSourceFromReq(req);
   const filteredLogsResult = getEnvFilteredLogs(req).filter((log) => getNotiLogPgAcquirer(log) === logPgResult);
   let reversed = [...filteredLogsResult].slice().reverse();
-  if (txFilter) {
-    reversed = reversed.filter((log) => {
-      const body = parseNotiBody(log);
-      const txId = body.TransactionId != null ? String(body.TransactionId) : (body.transactionId != null ? String(body.transactionId) : '');
-      return txId && txId === txFilter;
-    });
-  }
   // 날짜/프리셋 필터 + 페이징
   const todayYmd = getBangkokTodayYmd();
   const dr = parseLogDateRangeFromQuery(q);
@@ -14387,6 +14793,10 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       if (endDateStr && ymd > endDateStr) return false;
       return true;
     });
+  }
+  if (logSearchRaw) {
+    const kw = logSearchRaw.toLowerCase();
+    reversed = reversed.filter((log) => notiHaystackPgResultLog(log, locale, logPgResult).indexOf(kw) !== -1);
   }
 
   const allowedPerPage = [100, 200, 300, 400, 500];
@@ -14419,7 +14829,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       const resendKindVal = isCancelNotiBody(body) ? 'cancel' : 'payment';
       const resendKindLabel = resendKindVal === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
       const notiKindClass = resendKindVal === 'cancel' ? 'noti-kind-cancel' : 'noti-kind-payment';
-      const notiKindCell = `<span class="${notiKindClass}">${esc(resendKindLabel)}</span>`;
+      const notiKindCell = `<span class="${notiKindClass}">${highlightLogSearchHtml(resendKindLabel, logSearchRaw, esc)}</span>`;
       const resendBtn = canResend
         ? `<div class="resend-wrap" style="display:inline-flex;flex-direction:row;gap:6px;align-items:center;flex-wrap:nowrap;"><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_plain') || '').replace(/'/g, "\\'")}');">${t(locale, 'pg_logs_btn_plain')}</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_json') || '').replace(/'/g, "\\'")}');">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_form') || '').replace(/'/g, "\\'")}');">FORM</button></form></div>`
         : '-';
@@ -14437,18 +14847,18 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
         if (Number.isFinite(ic)) icopayCell = formatAmountWithSeparator(ic);
       }
       return `<tr>
-        <td>${esc(dt.date)}</td>
-        <td>TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
-        <td>${esc(routeNo)}</td>
-        <td>${esc(envLabel)}</td>
-        <td>${esc(log.merchantId || '-')}</td>
-        <td>${esc(String(txId))}</td>
-        <td>${esc(String(orderNo))}</td>
-        <td>${esc(amtDisplay)}</td>
-        <td>${esc(currency || '-')}</td>
-        <td>${esc(icopayCell)}</td>
-        <td><span class="${relayClass}">${esc(relayLabel)}</span></td>
-        <td class="col-fail-reason">${failReason ? esc(failReason) : '-'}</td>
+        <td>${highlightLogSearchHtml(dt.date, logSearchRaw, esc)}</td>
+        <td>TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRaw, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRaw, esc)}</span></td>
+        <td>${highlightLogSearchHtml(String(routeNo), logSearchRaw, esc)}</td>
+        <td>${highlightLogSearchHtml(envLabel, logSearchRaw, esc)}</td>
+        <td>${highlightLogSearchHtml(log.merchantId || '-', logSearchRaw, esc)}</td>
+        <td>${highlightLogSearchHtml(String(txId), logSearchRaw, esc)}</td>
+        <td>${highlightLogSearchHtml(String(orderNo), logSearchRaw, esc)}</td>
+        <td>${highlightLogSearchHtml(String(amtDisplay), logSearchRaw, esc)}</td>
+        <td>${highlightLogSearchHtml(currency || '-', logSearchRaw, esc)}</td>
+        <td>${highlightLogSearchHtml(String(icopayCell), logSearchRaw, esc)}</td>
+        <td><span class="${relayClass}">${highlightLogSearchHtml(relayLabel, logSearchRaw, esc)}</span></td>
+        <td class="col-fail-reason">${failReason ? highlightLogSearchHtml(failReason, logSearchRaw, esc) : '-'}</td>
         <td class="col-noti-kind">${notiKindCell}</td>
         <td>${resendBtn}</td>
       </tr>`;
@@ -14460,7 +14870,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'nav_pg_result')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     .logs-result-table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; table-layout: fixed; }
     .card .logs-result-table { max-width: 100%; }
@@ -14523,47 +14933,35 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_pg_result')} (${totalCountResult})</h1>
       ${hubHtmlLogsResult}
       <p class="admin-page-desc">${t(locale, 'logs_result_desc')}</p>
-      <form method="get" action="/admin/logs-result" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
-        ${logPgResult === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}
-        ${logEnvResult === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : ''}
-        <label style="display:flex;align-items:center;gap:4px;">
-          <span>${t(locale, 'logs_result_search_txid')}</span>
-          <input type="text" name="txId" value="${esc(txFilter)}" placeholder="${esc(t(locale, 'logs_result_placeholder_txid'))}" style="padding:4px 8px;font-size:12px;border-radius:4px;border:1px solid #d1d5db;min-width:140px;" />
-        </label>
-        <button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;">${t(locale, 'common_search')}</button>
-        ${txFilter ? `<a href="/admin/logs-result?` + buildQueryString(logPgQueryWithBase(q, logPgResult, { txId: '', page: 1 })) + `" style="margin-left:4px;font-size:12px;color:#2563eb;text-decoration:none;">${t(locale, 'common_search_reset')}</a>` : ''}
-      </form>
-      <form method="get" action="/admin/logs-result" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;">
-        ${logPgResult === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}
-        ${logEnvResult === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : ''}
-        <input type="hidden" name="txId" value="${esc(txFilter)}" />
-        <input type="hidden" name="perPage" value="${perPage}" />
-        <input type="hidden" name="page" value="1" />
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
-        </label>
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
-        </label>
-        <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          ${(() => {
-            const make = (key, label) => {
-              const active = presetUsed === key;
-              const url = '/admin/logs-result?' + buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage: perPage });
-              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
-            };
-            return [
-              make('today', t(locale, 'tx_filter_today')),
-              make('yesterday', t(locale, 'tx_filter_yesterday')),
-              make('this_week', t(locale, 'tx_filter_this_week')),
-              make('last_week', t(locale, 'tx_filter_last_week')),
-              make('this_month', t(locale, 'tx_filter_this_month')),
-              make('last_month', t(locale, 'tx_filter_last_month')),
-            ].join('');
-          })()}
-        </div>
-      </form>
+      ${(() => {
+        const fh =
+          (logPgResult === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          (logEnvResult === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : '') +
+          '<input type="hidden" name="resendKind" value="' +
+          esc(resendKind) +
+          '" />' +
+          '<input type="hidden" name="perPage" value="' +
+          perPage +
+          '" />' +
+          '<input type="hidden" name="page" value="1" />';
+        const resetQs = logPgQueryWithBase(q, logPgResult, { logSearch: '', txId: '', page: 1 });
+        return (
+          '<form method="get" action="/admin/logs-result" class="admin-log-filter-form">' +
+          fh +
+          renderAdminLogFilterBar(locale, {
+            esc,
+            logSearchRaw,
+            startDateStr,
+            endDateStr,
+            presetUsed,
+            resetHref: '/admin/logs-result?' + buildQueryString(resetQs),
+            presetHref: (key) =>
+              '/admin/logs-result?' +
+              buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage }),
+          }) +
+          '</form>'
+        );
+      })()}
       <table class="logs-result-table">
         <colgroup>
           <col id="logs-result-col-0" style="width:7%;" /><col id="logs-result-col-1" style="width:8%;" /><col id="logs-result-col-2" style="width:4%;" /><col id="logs-result-col-3" style="width:4%;" /><col id="logs-result-col-4" style="width:11%;" />
@@ -17532,6 +17930,11 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       return true;
     });
   }
+  const logSearchRawInternal = adminLogFullSearchRaw(qIn);
+  if (logSearchRawInternal) {
+    const kwInt = logSearchRawInternal.toLowerCase();
+    filteredForDateInternal = filteredForDateInternal.filter(({ log }) => internalHaystackAdminLog(log, locale).indexOf(kwInt) !== -1);
+  }
 
   const perPage = parseAllowedPerPage(qIn.perPage);
   const page = Math.max(1, parseInt(qIn.page, 10) || 1);
@@ -17555,15 +17958,15 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       const internalResendLabel = internalResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
         ? `<form method="post" action="/admin/internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${internalResendKind}" />${logPgInternal === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend">${internalResendLabel}</button></form>`
-        : '<span class="label-none">' + t(locale, 'status_noti_none') + '</span>';
+        : '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawInternal, esc) + '</span>';
       const internalTargetName = getInternalTargetName(log.internalTargetId);
       return `<tr>
-        <td class="col-date">${esc(dt.date)}</td>
-        <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
-        <td class="col-narrow">${esc(internalTargetName)}</td>
-        <td class="col-status"><span class="${internalClass}">${esc(internalLabel)}</span></td>
-        <td class="col-header"><pre>${esc(jsonHeader)}</pre></td>
-        <td class="col-json"><pre>${esc(jsonValue)}</pre></td>
+        <td class="col-date">${highlightLogSearchHtml(dt.date, logSearchRawInternal, esc)}</td>
+        <td class="col-time">TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawInternal, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawInternal, esc)}</span></td>
+        <td class="col-narrow">${highlightLogSearchHtml(internalTargetName, logSearchRawInternal, esc)}</td>
+        <td class="col-status"><span class="${internalClass}">${highlightLogSearchHtml(internalLabel, logSearchRawInternal, esc)}</span></td>
+        <td class="col-header"><pre>${highlightLogSearchHtml(jsonHeader, logSearchRawInternal, esc)}</pre></td>
+        <td class="col-json"><pre>${highlightLogSearchHtml(jsonValue, logSearchRawInternal, esc)}</pre></td>
         <td class="col-action">${resendBtn}</td>
       </tr>`;
     })
@@ -17574,7 +17977,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'internal_logs_title')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
@@ -17620,35 +18023,30 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'internal_logs_title')} (${totalCountInternal})</h1>
       ${hubHtmlInternal}
       <p class="admin-page-desc">${t(locale, 'internal_logs_desc')}</p>
-      <form method="get" action="/admin/internal" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;">
-        ${logPgInternal === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}
-        <input type="hidden" name="perPage" value="${perPage}" />
-        <input type="hidden" name="page" value="1" />
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
-        </label>
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
-        </label>
-        <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          ${(() => {
-            const make = (key, label) => {
-              const active = presetUsed === key;
-              const url = '/admin/internal?' + buildQueryString({ ...qIn, preset: key, startDate: '', endDate: '', page: 1, perPage });
-              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
-            };
-            return [
-              make('today', t(locale, 'tx_filter_today')),
-              make('yesterday', t(locale, 'tx_filter_yesterday')),
-              make('this_week', t(locale, 'tx_filter_this_week')),
-              make('last_week', t(locale, 'tx_filter_last_week')),
-              make('this_month', t(locale, 'tx_filter_this_month')),
-              make('last_month', t(locale, 'tx_filter_last_month')),
-            ].join('');
-          })()}
-        </div>
-      </form>
+      ${(() => {
+        const fh =
+          (logPgInternal === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          '<input type="hidden" name="perPage" value="' +
+          perPage +
+          '" />' +
+          '<input type="hidden" name="page" value="1" />';
+        return (
+          '<form method="get" action="/admin/internal" class="admin-log-filter-form">' +
+          fh +
+          renderAdminLogFilterBar(locale, {
+            esc,
+            logSearchRaw: logSearchRawInternal,
+            startDateStr,
+            endDateStr,
+            presetUsed,
+            resetHref: '/admin/internal?' + buildQueryString({ ...qIn, logSearch: '', txId: '', page: 1 }),
+            presetHref: (key) =>
+              '/admin/internal?' +
+              buildQueryString({ ...qIn, preset: key, startDate: '', endDate: '', page: 1, perPage }),
+          }) +
+          '</form>'
+        );
+      })()}
       <table>
         <colgroup><col style="width:7%;" /><col style="width:9%;" /><col style="width:12%;" /><col style="width:5%;" /><col style="width:20%;" /><col style="width:39%;" /><col style="width:10%;" /></colgroup>
         <thead>
@@ -17769,6 +18167,13 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       return true;
     });
   }
+  const logSearchRawIntRes = adminLogFullSearchRaw(q);
+  if (logSearchRawIntRes) {
+    const kwIr = logSearchRawIntRes.toLowerCase();
+    filteredForDateInternal = filteredForDateInternal.filter(({ log }) =>
+      internalResultHaystackLog(log, locale, envLabel).indexOf(kwIr) !== -1
+    );
+  }
 
   const perPage = parseAllowedPerPage(q.perPage);
   const page = Math.max(1, parseInt(q.page, 10) || 1);
@@ -17795,15 +18200,15 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       const statusDesc = payStatus === '2' || payStatus === 2 ? t(locale, 'status_void') : payStatus === '9' || payStatus === 9 ? t(locale, 'status_refund') : payStatus === '1' || payStatus === 1 ? t(locale, 'status_payment') : payStatus;
       const internalTargetName = getInternalTargetName(log.internalTargetId);
       return `<tr>
-        <td>${esc(dt.date)}</td>
-        <td>TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
-        <td>${esc(String(txId))}</td>
-        <td>${esc(statusDesc)}</td>
-        <td>${esc(log.routeNo || '-')}</td>
-        <td>${esc(internalTargetName)}</td>
-        <td>${esc(envLabel)}</td>
-        <td>${esc(log.merchantId || '-')}</td>
-        <td><span class="${statusClass}">${esc(label)}</span></td>
+        <td>${highlightLogSearchHtml(dt.date, logSearchRawIntRes, esc)}</td>
+        <td>TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawIntRes, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawIntRes, esc)}</span></td>
+        <td>${highlightLogSearchHtml(String(txId), logSearchRawIntRes, esc)}</td>
+        <td>${highlightLogSearchHtml(String(statusDesc), logSearchRawIntRes, esc)}</td>
+        <td>${highlightLogSearchHtml(String(log.routeNo || '-'), logSearchRawIntRes, esc)}</td>
+        <td>${highlightLogSearchHtml(internalTargetName, logSearchRawIntRes, esc)}</td>
+        <td>${highlightLogSearchHtml(envLabel, logSearchRawIntRes, esc)}</td>
+        <td>${highlightLogSearchHtml(log.merchantId || '-', logSearchRawIntRes, esc)}</td>
+        <td><span class="${statusClass}">${highlightLogSearchHtml(label, logSearchRawIntRes, esc)}</span></td>
         <td class="col-fail-reason">-</td>
         <td>${resendBtn}</td>
       </tr>`;
@@ -17815,7 +18220,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'nav_internal_result')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; }
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
@@ -17861,36 +18266,33 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_internal_result')} (${totalCountInternalResult})</h1>
       ${hubHtmlInternalResult}
       <p class="admin-page-desc">${t(locale, 'internal_result_desc').replace('{{cancelRefundNotiUrl}}', '/admin/cancel-refund/noti')}</p>
-      <form method="get" action="/admin/internal-result" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;">
-        ${logPgIntRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}
-        <input type="hidden" name="resendKind" value="${esc(resendKind)}" />
-        <input type="hidden" name="perPage" value="${perPage}" />
-        <input type="hidden" name="page" value="1" />
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
-        </label>
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
-        </label>
-        <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          ${(() => {
-            const make = (key, label) => {
-              const active = presetUsed === key;
-              const url = '/admin/internal-result?' + buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage });
-              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
-            };
-            return [
-              make('today', t(locale, 'tx_filter_today')),
-              make('yesterday', t(locale, 'tx_filter_yesterday')),
-              make('this_week', t(locale, 'tx_filter_this_week')),
-              make('last_week', t(locale, 'tx_filter_last_week')),
-              make('this_month', t(locale, 'tx_filter_this_month')),
-              make('last_month', t(locale, 'tx_filter_last_month')),
-            ].join('');
-          })()}
-        </div>
-      </form>
+      ${(() => {
+        const fh =
+          (logPgIntRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          '<input type="hidden" name="resendKind" value="' +
+          esc(resendKind) +
+          '" />' +
+          '<input type="hidden" name="perPage" value="' +
+          perPage +
+          '" />' +
+          '<input type="hidden" name="page" value="1" />';
+        return (
+          '<form method="get" action="/admin/internal-result" class="admin-log-filter-form">' +
+          fh +
+          renderAdminLogFilterBar(locale, {
+            esc,
+            logSearchRaw: logSearchRawIntRes,
+            startDateStr,
+            endDateStr,
+            presetUsed,
+            resetHref: '/admin/internal-result?' + buildQueryString({ ...q, logSearch: '', txId: '', page: 1 }),
+            presetHref: (key) =>
+              '/admin/internal-result?' +
+              buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage }),
+          }) +
+          '</form>'
+        );
+      })()}
       <table>
         <thead>
           <tr>
@@ -17959,7 +18361,45 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
     : withIndexDev;
   filteredReversedDev = filteredReversedDev.filter(({ log }) => getInternalLogPgAcquirer(log) === logPgDev);
   const hubHtmlDevInternal = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dev-internal', qDev, logPgDev, { showEnv: false });
-  const rows = filteredReversedDev
+  const todayYmdDev = getBangkokTodayYmd();
+  const drDev = parseLogDateRangeFromQuery(qDev);
+  const startDateStrDev = drDev.startDate;
+  const endDateStrDev = drDev.endDate;
+  const presetUsedDev = drDev.preset;
+  const isTodayOnlyDev = !!(
+    startDateStrDev &&
+    endDateStrDev &&
+    startDateStrDev === endDateStrDev &&
+    startDateStrDev === todayYmdDev
+  );
+  let filteredForDateDev = filteredReversedDev;
+  if (startDateStrDev || endDateStrDev) {
+    filteredForDateDev = filteredForDateDev.filter(({ log }) => {
+      const iso = log.storedAtIso || log.storedAt;
+      const ymd = getBangkokYmdFromIso(iso);
+      if (!ymd) return false;
+      if (startDateStrDev && ymd < startDateStrDev) return false;
+      if (endDateStrDev && ymd > endDateStrDev) return false;
+      return true;
+    });
+  }
+  const logSearchRawDev = adminLogFullSearchRaw(qDev);
+  let filteredSearchDev = filteredForDateDev;
+  if (logSearchRawDev) {
+    const kwDev = logSearchRawDev.toLowerCase();
+    filteredSearchDev = filteredSearchDev.filter(
+      ({ log }) => internalHaystackAdminLog(log, locale).indexOf(kwDev) !== -1
+    );
+  }
+  const perPageDev = parseAllowedPerPage(qDev.perPage);
+  const pageDev = Math.max(1, parseInt(qDev.page, 10) || 1);
+  const totalCountDevInternal = filteredSearchDev.length;
+  const totalPagesDevInternal = Math.max(1, Math.ceil(totalCountDevInternal / perPageDev));
+  const pageNumDevInternal = Math.min(pageDev, totalPagesDevInternal);
+  const pagedLogsDevInternal = isTodayOnlyDev
+    ? filteredSearchDev
+    : filteredSearchDev.slice((pageNumDevInternal - 1) * perPageDev, pageNumDevInternal * perPageDev);
+  const rows = pagedLogsDevInternal
     .map(({ log, realIndex }, i) => {
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
       const payload = log.payload || {};
@@ -17981,13 +18421,13 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       const devResendLabel = devResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
         ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDev === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend">${devResendLabel}</button></form>`
-        : '<span class="label-none">' + t(locale, 'status_noti_none') + '</span>';
+        : '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawDev, esc) + '</span>';
       return `<tr>
-        <td class="col-date">${esc(dt.date)}</td>
-        <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
-        <td class="col-status"><span class="${internalClass}">${esc(internalLabel)}</span></td>
-        <td class="col-header"><pre>${esc(jsonHeader)}</pre></td>
-        <td class="col-json"><pre>${esc(jsonValue)}</pre></td>
+        <td class="col-date">${highlightLogSearchHtml(dt.date, logSearchRawDev, esc)}</td>
+        <td class="col-time">TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawDev, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawDev, esc)}</span></td>
+        <td class="col-status"><span class="${internalClass}">${highlightLogSearchHtml(internalLabel, logSearchRawDev, esc)}</span></td>
+        <td class="col-header"><pre>${highlightLogSearchHtml(jsonHeader, logSearchRawDev, esc)}</pre></td>
+        <td class="col-json"><pre>${highlightLogSearchHtml(jsonValue, logSearchRawDev, esc)}</pre></td>
         <td class="col-action">${resendBtn}</td>
       </tr>`;
     })
@@ -17998,7 +18438,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'nav_dev_internal_noti_log')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
@@ -18041,9 +18481,33 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
-      <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_internal_noti_log')} (${filteredReversedDev.length})</h1>
+      <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_internal_noti_log')} (${totalCountDevInternal})</h1>
       ${hubHtmlDevInternal}
       <p class="admin-page-desc">${t(locale, 'internal_logs_desc')}</p>
+      ${(() => {
+        const fh =
+          (logPgDev === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          '<input type="hidden" name="perPage" value="' +
+          perPageDev +
+          '" />' +
+          '<input type="hidden" name="page" value="1" />';
+        return (
+          '<form method="get" action="/admin/dev-internal" class="admin-log-filter-form">' +
+          fh +
+          renderAdminLogFilterBar(locale, {
+            esc,
+            logSearchRaw: logSearchRawDev,
+            startDateStr: startDateStrDev,
+            endDateStr: endDateStrDev,
+            presetUsed: presetUsedDev,
+            resetHref: '/admin/dev-internal?' + buildQueryString({ ...qDev, logSearch: '', txId: '', page: 1 }),
+            presetHref: (key) =>
+              '/admin/dev-internal?' +
+              buildQueryString({ ...qDev, preset: key, startDate: '', endDate: '', page: 1, perPage: perPageDev }),
+          }) +
+          '</form>'
+        );
+      })()}
       <table>
         <colgroup><col style="width:8%;" /><col style="width:10%;" /><col style="width:6%;" /><col style="width:22%;" /><col style="width:46%;" /><col style="width:6%;" /></colgroup>
         <thead>
@@ -18060,6 +18524,51 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
           ${rows || `<tr><td colspan="6" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
         </tbody>
       </table>
+      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <div>
+          ${t(locale, 'tx_per_page_bar')}: 
+          ${[100, 200, 300, 400, 500]
+            .map((n) => {
+              const url = '/admin/dev-internal?' + buildQueryString({ ...qDev, perPage: n, page: 1 });
+              const active = perPageDev === n;
+              return (
+                '<a href="' +
+                url +
+                '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' +
+                (active ? '#059669' : '#e5e7eb') +
+                ';color:' +
+                (active ? '#fff' : '#374151') +
+                ';">' +
+                n +
+                '</a>'
+              );
+            })
+            .join('')}
+          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountDevInternal}${t(locale, 'cr_count_suffix')})
+        </div>
+        ${
+          isTodayOnlyDev
+            ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>'
+            : '<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">' +
+              Array.from({ length: totalPagesDevInternal }, (_, idx) => {
+                const i = idx + 1;
+                const url = '/admin/dev-internal?' + buildQueryString({ ...qDev, page: i, perPage: perPageDev });
+                const active = i === pageNumDevInternal;
+                return (
+                  '<a href="' +
+                  url +
+                  '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' +
+                  (active ? '#2563eb' : '#e5e7eb') +
+                  ';color:' +
+                  (active ? '#fff' : '#374151') +
+                  ';">' +
+                  i +
+                  '</a>'
+                );
+              }).join('') +
+              '</div>'
+        }
+      </div>
       </div>
     </main>
   </div>
@@ -18144,6 +18653,13 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       return true;
     });
   }
+  const logSearchRawDevRes = adminLogFullSearchRaw(q);
+  if (logSearchRawDevRes) {
+    const kwDr = logSearchRawDevRes.toLowerCase();
+    filteredForDateDev = filteredForDateDev.filter(({ log }) =>
+      internalResultHaystackLog(log, locale, envLabel).indexOf(kwDr) !== -1
+    );
+  }
 
   const perPage = parseAllowedPerPage(q.perPage);
   const page = Math.max(1, parseInt(q.page, 10) || 1);
@@ -18166,12 +18682,12 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
         ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="dev-internal-result" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDevRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${devResendLabel}</button></form>`
         : '-';
       return `<tr>
-        <td>${esc(dt.date)}</td>
-        <td>TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
-        <td>${esc(log.routeNo || '-')}</td>
-        <td>${esc(envLabel)}</td>
-        <td>${esc(log.merchantId || '-')}</td>
-        <td><span class="${statusClass}">${esc(label)}</span></td>
+        <td>${highlightLogSearchHtml(dt.date, logSearchRawDevRes, esc)}</td>
+        <td>TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawDevRes, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawDevRes, esc)}</span></td>
+        <td>${highlightLogSearchHtml(String(log.routeNo || '-'), logSearchRawDevRes, esc)}</td>
+        <td>${highlightLogSearchHtml(envLabel, logSearchRawDevRes, esc)}</td>
+        <td>${highlightLogSearchHtml(log.merchantId || '-', logSearchRawDevRes, esc)}</td>
+        <td><span class="${statusClass}">${highlightLogSearchHtml(label, logSearchRawDevRes, esc)}</span></td>
         <td class="col-fail-reason">-</td>
         <td>${resendBtn}</td>
       </tr>`;
@@ -18183,7 +18699,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'nav_dev_result')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; }
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
@@ -18229,36 +18745,33 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_result')} (${totalCountDevResult})</h1>
       ${hubHtmlDevResult}
       <p class="admin-page-desc">${t(locale, 'dev_result_desc')}</p>
-      <form method="get" action="/admin/dev-internal-result" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;">
-        ${logPgDevRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}
-        <input type="hidden" name="resendKind" value="${esc(resendKind)}" />
-        <input type="hidden" name="perPage" value="${perPage}" />
-        <input type="hidden" name="page" value="1" />
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <input type="date" name="startDate" value="${esc(startDateStr)}" aria-label="${esc(t(locale, 'logs_filter_start_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
-        </label>
-        <label style="display:flex;flex-direction:column;gap:4px;">
-          <input type="date" name="endDate" value="${esc(endDateStr)}" aria-label="${esc(t(locale, 'logs_filter_end_date'))}" style="padding:6px 8px;font-size:12px;border-radius:6px;border:1px solid #d1d5db;" />
-        </label>
-        <button type="submit" style="padding:6px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;">${t(locale, 'tx_apply')}</button>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          ${(() => {
-            const make = (key, label) => {
-              const active = presetUsed === key;
-              const url = '/admin/dev-internal-result?' + buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage });
-              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + esc(label) + '</a>';
-            };
-            return [
-              make('today', t(locale, 'tx_filter_today')),
-              make('yesterday', t(locale, 'tx_filter_yesterday')),
-              make('this_week', t(locale, 'tx_filter_this_week')),
-              make('last_week', t(locale, 'tx_filter_last_week')),
-              make('this_month', t(locale, 'tx_filter_this_month')),
-              make('last_month', t(locale, 'tx_filter_last_month')),
-            ].join('');
-          })()}
-        </div>
-      </form>
+      ${(() => {
+        const fh =
+          (logPgDevRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          '<input type="hidden" name="resendKind" value="' +
+          esc(resendKind) +
+          '" />' +
+          '<input type="hidden" name="perPage" value="' +
+          perPage +
+          '" />' +
+          '<input type="hidden" name="page" value="1" />';
+        return (
+          '<form method="get" action="/admin/dev-internal-result" class="admin-log-filter-form">' +
+          fh +
+          renderAdminLogFilterBar(locale, {
+            esc,
+            logSearchRaw: logSearchRawDevRes,
+            startDateStr,
+            endDateStr,
+            presetUsed,
+            resetHref: '/admin/dev-internal-result?' + buildQueryString({ ...q, logSearch: '', txId: '', page: 1 }),
+            presetHref: (key) =>
+              '/admin/dev-internal-result?' +
+              buildQueryString({ ...(q || {}), preset: key, startDate: '', endDate: '', page: 1, perPage }),
+          }) +
+          '</form>'
+        );
+      })()}
       <table>
         <thead>
           <tr>
