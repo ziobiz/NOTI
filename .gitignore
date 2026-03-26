@@ -6,3 +6,4 @@ node_modules/
 # 서버 모니터링 런타임 집계 (환경별로 다름)
 data/system-monitor-state.json
 data/ssl-monitor-state.json
+data/server-situation-analyses.json

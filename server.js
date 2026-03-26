@@ -1657,6 +1657,7 @@ const VOID_UI_DELETED_PATH = path.join(DATA_DIR, 'void-ui-deleted.log');
 const MAIL_LOG_PATH = path.join(DATA_DIR, 'mail-logs.log');
 const SYSTEM_MONITOR_STATE_PATH = path.join(DATA_DIR, 'system-monitor-state.json');
 const SSL_MONITOR_STATE_PATH = path.join(DATA_DIR, 'ssl-monitor-state.json');
+const SERVER_SITUATION_ANALYSES_PATH = path.join(DATA_DIR, 'server-situation-analyses.json');
 const RECURRING_CALLBACK_LOG_PATH = path.join(DATA_DIR, 'recurring-callback.log');
 const VOID_UI_DELETED_RETENTION_DAYS = 31;
 
@@ -1712,6 +1713,34 @@ function saveSystemMonitorStateNow() {
     console.error('[system-monitor] save failed', e.message);
   }
 }
+
+/** 서버 현황 분석 스냅샷 보관 상한. 초과분은 저장 시 버리며, 파일에 더 많이 있으면 로드 시 잘라 다시 씁니다. */
+const SERVER_SITUATION_ANALYSES_MAX = 3;
+function loadServerSituationAnalyses() {
+  try {
+    const raw = fs.readFileSync(SERVER_SITUATION_ANALYSES_PATH, 'utf8');
+    const o = JSON.parse(raw);
+    if (!o || typeof o !== 'object' || !Array.isArray(o.items)) return { v: 1, items: [] };
+    const rawItems = o.items.filter(Boolean);
+    const items = rawItems.slice(0, SERVER_SITUATION_ANALYSES_MAX);
+    if (rawItems.length > SERVER_SITUATION_ANALYSES_MAX) {
+      saveServerSituationAnalyses({ v: 1, items });
+    }
+    return { v: 1, items };
+  } catch (_) {
+    return { v: 1, items: [] };
+  }
+}
+function saveServerSituationAnalyses(store) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const items = Array.isArray(store.items) ? store.items.slice(0, SERVER_SITUATION_ANALYSES_MAX) : [];
+    fs.writeFileSync(SERVER_SITUATION_ANALYSES_PATH, JSON.stringify({ v: 1, items }), 'utf8');
+  } catch (e) {
+    console.error('[server-situation] save failed', e.message);
+  }
+}
+
 function scheduleSaveSystemMonitorState() {
   if (systemMonitorRuntime.saveTimer) return;
   systemMonitorRuntime.saveTimer = setTimeout(() => {
@@ -5165,7 +5194,7 @@ function sendTestResultPage(req, res) {
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session && req.session.member, req.originalUrl || '/noti/test-result')}
+    ${getAdminSidebar(locale, adminUser, req.session && req.session.member, req.originalUrl || '/noti/test-result', req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser || '-', req.originalUrl || '/noti/test-result')}
       <div class="card">
@@ -5364,7 +5393,7 @@ app.get('/admin/set-locale', (req, res) => {
   res.redirect(back);
 });
 
-function getAdminSidebar(locale, adminUser, member, currentPath) {
+function getAdminSidebar(locale, adminUser, member, currentPath, req) {
   const site = loadSiteSettings();
   const pathMatch = (path) => currentPath && (currentPath === path || currentPath.startsWith(path + '?'));
   const link = (path, label, extraClass) => {
@@ -5457,6 +5486,21 @@ function getAdminSidebar(locale, adminUser, member, currentPath) {
   const titleText = (site.sidebarTitle || '').replace(/</g, '&lt;').replace(/"/g, '&quot;') || DEFAULT_SIDEBAR_TITLE;
   const subText = (site.sidebarSub || '').replace(/</g, '&lt;').replace(/"/g, '&quot;') || DEFAULT_SIDEBAR_SUB;
   const forbiddenSettingsMsg = (t(locale, 'err_forbidden_contact_admin') || '해당 전산 대상에 대한 접근 권한이 없습니다. 관리자에게 문의하세요.').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' ');
+  let healthOverlay = '';
+  if (req && req.session && memberHasAdvancedSystemMonitor(member)) {
+    const p = currentPath || '';
+    const onMonitor = p === '/admin/system-monitor' || p.startsWith('/admin/system-monitor?');
+    if (onMonitor) {
+      req.session.healthAlertPending = false;
+    } else if (req.session.healthAlertPending) {
+      const { healthAlertMessages } = getSystemHealthMonitorMetrics(locale);
+      if (healthAlertMessages.length === 0) {
+        req.session.healthAlertPending = false;
+      } else {
+        healthOverlay = buildAdminHealthAlertModalHtml(locale, healthAlertMessages);
+      }
+    }
+  }
   return `
     <style>${ADMIN_LAYOUT_SHELL_CSS}</style>
     <aside class="sidebar">
@@ -5470,7 +5514,7 @@ function getAdminSidebar(locale, adminUser, member, currentPath) {
     </aside>
     <script>
     (function(){ var q = location.search; if (q.indexOf('err=forbidden_settings') !== -1) { alert('${forbiddenSettingsMsg}'); var s = q.replace(/[?&]err=forbidden_settings(&|$)/g, '$1').replace(/^&/, '?'); history.replaceState(null, '', location.pathname + (s === '?' ? '' : s) + location.hash); } })();
-    </script>`;
+    </script>${healthOverlay}`;
 }
 const LOCALE_TO_INTL = { ko: 'ko-KR', ja: 'ja-JP', en: 'en-US', th: 'th-TH', zh: 'zh-CN' };
 function formatTimeForLocale(date, locale) {
@@ -5702,6 +5746,7 @@ app.post('/admin/login', (req, res) => {
   req.session.adminUser = member.userId;
   if (member.mustChangePassword) req.session.mustChangePassword = true;
   req.session.mustSetupOtp = false;
+  syncSessionHealthAlertPending(req, getLocale(req));
 
   if (member.mustChangePassword) {
     return res.redirect('/admin/change-password');
@@ -5782,6 +5827,7 @@ app.post('/admin/change-password', requireAuth, (req, res) => {
   if (idx >= 0) MEMBERS[idx] = m;
   saveMembers(MEMBERS);
   req.session.mustChangePassword = false;
+  syncSessionHealthAlertPending(req, locale);
   const url = getFirstAllowedRedirectUrl(member && member.permissions);
   return res.redirect(url);
 });
@@ -5871,7 +5917,7 @@ app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) 
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -6327,7 +6373,7 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -7012,7 +7058,7 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -7427,7 +7473,7 @@ app.get('/admin/account-reset', requireAuth, requirePage('account_reset'), (req,
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -7724,7 +7770,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="content">
@@ -8763,7 +8809,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -9321,7 +9367,7 @@ function renderCancelRefundPage(locale, adminUser, title, mainContent, alertHtml
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, member || null, currentUrl || '')}
+    ${getAdminSidebar(locale, adminUser, member || null, currentUrl || '', req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, currentUrl || '')}
       <div class="card">
@@ -14265,7 +14311,7 @@ app.get('/admin/noti-analysis', requireAuth, requirePage('test_run'), (req, res)
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="content">
@@ -14469,7 +14515,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -14754,7 +14800,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -15055,7 +15101,7 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -15242,7 +15288,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -15672,7 +15718,7 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -16287,7 +16333,7 @@ app.get('/admin/test-recurring', requireAuth, requirePage('test_run'), (req, res
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -16485,7 +16531,7 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -16603,7 +16649,7 @@ app.post('/admin/test-pay/start', requireAuth, requirePage('test_run'), (req, re
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl || '/admin/test-pay')}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl || '/admin/test-pay', req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl || '/admin/test-pay')}
       <div class="card">
@@ -16928,7 +16974,7 @@ app.post('/admin/test-pay/submit', requireAuth, requirePage('test_run'), async (
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       <div class="topbar">
         <span>접속 IP: ${clientIp || '-'}</span>
@@ -17072,7 +17118,7 @@ app.get('/admin/test-pay/return', requireAuth, requirePage('test_run'), (req, re
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       <div class="topbar">
         <span>접속 IP: ${clientIp || '-'}</span>
@@ -17301,7 +17347,7 @@ app.get('/admin/test-logs', requireAuth, requirePage('test_history'), (req, res)
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -17567,7 +17613,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -17807,7 +17853,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -17991,7 +18037,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -18175,7 +18221,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
@@ -18462,6 +18508,221 @@ function getHostDiskUsageNearPath(basePath) {
   if (process.platform === 'win32') return getDiskUsageWin32ForPath(resolved);
   return null;
 }
+
+/** 서버 모니터 카드·로그인 후 건강 경고에 공통 (임계치 단일화) */
+const MONITOR_HOST_HEALTH = {
+  SYS_MEM_PCT: 90,
+  HEAP_FRAC: 0.92,
+  /** heapTotal이 이보다 작으면 비율(92%)만으로는 위험 처리하지 않음 — 기동 직후 V8이 작은 힙만 잡으면 20MB대도 90%대가 되어 오탐이 난다 */
+  HEAP_FRAC_MIN_TOTAL_BYTES: 64 * 1024 * 1024,
+  HEAP_BYTES: 1073741824,
+  RSS_FRAC_OF_SYS: 0.5,
+  RSS_BYTES: 1610612736,
+  LOAD_MULT: 2,
+  DATA_DIR_BYTES: 1073741824,
+  DISK_PCT: 90,
+};
+
+function getSystemHealthMonitorMetrics(locale) {
+  const H = MONITOR_HOST_HEALTH;
+  const totalM = os.totalmem();
+  const freeM = os.freemem();
+  const usedM = totalM - freeM;
+  const sysMemPct = totalM ? ((usedM / totalM) * 100).toFixed(1) : '0';
+  const pm = process.memoryUsage();
+  const la = os.loadavg();
+  const loadStr =
+    process.platform === 'win32'
+      ? '—'
+      : [(la[0] || 0).toFixed(2), (la[1] || 0).toFixed(2), (la[2] || 0).toFixed(2)].join(' / ');
+  const dataDirBytes = sumDirectoryBytesSync(DATA_DIR);
+  const diskUsage = getHostDiskUsageNearPath(DATA_DIR);
+  const diskPctStr = diskUsage && Number.isFinite(diskUsage.pct) ? diskUsage.pct.toFixed(1) : null;
+  const cpuN = Math.max(1, (os.cpus() && os.cpus().length) || 1);
+  const sysMemNum = totalM > 0 ? (usedM / totalM) * 100 : 0;
+  const diskBarClass =
+    diskUsage && Number.isFinite(diskUsage.pct)
+      ? diskUsage.pct >= H.DISK_PCT
+        ? ' danger'
+        : diskUsage.pct >= 80
+          ? ' warn'
+          : ''
+      : '';
+  const diskBarW =
+    diskUsage && Number.isFinite(diskUsage.pct) ? String(Math.min(100, Math.max(0, diskUsage.pct))) : '0';
+  const dangerSysMem = sysMemNum >= H.SYS_MEM_PCT;
+  const heapRatioDanger =
+    pm.heapTotal >= H.HEAP_FRAC_MIN_TOTAL_BYTES
+    && pm.heapUsed / pm.heapTotal >= H.HEAP_FRAC;
+  const dangerHeap = pm.heapTotal > 0 && (heapRatioDanger || pm.heapUsed >= H.HEAP_BYTES);
+  const dangerRss =
+    totalM > 0
+    && (pm.rss >= totalM * H.RSS_FRAC_OF_SYS || pm.rss >= H.RSS_BYTES);
+  const dangerLoad =
+    process.platform !== 'win32' && (la[0] || 0) > cpuN * H.LOAD_MULT;
+  const dangerDataDir = dataDirBytes >= H.DATA_DIR_BYTES;
+  const dangerDisk = diskUsage && Number.isFinite(diskUsage.pct) && diskUsage.pct >= H.DISK_PCT;
+  const healthAlertMessages = [];
+  if (dangerSysMem) healthAlertMessages.push(t(locale, 'health_alert_sys_mem'));
+  if (dangerHeap) healthAlertMessages.push(t(locale, 'health_alert_node_heap'));
+  if (dangerRss) healthAlertMessages.push(t(locale, 'health_alert_node_rss'));
+  if (dangerLoad) healthAlertMessages.push(t(locale, 'health_alert_load'));
+  if (dangerDataDir) healthAlertMessages.push(t(locale, 'health_alert_data_dir'));
+  if (dangerDisk) healthAlertMessages.push(t(locale, 'health_alert_disk'));
+  return {
+    totalM,
+    freeM,
+    usedM,
+    sysMemPct,
+    pm,
+    la,
+    loadStr,
+    dataDirBytes,
+    diskUsage,
+    diskPctStr,
+    cpuN,
+    sysMemNum,
+    diskBarClass,
+    diskBarW,
+    dangerSysMem,
+    dangerHeap,
+    dangerRss,
+    dangerLoad,
+    dangerDataDir,
+    dangerDisk,
+    healthAlertMessages,
+  };
+}
+
+function memberHasAdvancedSystemMonitor(member) {
+  return !!(member && Array.isArray(member.permissions) && member.permissions.includes('advanced_system_monitor'));
+}
+
+function syncSessionHealthAlertPending(req, locale) {
+  if (!req || !req.session) return;
+  if (!memberHasAdvancedSystemMonitor(req.session.member)) {
+    req.session.healthAlertPending = false;
+    return;
+  }
+  const { healthAlertMessages } = getSystemHealthMonitorMetrics(locale);
+  req.session.healthAlertPending = healthAlertMessages.length > 0;
+}
+
+function buildAdminHealthAlertModalHtml(locale, messages) {
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const items = messages.map((m) => `<li style="margin:6px 0;line-height:1.45;">${esc(m)}</li>`).join('');
+  return `
+<div id="admin-health-alert-overlay" style="position:fixed;inset:0;background:rgba(17,24,39,0.55);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box;">
+  <div role="dialog" aria-modal="true" aria-labelledby="admin-health-alert-title" style="background:#fff;max-width:480px;width:100%;border-radius:12px;border:1px solid #fecaca;box-shadow:0 20px 50px rgba(0,0,0,0.2);padding:22px 24px;box-sizing:border-box;">
+    <h2 id="admin-health-alert-title" style="margin:0 0 10px;font-size:1.15rem;color:#991b1b;">${esc(t(locale, 'health_alert_modal_title'))}</h2>
+    <p style="margin:0 0 12px;font-size:13px;color:#374151;line-height:1.5;">${esc(t(locale, 'health_alert_modal_intro'))}</p>
+    <ul style="margin:0 0 18px;padding-left:20px;font-size:13px;color:#1f2937;">${items}</ul>
+    <button type="button" id="admin-health-alert-ok" style="width:100%;padding:12px 16px;border:none;border-radius:8px;background:#b91c1c;color:#fff;font-size:14px;font-weight:600;cursor:pointer;">${esc(t(locale, 'health_alert_modal_confirm'))}</button>
+  </div>
+</div>
+<script>
+(function(){
+  var o = document.getElementById('admin-health-alert-overlay');
+  var b = document.getElementById('admin-health-alert-ok');
+  if (!o || !b) return;
+  b.addEventListener('click', function(){ window.location.href = '/admin/system-monitor'; });
+})();
+</script>`;
+}
+
+function buildServerSituationAnalysisRecord(locale, adminUser) {
+  const state = getSystemMonitorState();
+  const agg = buildSystemMonitorAggregates(state);
+  const quotaBytes = getEffectiveMonthlyQuotaBytes();
+  const quotaGb = getEffectiveMonthlyQuotaGb();
+  const quotaUsedPct = quotaBytes > 0 ? Math.min(100, (agg.monthBytes / quotaBytes) * 100) : 0;
+  const m = getSystemHealthMonitorMetrics(locale);
+  let maxSev = 0;
+  const bump = (status) => {
+    const s = status === 'danger' ? 2 : status === 'warn' ? 1 : 0;
+    if (s > maxSev) maxSev = s;
+  };
+  const row = (id, valueStr, status) => {
+    bump(status);
+    return {
+      id,
+      label: t(locale, 'monitor_situation_item_' + id),
+      value: valueStr,
+      status,
+      note: t(locale, 'monitor_situation_note_' + id),
+    };
+  };
+  const rows = [];
+  rows.push(row('runtime', `${process.version} · ${process.platform}`, 'ok'));
+  const sm = m.dangerSysMem ? 'danger' : m.sysMemNum >= 70 ? 'warn' : 'ok';
+  rows.push(row('sys_mem', `${m.sysMemPct}% (${formatMonitorBytes(m.usedM)} / ${formatMonitorBytes(m.totalM)})`, sm));
+  const heapRatio = m.pm.heapTotal > 0 ? Math.round((m.pm.heapUsed / m.pm.heapTotal) * 100) : 0;
+  rows.push(row('node_heap', `${formatMonitorBytes(m.pm.heapUsed)} / ${formatMonitorBytes(m.pm.heapTotal)} (${heapRatio}%)`, m.dangerHeap ? 'danger' : 'ok'));
+  rows.push(row('node_rss', formatMonitorBytes(m.pm.rss), m.dangerRss ? 'danger' : 'ok'));
+  rows.push(row('load_avg', m.loadStr, m.dangerLoad ? 'danger' : 'ok'));
+  rows.push(row('uptime', formatMonitorUptime(process.uptime()), 'ok'));
+  rows.push(row('data_dir', formatMonitorBytes(m.dataDirBytes), m.dangerDataDir ? 'danger' : 'ok'));
+  let diskStat = 'ok';
+  let diskVal = '—';
+  if (m.diskUsage && Number.isFinite(m.diskUsage.pct)) {
+    diskVal = `${m.diskPctStr}% (${formatMonitorBytes(m.diskUsage.used)} / ${formatMonitorBytes(m.diskUsage.total)})`;
+    diskStat = m.dangerDisk ? 'danger' : m.diskUsage.pct >= 75 ? 'warn' : 'ok';
+  }
+  rows.push(row('disk', diskVal, diskStat));
+  const tq = quotaUsedPct >= 95 ? 'danger' : quotaUsedPct >= 80 ? 'warn' : 'ok';
+  rows.push(row('traffic_quota', `${formatMonitorBytes(agg.monthBytes)} (${(agg.monthBytes / 1073741824).toFixed(3)} GB) · ${quotaUsedPct.toFixed(1)}% / ${quotaGb} GB`, tq));
+  const summary = maxSev === 2 ? t(locale, 'monitor_situation_summary_danger') : maxSev === 1 ? t(locale, 'monitor_situation_summary_warn') : t(locale, 'monitor_situation_summary_ok');
+  return {
+    atIso: new Date().toISOString(),
+    adminUser: adminUser || '—',
+    summary,
+    rows,
+  };
+}
+
+function renderServerSituationAnalysesSection(locale, store, esc, situationFlash) {
+  const flash = situationFlash
+    ? `<div class="mon-quota-flash ok" role="status">${esc(t(locale, 'monitor_situation_saved'))}</div>`
+    : '';
+  const items = store.items || [];
+  const blocks = items.map((rec) => {
+    const tbody = (rec.rows || []).map((r) => {
+      const st = r.status === 'danger' ? 'danger' : r.status === 'warn' ? 'warn' : 'ok';
+      const badgeKey = st === 'danger' ? 'monitor_situation_status_danger' : st === 'warn' ? 'monitor_situation_status_warn' : 'monitor_situation_status_ok';
+      const cls = st === 'danger' ? 'sit-bad' : st === 'warn' ? 'sit-warn' : 'sit-ok';
+      return `<tr><td>${esc(r.label)}</td><td>${esc(r.value)}</td><td><span class="sit-badge ${cls}">${esc(t(locale, badgeKey))}</span></td><td>${esc(r.note)}</td></tr>`;
+    }).join('');
+    const metaRaw = t(locale, 'monitor_situation_record_meta')
+      .replace(/\{\{date\}\}/g, rec.atIso || '')
+      .replace(/\{\{user\}\}/g, rec.adminUser || '—');
+    return `<div class="mon-situation-one">
+      <div class="mon-situation-meta">${esc(metaRaw)}</div>
+      <p class="mon-situation-summary">${esc(rec.summary || '')}</p>
+      <table class="mon-situation-table">
+        <thead><tr>
+          <th>${esc(t(locale, 'monitor_situation_th_item'))}</th>
+          <th>${esc(t(locale, 'monitor_situation_th_value'))}</th>
+          <th>${esc(t(locale, 'monitor_situation_th_status'))}</th>
+          <th>${esc(t(locale, 'monitor_situation_th_note'))}</th>
+        </tr></thead>
+        <tbody>${tbody}</tbody>
+      </table>
+    </div>`;
+  }).join('');
+  const emptyNote = items.length === 0 ? `<p class="mon-situation-empty">${esc(t(locale, 'monitor_situation_empty'))}</p>` : '';
+  return `<div class="mon-situation-wrap">
+    <h2 class="mon-situation-h2">${esc(t(locale, 'monitor_situation_title'))}</h2>
+    <p class="admin-page-desc mon-situation-intro">${esc(t(locale, 'monitor_situation_intro'))}</p>
+    ${flash}
+    <form method="post" action="/admin/system-monitor/situation-analyze" class="mon-situation-form">
+      <button type="submit" class="mon-situation-run-btn">${esc(t(locale, 'monitor_situation_run'))}</button>
+    </form>
+    <h3 class="mon-situation-history-title">${esc(t(locale, 'monitor_situation_history'))}</h3>
+    ${blocks}
+    ${emptyNote}
+  </div>`;
+}
+
 function formatMonitorUptime(sec) {
   const s = Math.max(0, Math.floor(Number(sec) || 0));
   const d = Math.floor(s / 86400);
@@ -18727,22 +18988,26 @@ app.get('/admin/system-monitor', requireAuth, requirePage('advanced_system_monit
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const state = getSystemMonitorState();
   const agg = buildSystemMonitorAggregates(state);
-  const totalM = os.totalmem();
-  const freeM = os.freemem();
-  const usedM = totalM - freeM;
-  const sysMemPct = totalM ? ((usedM / totalM) * 100).toFixed(1) : '0';
-  const pm = process.memoryUsage();
-  const la = os.loadavg();
-  const loadStr =
-    process.platform === 'win32'
-      ? '—'
-      : [(la[0] || 0).toFixed(2), (la[1] || 0).toFixed(2), (la[2] || 0).toFixed(2)].join(' / ');
-  const dataDirBytes = sumDirectoryBytesSync(DATA_DIR);
-  const diskUsage = getHostDiskUsageNearPath(DATA_DIR);
-  const diskPctStr = diskUsage && Number.isFinite(diskUsage.pct) ? diskUsage.pct.toFixed(1) : null;
-  const diskBarClass = diskUsage && diskUsage.pct >= 95 ? ' danger' : diskUsage && diskUsage.pct >= 80 ? ' warn' : '';
-  const diskBarW =
-    diskUsage && Number.isFinite(diskUsage.pct) ? String(Math.min(100, Math.max(0, diskUsage.pct))) : '0';
+  const {
+    totalM,
+    freeM,
+    usedM,
+    sysMemPct,
+    pm,
+    la,
+    loadStr,
+    dataDirBytes,
+    diskUsage,
+    diskPctStr,
+    diskBarClass,
+    diskBarW,
+    dangerSysMem,
+    dangerHeap,
+    dangerRss,
+    dangerLoad,
+    dangerDataDir,
+    dangerDisk,
+  } = getSystemHealthMonitorMetrics(locale);
   const quotaBytes = getEffectiveMonthlyQuotaBytes();
   const quotaGb = getEffectiveMonthlyQuotaGb();
   const defaultQuotaGb = systemMonitorDefaultQuotaGb();
@@ -18754,6 +19019,9 @@ app.get('/admin/system-monitor', requireAuth, requirePage('advanced_system_monit
   const quotaFlashOk = String(req.query.quotaSaved || '') === '1';
   const quotaFlashErr = String(req.query.quotaErr || '') === '1';
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const situationStore = loadServerSituationAnalyses();
+  const situationFlash = String(req.query.situationSaved || '') === '1';
+  const situationSectionHtml = renderServerSituationAnalysesSection(locale, situationStore, esc, situationFlash);
   const trafficSum = buildTrafficChartSummaries(locale, agg);
   const chartPayload = {
     daily: agg.daily,
@@ -18765,7 +19033,7 @@ app.get('/admin/system-monitor', requireAuth, requirePage('advanced_system_monit
     ly: t(locale, 'monitor_chart_axis_pct'),
   };
   const chartJson = JSON.stringify(chartPayload).replace(/</g, '\\u003c');
-  const sidebar = getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl || '/admin/system-monitor');
+  const sidebar = getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl || '/admin/system-monitor', req);
   const topbar = getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl || '/admin/system-monitor');
   const title = t(locale, 'nav_server_manage');
   res.send(`<!DOCTYPE html>
@@ -18779,6 +19047,11 @@ app.get('/admin/system-monitor', requireAuth, requirePage('advanced_system_monit
     h1 { margin: 0 0 8px 0; font-size: 1.35rem; }
     .mon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-top: 12px; }
     .mon-stat { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 14px; }
+    .mon-stat.danger { background: #fef2f2; border-color: #f87171; }
+    .mon-stat.danger .k { color: #991b1b; }
+    .mon-stat.danger .v { color: #b91c1c; }
+    .mon-stat.danger .mon-stat-sub { color: #b91c1c !important; }
+    .mon-stat.danger .quota-bar > div { background: #dc2626 !important; }
     .mon-stat .k { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
     .mon-stat .v { font-size: 18px; font-weight: 700; color: #111827; }
     .quota-bar { height: 22px; background: #e5e7eb; border-radius: 6px; overflow: hidden; margin-top: 8px; }
@@ -18813,6 +19086,24 @@ app.get('/admin/system-monitor', requireAuth, requirePage('advanced_system_monit
     .mon-ssl-guide-title { margin: 12px 0 6px; font-size: 12px; font-weight: 700; color: #0369a1; }
     .mon-ssl-guide { font-size: 11px; color: #374151; line-height: 1.55; white-space: pre-line; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 10px 12px; }
     .mon-ssl-autodetect-tag { font-size: 11px; color: #0369a1; font-weight: 600; }
+    .mon-situation-wrap { margin-top: 24px; padding-top: 20px; border-top: 1px solid #e5e7eb; }
+    .mon-situation-h2 { font-size: 1.08rem; margin: 0 0 6px; color: #111827; }
+    .mon-situation-intro { margin-bottom: 12px !important; }
+    .mon-situation-form { margin-bottom: 8px; }
+    .mon-situation-run-btn { padding: 8px 18px; background: #2563eb; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px; }
+    .mon-situation-run-btn:hover { background: #1d4ed8; }
+    .mon-situation-history-title { font-size: 13px; font-weight: 700; color: #374151; margin: 16px 0 10px; }
+    .mon-situation-one { margin-bottom: 18px; padding: 14px 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; }
+    .mon-situation-meta { font-size: 11px; color: #6b7280; margin-bottom: 8px; word-break: break-all; }
+    .mon-situation-summary { font-size: 13px; color: #1f2937; line-height: 1.5; margin: 0 0 10px; font-weight: 600; }
+    .mon-situation-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+    .mon-situation-table th, .mon-situation-table td { border: 1px solid #e5e7eb; padding: 8px 10px; text-align: left; vertical-align: top; }
+    .mon-situation-table th { background: #f3f4f6; font-weight: 600; color: #374151; }
+    .mon-situation-empty { font-size: 12px; color: #6b7280; margin: 8px 0 0; }
+    .sit-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+    .sit-badge.sit-ok { background: #dcfce7; color: #166534; }
+    .sit-badge.sit-warn { background: #fef3c7; color: #92400e; }
+    .sit-badge.sit-bad { background: #fecaca; color: #991b1b; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
@@ -18825,13 +19116,13 @@ app.get('/admin/system-monitor', requireAuth, requirePage('advanced_system_monit
         <h1>${esc(title)}</h1>
         <p class="admin-page-desc">${esc(t(locale, 'monitor_page_desc'))}</p>
         <div class="mon-grid">
-          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_sys_mem'))}</div><div class="v">${esc(sysMemPct)}%</div><div style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(formatMonitorBytes(usedM))} / ${esc(formatMonitorBytes(totalM))}</div></div>
-          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_node_heap'))}</div><div class="v">${esc(formatMonitorBytes(pm.heapUsed))}</div></div>
-          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_node_rss'))}</div><div class="v">${esc(formatMonitorBytes(pm.rss))}</div></div>
-          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_load'))}</div><div class="v" style="font-size:15px;">${esc(loadStr)}</div></div>
+          <div class="mon-stat${dangerSysMem ? ' danger' : ''}"><div class="k">${esc(t(locale, 'monitor_stat_sys_mem'))}</div><div class="v">${esc(sysMemPct)}%</div><div class="mon-stat-sub" style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(formatMonitorBytes(usedM))} / ${esc(formatMonitorBytes(totalM))}</div></div>
+          <div class="mon-stat${dangerHeap ? ' danger' : ''}"><div class="k">${esc(t(locale, 'monitor_stat_node_heap'))}</div><div class="v">${esc(formatMonitorBytes(pm.heapUsed))}</div></div>
+          <div class="mon-stat${dangerRss ? ' danger' : ''}"><div class="k">${esc(t(locale, 'monitor_stat_node_rss'))}</div><div class="v">${esc(formatMonitorBytes(pm.rss))}</div></div>
+          <div class="mon-stat${dangerLoad ? ' danger' : ''}"><div class="k">${esc(t(locale, 'monitor_stat_load'))}</div><div class="v" style="font-size:15px;">${esc(loadStr)}</div></div>
           <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_uptime'))}</div><div class="v" style="font-size:15px;">${esc(formatMonitorUptime(process.uptime()))}</div></div>
-          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_db_store'))}</div><div class="v">${esc(formatMonitorBytes(dataDirBytes))}</div><div style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(t(locale, 'monitor_stat_db_store_hint'))}</div></div>
-          <div class="mon-stat"><div class="k">${esc(t(locale, 'monitor_stat_disk_volume'))}</div>${diskUsage ? `<div class="v">${esc(diskPctStr)}%</div><div style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(formatMonitorBytes(diskUsage.used))} / ${esc(formatMonitorBytes(diskUsage.total))}</div><div class="quota-bar${diskBarClass}" style="max-width:100%;margin-top:8px;height:10px;"><div style="width:${esc(diskBarW)}%;"></div></div>` : `<div class="v" style="font-size:15px;">—</div><div style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(t(locale, 'monitor_stat_disk_unavailable'))}</div>`}</div>
+          <div class="mon-stat${dangerDataDir ? ' danger' : ''}"><div class="k">${esc(t(locale, 'monitor_stat_db_store'))}</div><div class="v">${esc(formatMonitorBytes(dataDirBytes))}</div><div class="mon-stat-sub" style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(t(locale, 'monitor_stat_db_store_hint'))}</div></div>
+          <div class="mon-stat${dangerDisk ? ' danger' : ''}"><div class="k">${esc(t(locale, 'monitor_stat_disk_volume'))}</div>${diskUsage ? `<div class="v">${esc(diskPctStr)}%</div><div class="mon-stat-sub" style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(formatMonitorBytes(diskUsage.used))} / ${esc(formatMonitorBytes(diskUsage.total))}</div><div class="quota-bar${diskBarClass}" style="max-width:100%;margin-top:8px;height:10px;"><div style="width:${esc(diskBarW)}%;"></div></div>` : `<div class="v" style="font-size:15px;">—</div><div class="mon-stat-sub" style="font-size:11px;color:#6b7280;margin-top:4px;">${esc(t(locale, 'monitor_stat_disk_unavailable'))}</div>`}</div>
         </div>
         <div style="margin-top:18px;">
           <div class="k" style="font-size:12px;font-weight:600;color:#374151;">${esc(t(locale, 'monitor_monthly_traffic'))} (${esc(String(quotaGb))} GB ${esc(t(locale, 'monitor_quota_plan'))})</div>
@@ -18845,6 +19136,7 @@ app.get('/admin/system-monitor', requireAuth, requirePage('advanced_system_monit
             <button type="submit">${esc(t(locale, 'monitor_quota_save'))}</button>
           </form>
         </div>
+        ${situationSectionHtml}
       </div>
       <div class="card">
         <div class="tabs">
@@ -19070,6 +19362,16 @@ app.post('/admin/system-monitor/quota', requireAuth, requirePage('advanced_syste
   return res.redirect('/admin/system-monitor?quotaSaved=1');
 });
 
+app.post('/admin/system-monitor/situation-analyze', requireAuth, requirePage('advanced_system_monitor'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const rec = buildServerSituationAnalysisRecord(locale, adminUser);
+  const store = loadServerSituationAnalyses();
+  const nextItems = [rec].concat((store.items || []).filter(Boolean)).slice(0, SERVER_SITUATION_ANALYSES_MAX);
+  saveServerSituationAnalyses({ v: 1, items: nextItems });
+  return res.redirect('/admin/system-monitor?situationSaved=1');
+});
+
 app.post('/admin/system-monitor/ssl-renew', requireAuth, requirePage('advanced_system_monitor'), (req, res) => {
   if (!sslRenewCommandConfigured()) {
     return res.redirect('/admin/system-monitor?sslRenew=4');
@@ -19213,7 +19515,7 @@ app.get('/admin/traffic', requireAuth, requirePage('traffic_analysis'), (req, re
 </head>
 <body>
   <div class="layout">
-    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl)}
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl, req)}
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card traffic-card">
