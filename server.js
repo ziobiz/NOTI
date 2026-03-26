@@ -9411,8 +9411,6 @@ const cancelRefundLayoutCss = ADMIN_PAGE_DESC_BOX_CSS + `
   .tx-badge-void-manual { background: #e9d5ff; color: #6d28d9; }
   .tx-badge-refund-manual { background: #d9f99d; color: #65a30d; }
   .tx-badge-noti { background: #f3f4f6; color: #4b5563; }
-  .tx-row-voided-refunded { background: #fef2f2 !important; }
-  .tx-row-voided-refunded td { color: #991b1b; }
   .col-no { width: 15px; min-width: 15px; font-size: 10px; }
   .col-date { width: 68px; min-width: 68px; font-size: 11px; }
   .col-time { width: 72px; min-width: 72px; font-size: 10px; }
@@ -10523,7 +10521,6 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     else if (hasVoidLike) notiLabel = t(locale, 'cr_type_void');
     else if (hasRefundLike) notiLabel = t(locale, 'cr_type_refund');
     const isVoidedOrRefunded = isSuccess && (hasVoidLike || hasRefundLike);
-    const rowClass = isVoidedOrRefunded ? ' tx-row-voided-refunded' : '';
     const badgeClass = statusClass.replace('tx-status-', 'tx-badge-');
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
@@ -10581,7 +10578,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
         cells.push('<td class="' + cellClass + '" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + formatVal(v) + '</td>');
       }
     }
-    return '<tr style="background:' + rowSt.rowBg + ';"' + (rowClass ? ' class="' + rowClass.trim() + '"' : '') + '>' + cells.join('') + '</tr>';
+    return '<tr style="background:' + rowSt.rowBg + ';">' + cells.join('') + '</tr>';
   }).join('');
   const TX_PAGE_LINK_BLOCK = 20;
   const pageNumStyle = (active) =>
