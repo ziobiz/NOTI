@@ -6147,7 +6147,7 @@ app.post('/admin/login', (req, res) => {
   if (member.mustChangePassword) {
     return res.redirect('/admin/change-password');
   }
-  const redirectUrl = getFirstAllowedRedirectUrl(permissions);
+  const redirectUrl = getPostAuthHomeRedirectUrl(req, req.session.member, permissions);
   return res.redirect(redirectUrl);
 });
 
@@ -6163,7 +6163,7 @@ app.get('/admin/change-password', requireAuth, (req, res) => {
   const locale = getLocale(req);
   const member = req.session.member;
   if (!member || !req.session.mustChangePassword) {
-    const url = getFirstAllowedRedirectUrl(member && member.permissions);
+    const url = getPostAuthHomeRedirectUrl(req, member, member && member.permissions);
     return res.redirect(url);
   }
   res.send(`<!DOCTYPE html>
@@ -6205,7 +6205,7 @@ app.post('/admin/change-password', requireAuth, (req, res) => {
   const member = req.session.member;
   if (!member) return res.redirect('/admin/login');
   if (!req.session.mustChangePassword) {
-    const url = getFirstAllowedRedirectUrl(member && member.permissions);
+    const url = getPostAuthHomeRedirectUrl(req, member, member && member.permissions);
     return res.redirect(url);
   }
   if (!newPassword || newPassword.length < 6) {
@@ -6224,7 +6224,7 @@ app.post('/admin/change-password', requireAuth, (req, res) => {
   saveMembers(MEMBERS);
   req.session.mustChangePassword = false;
   syncSessionHealthAlertPending(req, locale);
-  const url = getFirstAllowedRedirectUrl(member && member.permissions);
+  const url = getPostAuthHomeRedirectUrl(req, member, member && member.permissions);
   return res.redirect(url);
 });
 
@@ -6418,7 +6418,8 @@ app.post('/admin/account', requireAuth, requirePage('account'), async (req, res)
       req.session.member.userId = m.userId;
     }
     req.session.mustSetupOtp = false;
-    const goUrlAfterOtp = getFirstAllowedRedirectUrl(req.session.member && req.session.member.permissions);
+    syncSessionHealthAlertPending(req, locale);
+    const goUrlAfterOtp = getPostAuthHomeRedirectUrl(req, req.session.member, req.session.member && req.session.member.permissions);
     return res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -19106,6 +19107,38 @@ function getSystemHealthMonitorMetrics(locale) {
 
 function memberHasAdvancedSystemMonitor(member) {
   return !!(member && Array.isArray(member.permissions) && member.permissions.includes('advanced_system_monitor'));
+}
+
+/** 로그인·비밀번호 변경·OTP 등록 직후 기본 진입 URL (역할·슈퍼 admin·서버 헬스 알림 반영) */
+function getPostAuthHomeRedirectUrl(req, sessionMember, permissions) {
+  const perms = Array.isArray(permissions) ? permissions : [];
+  if (!sessionMember) return getFirstAllowedRedirectUrl(perms);
+
+  const role = sessionMember.role;
+  const uid = sessionMember.userId || '';
+
+  if (role === ROLES.SUPER_ADMIN && uid === 'admin') {
+    if (req.session.healthAlertPending && memberHasAdvancedSystemMonitor(sessionMember)) {
+      return PAGE_KEY_TO_DEFAULT_URL.advanced_system_monitor || '/admin/system-monitor';
+    }
+    if (perms.includes('cr_transactions') || perms.includes('cancel_refund')) {
+      return PAGE_KEY_TO_DEFAULT_URL.cr_transactions || '/admin/transactions';
+    }
+    return getFirstAllowedRedirectUrl(perms);
+  }
+
+  if (role === ROLES.ADMIN) {
+    return '/admin/pg-transactions?sort=today';
+  }
+
+  if (role === ROLES.OPERATOR) {
+    if (perms.includes('cr_pg_transactions') || perms.includes('cancel_refund')) {
+      return '/admin/pg-transactions?sort=today';
+    }
+    return getFirstAllowedRedirectUrl(perms);
+  }
+
+  return getFirstAllowedRedirectUrl(perms);
 }
 
 function syncSessionHealthAlertPending(req, locale) {
