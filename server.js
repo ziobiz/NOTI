@@ -2966,10 +2966,14 @@ function internalResultHaystackLog(log, locale, envLabel) {
     .toLowerCase();
 }
 
+/** 로그분석·종합거래 목록 공통 한 번에 보기 (파일 상단에 두어 모든 핸들러에서 사용) */
+const CR_LIST_PER_PAGE_DEFAULT = 100;
+const CR_LIST_PER_PAGE_CHOICES = [100, 200, 300, 400, 500];
+const CR_LIST_PER_PAGE_MAX = Math.max(...CR_LIST_PER_PAGE_CHOICES);
+
 function parseAllowedPerPage(qPerPage) {
   const n = parseInt(qPerPage, 10);
-  const allowed = [100, 200, 300, 400, 500];
-  return allowed.includes(n) ? n : 100;
+  return CR_LIST_PER_PAGE_CHOICES.includes(n) ? n : CR_LIST_PER_PAGE_DEFAULT;
 }
 
 function buildQueryString(obj) {
@@ -2981,6 +2985,18 @@ function buildQueryString(obj) {
     parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
   });
   return parts.join('&');
+}
+
+/** 무효·환불·강제환불 툴바 period 값 정규화(로그 화면의 this_week 등과 혼용 시 대응) */
+function normalizeCrToolbarPeriod(p) {
+  const s = String(p || '').trim();
+  const map = {
+    this_week: 'thisWeek',
+    last_week: 'lastWeek',
+    this_month: 'thisMonth',
+    last_month: 'lastMonth',
+  };
+  return map[s] || s;
 }
 
 /** 로그/결과 GET 필터: 입력·검색 초기화 ｜ 시작·종료일·적용 ｜ 기간 프리셋 */
@@ -4112,13 +4128,11 @@ async function syncChillPayRefundNoti() {
 //   - 자동 무효 마감 시각 이후 ~ 23:59                     → 'void_manual'(수동 이메일만 가능)
 // - 날짜가 바뀐 이후(결제일이 오늘이 아닌 경우)          → 'refund_only'(무효 불가, 환불만 가능)
 // 환불 가능 일자(결제 다음날 00:00からN日間）は isWithinRefundWindow で別途判定
-function getVoidRefundWindow(paymentDateOrIso, nowIso) {
-  const cfg = loadChillPayTransactionConfig();
-  const tz = cfg.timezone || DEFAULT_CHILLPAY_TIMEZONE;
-  const raw = paymentDateOrIso;
-  if (raw == null || raw === '') return 'refund_only';
+/** PaymentDate·ISO·에포크 등 → Date (getVoidRefundWindow와 동일 규칙). 실패 시 null */
+function parseVoidRefundScheduleDateRaw(raw) {
+  if (raw == null || raw === '') return null;
   const str = String(raw).trim();
-  if (!str) return 'refund_only';
+  if (!str) return null;
   let date = null;
   if (typeof raw === 'number' && Number.isFinite(raw)) {
     date = raw > 1e12 ? new Date(raw) : new Date(raw * 1000);
@@ -4130,7 +4144,8 @@ function getVoidRefundWindow(paymentDateOrIso, nowIso) {
   } else if (/^\d{2}\/\d{2}\/\d{4}(\s+\d{1,2}:\d{2}(:\d{2})?)?$/.test(str)) {
     const [dpart, tpart] = str.split(/\s+/);
     const [dd, mm, yyyy] = (dpart || '').split('/').map(Number);
-    let h = 12, min = 0;
+    let h = 12,
+      min = 0;
     if (tpart) {
       const parts = tpart.split(':');
       h = Number(parts[0]) || 12;
@@ -4146,30 +4161,68 @@ function getVoidRefundWindow(paymentDateOrIso, nowIso) {
   } else {
     date = new Date(str);
   }
-  if (!date || Number.isNaN(date.getTime())) return 'refund_only';
+  if (!date || Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function formatDateYmdInChillpayTimezone(date, tz) {
+  const z = tz || DEFAULT_CHILLPAY_TIMEZONE;
+  try {
+    const fmtDate = new Intl.DateTimeFormat('en-CA', { timeZone: z, year: 'numeric', month: '2-digit', day: '2-digit' });
+    const parts = fmtDate.formatToParts(date);
+    const getVal = (name) => (parts.find((p) => p.type === name) || {}).value || '';
+    const y = getVal('year');
+    const m = getVal('month');
+    const d = getVal('day');
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch (_) {}
+  return '';
+}
+
+/** 목록 기간 필터: 본문 결제·거래일 → 설정 TZ 기준 ymd. 파싱 실패·없음이면 '' */
+function getCrVoidRefundPaymentCalendarYmd(log, tzFallback) {
+  const body = parseNotiBody(log);
+  const payRaw = String(
+    notifBodyPaymentDateForWindow(body) ||
+      (body && (body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate)) ||
+      '',
+  ).trim();
+  if (!payRaw) return '';
+  const pd = parseVoidRefundScheduleDateRaw(payRaw);
+  if (!pd) return '';
+  const ymd = formatDateYmdInChillpayTimezone(pd, tzFallback);
+  return ymd || '';
+}
+
+/** 기간 구간: 결제일·노티 수신일 중 하나라도 [dateFrom, dateTo] 안이면 포함 (결제일만 쓰면 당일 프리셋에서 전부 빠지는 경우 방지) */
+function logMatchesCrVoidRefundDateRange(log, dateFrom, dateTo, tzFallback, isoToYmdFn) {
+  if (!dateFrom && !dateTo) return true;
+  const payYmd = getCrVoidRefundPaymentCalendarYmd(log, tzFallback);
+  const recYmd = isoToYmdFn(log.receivedAtIso || log.receivedAt);
+  const inR = (ymd) => !!(ymd && (!dateFrom || ymd >= dateFrom) && (!dateTo || ymd <= dateTo));
+  if (!payYmd && !recYmd) return false;
+  return inR(payYmd) || inR(recYmd);
+}
+
+function getVoidRefundWindow(paymentDateOrIso, nowIso) {
+  const cfg = loadChillPayTransactionConfig();
+  const tz = cfg.timezone || DEFAULT_CHILLPAY_TIMEZONE;
+  const date = parseVoidRefundScheduleDateRaw(paymentDateOrIso);
+  if (!date) return 'refund_only';
 
   const nowDate = nowIso ? new Date(nowIso) : new Date();
   if (Number.isNaN(nowDate.getTime())) return 'refund_only';
 
-  // 태국 시간 기준 결제일과 오늘 날짜を取得
-  const fmtDate = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
-  const payParts = fmtDate.formatToParts(date);
-  const nowParts = fmtDate.formatToParts(nowDate);
-  const getVal = (parts, name) => (parts.find((p) => p.type === name) || {}).value || '0';
-  const payY = parseInt(getVal(payParts, 'year'), 10) || 0;
-  const payM = parseInt(getVal(payParts, 'month'), 10) || 0;
-  const payD = parseInt(getVal(payParts, 'day'), 10) || 0;
-  const nowY = parseInt(getVal(nowParts, 'year'), 10) || 0;
-  const nowM = parseInt(getVal(nowParts, 'month'), 10) || 0;
-  const nowD = parseInt(getVal(nowParts, 'day'), 10) || 0;
-
-  // 결제일이 오늘(태국 기준)이 아니면 이미 무효 가능 시간이 지난 것으로 보고 환불 전용
-  if (payY !== nowY || payM !== nowM || payD !== nowD) return 'refund_only';
+  const payYmd = formatDateYmdInChillpayTimezone(date, tz);
+  const nowYmd = formatDateYmdInChillpayTimezone(nowDate, tz);
+  if (!payYmd || !nowYmd) return 'refund_only';
+  if (payYmd !== nowYmd) return 'refund_only';
 
   // 오늘(당일 거래)인 경우: 현재 시각 기준으로 구간 판정
   const timeParts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(nowDate);
-  const nowHour = parseInt(getVal(timeParts, 'hour'), 10) || 0;
-  const nowMin = parseInt(getVal(timeParts, 'minute'), 10) || 0;
+  const getValTime = (parts, name) => (parts.find((p) => p.type === name) || {}).value || '0';
+  const nowHour = parseInt(getValTime(timeParts, 'hour'), 10) || 0;
+  const nowMin = parseInt(getValTime(timeParts, 'minute'), 10) || 0;
   const nowMins = nowHour * 60 + nowMin;
 
   const cutoffMins = cfg.voidCutoffHour * 60 + cfg.voidCutoffMinute; // 예: 21:00
@@ -9186,6 +9239,15 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
     })
     .join('');
 
+  const logPagerFooterPg = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountPg,
+    totalPages: totalPagesPg,
+    pageNum: pageNumPg,
+    perPage,
+    hrefFor: (o) => '/admin/logs?' + buildQueryString({ ...(q || {}), ...o }),
+    rightCenterHtml: isTodayOnly ? esc(t(locale, 'logs_filter_today_all_one_page')) : undefined,
+  });
+
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -9323,27 +9385,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
           ${rows || `<tr><td colspan="10" style="text-align:center;color:#777;">${t(locale, 'pg_logs_empty')}</td></tr>`}
         </tbody>
       </table>
-      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-        <div>
-          ${t(locale, 'tx_per_page_bar')}: 
-          ${[100,200,300,400,500]
-            .map((n) => {
-              const url = '/admin/logs?' + buildQueryString({ ...(q || {}), perPage: n, page: 1 });
-              const active = perPage === n;
-              return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
-            })
-            .join('')}
-          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountPg}${t(locale, 'cr_count_suffix')})
-        </div>
-        ${isTodayOnly
-          ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>'
-          : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesPg }, (_, idx) => {
-              const i = idx + 1;
-              const url = '/admin/logs?' + buildQueryString({ ...(q || {}), page: i, perPage });
-              const active = i === pageNumPg;
-              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
-            }).join('')}</div>`}
-      </div>
+      ${logPagerFooterPg}
       </div>
     </main>
   </div>
@@ -9939,7 +9981,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   let dateTo = (q.dateTo || '').toString().trim();
   const period = (q.period || 'today').toString();
   const statusFilter = (q.statusFilter || '').toString();
-  const perPage = Math.max(10, Math.min(200, parseInt(q.perPage, 10) || 25));
+  const perPage = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const page = Math.max(1, parseInt(q.page, 10) || 1);
   const txSource = parseTxSourceFromReq(req);
   const notiKindFilter = parseTxNotiKindFilter(req);
@@ -10325,7 +10367,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     if (o.dateTo) parts.push('dateTo=' + encodeURIComponent(o.dateTo));
     if (o.searchField && o.searchField !== 'all') parts.push('searchField=' + encodeURIComponent(o.searchField));
     if (o.sortDir && o.sortDir !== 'desc') parts.push('sortDir=' + encodeURIComponent(o.sortDir));
-    if (o.perPage && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.perPage && o.perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(o.perPage));
     if (o.page && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     if (o.period && o.period !== 'all') parts.push('period=' + encodeURIComponent(o.period));
     if (o.statusFilter) parts.push('statusFilter=' + encodeURIComponent(o.statusFilter));
@@ -10621,38 +10663,13 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     }
     return '<tr style="background:' + rowSt.rowBg + ';">' + cells.join('') + '</tr>';
   }).join('');
-  const TX_PAGE_LINK_BLOCK = 20;
-  const pageNumStyle = (active) =>
-    'padding:2px 6px;margin:0 1px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' +
-    (active ? '#2563eb' : '#e5e7eb') +
-    ';color:' +
-    (active ? '#fff' : '#374151') +
-    ';';
-  const pageNavArrowStyle =
-    'padding:2px 8px;margin:0 4px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:#dbeafe;color:#1e40af;font-weight:600;';
-  const pageLinks = [];
-  if (totalPages > 0) {
-    const blockStart = Math.floor((pageNum - 1) / TX_PAGE_LINK_BLOCK) * TX_PAGE_LINK_BLOCK + 1;
-    const blockEnd = Math.min(blockStart + TX_PAGE_LINK_BLOCK - 1, totalPages);
-    if (blockStart > 1) {
-      const prevUrl = baseUrl + qs({ page: blockStart - 1 });
-      pageLinks.push('<a href="' + prevUrl + '" style="' + pageNavArrowStyle + '" title="' + esc(t(locale, 'tx_page_prev_block') || '이전') + '">&lt;</a>');
-    }
-    for (let i = blockStart; i <= blockEnd; i++) {
-      const url = baseUrl + qs({ page: i });
-      pageLinks.push('<a href="' + url + '" style="' + pageNumStyle(i === pageNum) + '">' + i + '</a>');
-    }
-    if (blockEnd < totalPages) {
-      const nextUrl = baseUrl + qs({ page: blockEnd + 1 });
-      pageLinks.push('<a href="' + nextUrl + '" style="' + pageNavArrowStyle + '" title="' + esc(t(locale, 'tx_page_next_block') || '다음') + '">&gt;</a>');
-    }
-  }
-  const paginationCenter =
-    totalPages > 0
-      ? '<div style="display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:2px;margin:12px 0;">' + pageLinks.join('') + '</div>'
-      : '';
-  const perPageOptions = [10, 25, 50, 100].map((n) => '<a href="' + baseUrl + qs({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPage === n ? '#059669' : '#e5e7eb') + ';color:' + (perPage === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
-  const perPageBar = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptions + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCount + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
+  const listPagerFooterTx = buildCrListPagerFooterHtml(locale, t, {
+    totalCount,
+    totalPages,
+    pageNum,
+    perPage,
+    hrefFor: (o) => baseUrl + qs(o),
+  });
   const txResizeScript = '<script>(function(){var table=document.querySelector(".tx-list-table");if(!table)return;var cols=table.querySelectorAll("col");var headers=table.querySelectorAll("thead th");var resizer=null,startX=0,startW=0,colIdx=0;function onMove(e){if(resizer==null)return;var dx=e.clientX-startX;var newW=Math.max(40,startW+dx);cols[colIdx].style.width=newW+"px";}function onUp(){resizer=null;document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);document.body.style.cursor="";document.body.style.userSelect="";}table.querySelectorAll(".tx-col-resizer").forEach(function(el){el.addEventListener("mousedown",function(e){e.preventDefault();colIdx=parseInt(el.getAttribute("data-col"),10);startX=e.clientX;startW=headers[colIdx]?headers[colIdx].offsetWidth:80;resizer=el;document.body.style.cursor="col-resize";document.body.style.userSelect="none";document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);});});})();</script>';
   const txHint = '<p class="page-desc">' + t(locale, 'noti_hint_log_same') + '</p>';
   const emptyStateHtml = totalCount === 0 ? '<div class="admin-page-desc" style="margin-bottom:14px;">' + t(locale, 'noti_alert_no_tx') + '</div>' : '';
@@ -10672,8 +10689,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     rows +
     '</tbody></table>' +
     txResizeScript +
-    paginationCenter +
-    perPageBar;
+    listPagerFooterTx;
   res.send(
     renderCancelRefundPage(
       locale,
@@ -10921,7 +10937,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
   const searchField = (q.searchField || 'all').toString();
   let dateFrom = (q.dateFrom || '').toString().trim();
   let dateTo = (q.dateTo || '').toString().trim();
-  const perPage = Math.max(10, Math.min(200, parseInt(q.perPage, 10) || 25));
+  const perPage = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const page = Math.max(1, parseInt(q.page, 10) || 1);
   let store = loadPgTransactionStore();
   let block = env === 'sandbox' ? store.sandbox : store.production;
@@ -11045,7 +11061,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
     if (o.dateFrom) parts.push('dateFrom=' + encodeURIComponent(o.dateFrom));
     if (o.dateTo) parts.push('dateTo=' + encodeURIComponent(o.dateTo));
     if (o.statusFilter) parts.push('statusFilter=' + encodeURIComponent(o.statusFilter));
-    if (o.perPage != null && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.perPage != null && o.perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(o.perPage));
     if (o.page != null && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     return parts.length ? '?' + parts.join('&') : '';
   };
@@ -11429,7 +11445,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
       pageLinks.push('<a href="' + url + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (i === pageNum ? '#2563eb' : '#e5e7eb') + ';color:' + (i === pageNum ? '#fff' : '#374151') + ';">' + i + '</a>');
     }
     const paginationCenter = totalPages > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinks.join('') + '</div>' : '';
-    const perPageOptions = [10, 25, 50, 100].map((n) => '<a href="' + baseUrl + qs({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPage === n ? '#059669' : '#e5e7eb') + ';color:' + (perPage === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
+    const perPageOptions = CR_LIST_PER_PAGE_CHOICES.map((n) => '<a href="' + baseUrl + qs({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPage === n ? '#059669' : '#e5e7eb') + ';color:' + (perPage === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
     const perPageBar = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptions + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCount + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
     sectionsHtml = '<div style="margin-bottom:16px;"><div style="font-size:12px;margin:0 0 20px 0;color:#1f2937;">' + summaryLine1 + '</div><div style="font-size:12px;margin:0 0 20px 0;">' + summaryLine2 + '</div><table class="pg-tx-table" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;">' + colgroup + thead + '<tbody>' + rows + '</tbody></table>' + paginationCenter + perPageBar + '</div>';
   }
@@ -12097,6 +12113,105 @@ function buildCancelDetailReasonLine(locale, tFn, body) {
 function buildCancelDetailCellText(locale, tFn, body) {
   return tFn(locale, 'tx_status_cancel') + ' / ' + buildCancelDetailReasonLine(locale, tFn, body);
 }
+
+/** 종합거래·노티거래내역·로그분석 공통: 왼쪽 한 번에 보기+총 건수, 가운데 페이지(최대 20블록 &lt; &gt;) */
+const CR_LIST_PAGER_BLOCK = 20;
+function buildCrListPagerFooterHtml(locale, tFn, { totalCount, totalPages, pageNum, perPage, hrefFor, rightCenterHtml }) {
+  const tLoc = (key, fb) => {
+    const v = tFn(locale, key);
+    return v && v !== key ? v : fb;
+  };
+  const escTitle = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  const perPageOpts = CR_LIST_PER_PAGE_CHOICES;
+  const perPageLinks = perPageOpts
+    .map((n) => {
+      const url = hrefFor({ perPage: n, page: 1 });
+      const active = perPage === n;
+      return (
+        '<a href="' +
+        url +
+        '" style="padding:4px 8px;margin:0 3px;font-size:12px;border-radius:4px;text-decoration:none;background:' +
+        (active ? '#059669' : '#e5e7eb') +
+        ';color:' +
+        (active ? '#fff' : '#374151') +
+        ';">' +
+        n +
+        '</a>'
+      );
+    })
+    .join('');
+  const perPageBarLeft =
+    '<div style="display:flex;flex-wrap:wrap;justify-content:flex-start;align-items:center;gap:2px 6px;text-align:left;">' +
+    '<span>' +
+    tLoc('tx_per_page_bar', '한 번에 보기') +
+    ': </span>' +
+    '<span style="display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px;">' +
+    perPageLinks +
+    '</span>' +
+    '<span>' +
+    tLoc('cr_count_suffix', '건') +
+    ' (' +
+    tLoc('tx_per_page_total', '총') +
+    ' ' +
+    totalCount +
+    tLoc('cr_count_suffix', '건') +
+    ')</span></div>';
+  const pageNumStyle = (active) =>
+    'padding:4px 8px;margin:0 2px;font-size:12px;border-radius:6px;text-decoration:none;background:' +
+    (active ? '#2563eb' : '#e5e7eb') +
+    ';color:' +
+    (active ? '#fff' : '#374151') +
+    ';';
+  const pageNavArrowStyle =
+    'padding:4px 8px;margin:0 4px;font-size:12px;border-radius:6px;text-decoration:none;background:#dbeafe;color:#1e40af;font-weight:600;';
+  const useCenterRight = rightCenterHtml != null && String(rightCenterHtml).trim() !== '';
+  const pageLinks = [];
+  if (!useCenterRight && totalPages > 0) {
+    const blockStart = Math.floor((pageNum - 1) / CR_LIST_PAGER_BLOCK) * CR_LIST_PAGER_BLOCK + 1;
+    const blockEnd = Math.min(blockStart + CR_LIST_PAGER_BLOCK - 1, totalPages);
+    if (blockStart > 1) {
+      pageLinks.push(
+        '<a href="' +
+          hrefFor({ page: blockStart - 1 }) +
+          '" style="' +
+          pageNavArrowStyle +
+          '" title="' +
+          escTitle(tLoc('tx_page_prev_block', '이전')) +
+          '">&lt;</a>',
+      );
+    }
+    for (let i = blockStart; i <= blockEnd; i++) {
+      pageLinks.push('<a href="' + hrefFor({ page: i }) + '" style="' + pageNumStyle(i === pageNum) + '">' + i + '</a>');
+    }
+    if (blockEnd < totalPages) {
+      pageLinks.push(
+        '<a href="' +
+          hrefFor({ page: blockEnd + 1 }) +
+          '" style="' +
+          pageNavArrowStyle +
+          '" title="' +
+          escTitle(tLoc('tx_page_next_block', '다음')) +
+          '">&gt;</a>',
+      );
+    }
+  }
+  const centerPager =
+    useCenterRight
+      ? '<div style="text-align:center;">' + rightCenterHtml + '</div>'
+      : '<div style="display:flex;justify-content:center;flex-wrap:wrap;gap:2px;align-items:center;">' + pageLinks.join('') + '</div>';
+  return (
+    '<div style="margin-top:10px;font-size:12px;color:#4b5563;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px 12px;width:100%;box-sizing:border-box;">' +
+    '<div style="justify-self:start;min-width:0;">' +
+    perPageBarLeft +
+    '</div>' +
+    '<div style="justify-self:center;">' +
+    centerPager +
+    '</div>' +
+    '<div aria-hidden="true"></div>' +
+    '</div>'
+  );
+}
+
 // 오류 상태로 간주할 PaymentStatus (API 4=Error, 콜백 3=Error, 문자열 'Error')
 function isErrorPaymentStatus(ps) {
   if (ps === 4 || ps === '4') return true;
@@ -12155,7 +12270,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
     const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
     return isCancelLikeNotiBody(body, log);
   });
-  const perPage = Math.max(10, Math.min(100, parseInt(q.perPage, 10) || 25));
+  const perPage = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const page = Math.max(1, parseInt(q.page, 10) || 1);
   const totalCountCancel = cancelled.length;
   const totalPagesCancel = Math.max(1, Math.ceil(totalCountCancel / perPage));
@@ -12165,21 +12280,21 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
   const qsCancel = (overrides) => {
     const o = { perPage, page: pageNumCancel, ...overrides };
     const parts = [];
-    if (o.perPage != null && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.perPage != null && o.perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(o.perPage));
     if (o.page != null && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     return parts.length ? '?' + parts.join('&') : '';
   };
-  const pageLinksCancel = [];
-  for (let i = 1; i <= totalPagesCancel; i++) {
-    pageLinksCancel.push('<a href="' + baseUrlCancel + qsCancel({ page: i }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (i === pageNumCancel ? '#2563eb' : '#e5e7eb') + ';color:' + (i === pageNumCancel ? '#fff' : '#374151') + ';">' + i + '</a>');
-  }
-  const paginationCenterCancel = totalPagesCancel > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinksCancel.join('') + '</div>' : '';
-  const perPageOptionsCancel = [10, 25, 50, 100].map((n) => '<a href="' + baseUrlCancel + qsCancel({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPage === n ? '#059669' : '#e5e7eb') + ';color:' + (perPage === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
-  const perPageBarCancel = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptionsCancel + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCountCancel + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
+  const listPagerFooterCancel = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountCancel,
+    totalPages: totalPagesCancel,
+    pageNum: pageNumCancel,
+    perPage,
+    hrefFor: (o) => baseUrlCancel + qsCancel(o),
+  });
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const cancelEnvUrl = (e) => {
     const parts = ['env=' + encodeURIComponent(e)];
-    if (perPage !== 25) parts.push('perPage=' + encodeURIComponent(String(perPage)));
+    if (perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(String(perPage)));
     if (pageNumCancel !== 1) parts.push('page=' + encodeURIComponent(String(pageNumCancel)));
     return baseUrlCancel + '?' + parts.join('&');
   };
@@ -12260,7 +12375,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       locale,
       adminUser,
       appendCrListCountToTitle(t(locale, 'nav_cancel_refund_cancel'), totalCountCancel),
-      alertHtml + helpPg + '<table class="cancel-list-table">' + colgroup + thead + '<tbody>' + rows + '</tbody></table>' + paginationCenterCancel + perPageBarCancel,
+      alertHtml + helpPg + '<table class="cancel-list-table">' + colgroup + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterCancel,
       '',
       req.originalUrl,
       req.session.member,
@@ -12411,7 +12526,7 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
   } else if (pgFilter === 'chillpay') {
     filtered = filtered.filter((e) => (e.pgProvider || 'chillpay') !== 'jpay');
   }
-  const perPageNoti = Math.max(10, Math.min(100, parseInt(q.perPage, 10) || 25));
+  const perPageNoti = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const pageNoti = Math.max(1, parseInt(q.page, 10) || 1);
   const totalCountNoti = filtered.length;
   const totalPagesNoti = Math.max(1, Math.ceil(totalCountNoti / perPageNoti));
@@ -12425,17 +12540,17 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
     if (o.days) parts.push('days=' + encodeURIComponent(o.days));
     if (o.env) parts.push('env=' + encodeURIComponent(o.env));
     if (o.pg && o.pg !== 'all') parts.push('pg=' + encodeURIComponent(o.pg));
-    if (o.perPage != null && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.perPage != null && o.perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(o.perPage));
     if (o.page != null && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     return parts.length ? '?' + parts.join('&') : '';
   };
-  const pageLinksNoti = [];
-  for (let i = 1; i <= totalPagesNoti; i++) {
-    pageLinksNoti.push('<a href="' + baseUrlNoti + qsNoti({ page: i }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (i === pageNumNoti ? '#2563eb' : '#e5e7eb') + ';color:' + (i === pageNumNoti ? '#fff' : '#374151') + ';">' + i + '</a>');
-  }
-  const paginationCenterNoti = totalPagesNoti > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinksNoti.join('') + '</div>' : '';
-  const perPageOptionsNoti = [10, 25, 50, 100].map((n) => '<a href="' + baseUrlNoti + qsNoti({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPageNoti === n ? '#059669' : '#e5e7eb') + ';color:' + (perPageNoti === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
-  const perPageBarNoti = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptionsNoti + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCountNoti + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
+  const listPagerFooterNoti = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountNoti,
+    totalPages: totalPagesNoti,
+    pageNum: pageNumNoti,
+    perPage: perPageNoti,
+    hrefFor: (o) => baseUrlNoti + qsNoti(o),
+  });
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const relayLabel = (s, skipReason) => {
     if (s === 'ok') return '<span class="status-ok">' + t(locale, 'cr_status_ok') + '</span>';
@@ -12531,8 +12646,7 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
     '<tbody>' +
     rows +
     '</tbody></table></div>' +
-    paginationCenterNoti +
-    perPageBarNoti;
+    listPagerFooterNoti;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_noti'), totalCountNoti), tableContent, '', req.originalUrl, req.session.member, req, undefined, envNoti));
 });
 
@@ -12657,33 +12771,26 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
   const filteredLogs = getEnvFilteredLogs(req);
   const reversed = [...filteredLogs].slice().reverse();
   const voidUiDeleted = loadVoidUiDeletedList();
+  // 무효거래 목록: 결제 성공 건 후보 전체에서 시작. 기본(쿼리에 period·날짜 없음)은 당일만 필터; 「전체」·기간 링크·날짜 적용으로 전 구간 조회 가능.
+  // 행별 무효 API·이메일 버튼은 아래 map에서 getVoidRefundWindow(void_auto | void_manual | refund_only)로 그대로 제어.
   let voidList = reversed.filter((log) => {
     const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
     const txId = notifBodyTxId(body);
     const isSuccess = isSuccessPaymentBody(body);
     if (!txId || !isSuccess || !log.merchantId || !MERCHANTS.get(log.merchantId)) return false;
     if (isVoidUiDeleted(txId, log.merchantId, env, voidUiDeleted)) return false;
-    // 무효요청 가능 구간 판정: 화면에 보이는 노티 수신 시각(TH 기준)을 우선 사용
-    const baseDate =
-      log.receivedAtIso ||
-      log.receivedAt ||
-      notifBodyPaymentDateForWindow(body) ||
-      body.TransactionDate ||
-      body.transactionDate ||
-      body.PaymentDate ||
-      body.paymentDate;
-    const w = getVoidRefundWindow(baseDate);
-    return w === 'void_auto' || w === 'void_manual';
+    return true;
   });
   const sortByVoid = ['time', 'date', 'route', 'currency', 'status'].includes((q.sort || '').toString()) ? (q.sort || '').toString() : 'time';
   const sortDirVoid = (q.sortDir || 'desc').toString().toLowerCase() === 'asc' ? 'asc' : 'desc';
   let dateFromVoid = (q.dateFrom || '').toString().trim();
   let dateToVoid = (q.dateTo || '').toString().trim();
-  const periodVoid = (q.period || 'all').toString();
+  const qPeriodRaw = q.period != null && String(q.period).trim() !== '' ? String(q.period).trim() : '';
+  const periodVoid = normalizeCrToolbarPeriod(qPeriodRaw || (dateFromVoid || dateToVoid ? 'all' : 'today'));
   const searchKwVoid = (q.search || '').toString().trim();
   const searchFieldVoid = (q.searchField || 'all').toString();
   const voidRowStatusFilter = (q.voidRowStatus || 'all').toString();
-  const perPageVoid = Math.max(10, Math.min(100, parseInt(q.perPage, 10) || 25));
+  const perPageVoid = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const pageVoid = Math.max(1, parseInt(q.page, 10) || 1);
   const chillTzVoid = (cfgVoid && cfgVoid.timezone) ? String(cfgVoid.timezone).trim() : 'Asia/Bangkok';
   const toYmdVoid = (d) => {
@@ -12762,7 +12869,8 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
     }
     return null;
   };
-  if (!dateFromVoid && !dateToVoid && periodVoid && periodVoid !== 'all') {
+  // period 가 today/thisWeek 등이면 항상 프리셋 구간으로 덮어씀. (페이징 등으로 URL에 남은 dateFrom/dateTo 때문에 프리셋이 무시되던 버그 방지)
+  if (periodVoid && periodVoid !== 'all') {
     const r = calcPresetRangeVoid(periodVoid);
     if (r && r.startDate && r.endDate) {
       dateFromVoid = r.startDate;
@@ -12770,14 +12878,9 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
     }
   }
   if (dateFromVoid || dateToVoid) {
-    voidList = voidList.filter((log) => {
-      const iso = log.receivedAtIso || log.receivedAt;
-      const ymd = isoToYmdVoid(iso);
-      if (!ymd) return false;
-      if (dateFromVoid && ymd < dateFromVoid) return false;
-      if (dateToVoid && ymd > dateToVoid) return false;
-      return true;
-    });
+    voidList = voidList.filter((log) =>
+      logMatchesCrVoidRefundDateRange(log, dateFromVoid, dateToVoid, chillTzVoid, isoToYmdVoid),
+    );
   }
   if (voidRowStatusFilter && voidRowStatusFilter !== 'all') {
     voidList = voidList.filter((log) => {
@@ -12911,7 +13014,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
     };
     const parts = [];
     if (o.env) parts.push('env=' + encodeURIComponent(o.env));
-    if (o.perPage != null && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.perPage != null && o.perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(o.perPage));
     if (o.page != null && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     if (o.sort && o.sort !== 'time') parts.push('sort=' + encodeURIComponent(o.sort));
     if (o.sortDir && o.sortDir !== 'desc') parts.push('sortDir=' + encodeURIComponent(o.sortDir));
@@ -12966,7 +13069,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
     '<input type="hidden" name="searchField" value="' + esc(searchFieldVoid) + '" />' +
     '<input type="hidden" name="voidRowStatus" value="' + esc(voidRowStatusFilter) + '" />' +
     '<input type="hidden" name="perPage" value="' + esc(String(perPageVoid)) + '" />' +
-    '<input type="hidden" name="period" value="' + esc(periodVoid) + '" />' +
+    '<input type="hidden" name="period" value="all" />' +
     '<input type="date" name="dateFrom" value="' + esc(dateFromVoid) + '" class="tx-date-input" /><span class="tx-date-sep">~</span><input type="date" name="dateTo" value="' + esc(dateToVoid) + '" class="tx-date-input" /><button type="submit" class="tx-date-btn">' + esc(t(locale, 'tx_apply')) + '</button></form>';
   const voidSearchForm =
     '<form method="get" action="' + baseUrlVoid + '" style="display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px;">' +
@@ -12983,13 +13086,13 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
     '<select name="voidRowStatus" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;">' + voidStatusFilterOptions + '</select>' +
     '<button type="submit" style="padding:2px 6px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:3px;cursor:pointer;">' + esc(t(locale, 'common_search')) + '</button></form>';
   const voidToolbarHtml = '<div class="tx-toolbar">' + voidSortLinks + voidSortDirLinks + '<span class="tx-toolbar-sep">|</span>' + voidPeriodLinks + voidDateForm + '<span class="tx-toolbar-sep">|</span>' + voidSearchForm + '</div>';
-  const pageLinksVoid = [];
-  for (let i = 1; i <= totalPagesVoid; i++) {
-    pageLinksVoid.push('<a href="' + baseUrlVoid + qsVoid({ page: i }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (i === pageNumVoid ? '#2563eb' : '#e5e7eb') + ';color:' + (i === pageNumVoid ? '#fff' : '#374151') + ';">' + i + '</a>');
-  }
-  const paginationCenterVoid = totalPagesVoid > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinksVoid.join('') + '</div>' : '';
-  const perPageOptionsVoid = [10, 25, 50, 100].map((n) => '<a href="' + baseUrlVoid + qsVoid({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPageVoid === n ? '#059669' : '#e5e7eb') + ';color:' + (perPageVoid === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
-  const perPageBarVoid = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptionsVoid + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCountVoid + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
+  const listPagerFooterVoid = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountVoid,
+    totalPages: totalPagesVoid,
+    pageNum: pageNumVoid,
+    perPage: perPageVoid,
+    hrefFor: (o) => baseUrlVoid + qsVoid(o),
+  });
   const cfg = loadChillPayTransactionConfig();
   const rows = displayVoidList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
@@ -13100,7 +13203,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
   }).join('');
   const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th><th>Amount</th><th>ICOPAY</th><th>' + t(locale, 'cr_th_void') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_email') + '</th></tr></thead>';
   const voidNote = '<p class="page-desc">' + t(locale, 'void_note_paragraph') + '</p>';
-  const tableContent = voidNote + voidToolbarHtml + syncResultHtml + '<table class="void-list-table">' + thead + '<tbody>' + rows + '</tbody></table>' + paginationCenterVoid + perPageBarVoid + historyListHtml;
+  const tableContent = voidNote + voidToolbarHtml + syncResultHtml + '<table class="void-list-table">' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterVoid + historyListHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_void'), totalCountVoid), tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
 });
 
@@ -13342,27 +13445,14 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
     </div>
   </form>`;
 
-  const paginationBarMail = `<div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-    <div>
-      ${t(locale, 'tx_per_page_bar')}: 
-      ${[100,200,300,400,500]
-        .map((n) => {
-          const url = '/admin/mail-logs?' + buildQueryString({ ...(q || {}), env, perPage: n, page: 1 });
-          const active = perPage === n;
-          return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
-        })
-        .join('')}
-      ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountMail}${t(locale, 'cr_count_suffix')})
-    </div>
-    ${isTodayOnly
-      ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>'
-      : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesMail }, (_, idx) => {
-          const i = idx + 1;
-          const url = '/admin/mail-logs?' + buildQueryString({ ...(q || {}), env, page: i, perPage });
-          const active = i === pageNumMail;
-          return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
-        }).join('')}</div>`}
-  </div>`;
+  const paginationBarMail = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountMail,
+    totalPages: totalPagesMail,
+    pageNum: pageNumMail,
+    perPage,
+    hrefFor: (o) => '/admin/mail-logs?' + buildQueryString({ ...(q || {}), env, ...o }),
+    rightCenterHtml: isTodayOnly ? esc(t(locale, 'logs_filter_today_all_one_page')) : undefined,
+  });
 
   const mainContentWithControls = dateFilterForm + mainContent + paginationBarMail;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_mail_logs') || 'Mail logs', totalCountMail), mainContentWithControls, '', req.originalUrl, req.session.member, req, undefined, env));
@@ -13458,7 +13548,7 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cr_void_s
     return tb - ta;
   });
   const qVs = req.query || {};
-  const perPageVs = Math.max(10, Math.min(100, parseInt(qVs.perPage, 10) || 25));
+  const perPageVs = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(qVs.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const pageVs = Math.max(1, parseInt(qVs.page, 10) || 1);
   const totalCountVs = rowsData.length;
   const totalPagesVs = Math.max(1, Math.ceil(totalCountVs / perPageVs));
@@ -13469,17 +13559,17 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cr_void_s
     const o = { env, perPage: perPageVs, page: pageNumVs, ...overrides };
     const parts = [];
     if (o.env) parts.push('env=' + encodeURIComponent(o.env));
-    if (o.perPage != null && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.perPage != null && o.perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(o.perPage));
     if (o.page != null && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     return parts.length ? '?' + parts.join('&') : '';
   };
-  const pageLinksVs = [];
-  for (let i = 1; i <= totalPagesVs; i++) {
-    pageLinksVs.push('<a href="' + baseUrlVs + qsVs({ page: i }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (i === pageNumVs ? '#2563eb' : '#e5e7eb') + ';color:' + (i === pageNumVs ? '#fff' : '#374151') + ';">' + i + '</a>');
-  }
-  const paginationCenterVs = totalPagesVs > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinksVs.join('') + '</div>' : '';
-  const perPageOptionsVs = [10, 25, 50, 100].map((n) => '<a href="' + baseUrlVs + qsVs({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPageVs === n ? '#059669' : '#e5e7eb') + ';color:' + (perPageVs === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
-  const perPageBarVs = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptionsVs + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCountVs + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
+  const listPagerFooterVs = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountVs,
+    totalPages: totalPagesVs,
+    pageNum: pageNumVs,
+    perPage: perPageVs,
+    hrefFor: (o) => baseUrlVs + qsVs(o),
+  });
   const rows = displayRowsDataVs.map((r) => {
     const dt = r.sentAt || { date: '', timeTh: '', timeJp: '' };
     return `<tr>
@@ -13507,7 +13597,7 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cr_void_s
     + '<th>' + t(locale, 'cr_th_route_no') + '</th>'
     + '<th>Detail</th>'
     + '</tr></thead>';
-  const mainContent = '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + paginationCenterVs + perPageBarVs;
+  const mainContent = '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterVs;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_void_summary'), totalCountVs), mainContent, '', req.originalUrl, req.session.member, req, undefined, env));
 });
 
@@ -13556,11 +13646,11 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
   const sortDirFv = (q.sortDir || 'desc').toString().toLowerCase() === 'asc' ? 'asc' : 'desc';
   let dateFromFv = (q.dateFrom || '').toString().trim();
   let dateToFv = (q.dateTo || '').toString().trim();
-  const periodFv = (q.period || 'all').toString();
+  const periodFv = normalizeCrToolbarPeriod((q.period || 'all').toString());
   const searchKwFv = (q.search || '').toString().trim();
   const searchFieldFv = (q.searchField || 'all').toString();
   const forceRefundRowStatusFilter = (q.forceRefundRowStatus || 'all').toString();
-  const perPageFv = Math.max(10, Math.min(100, parseInt(q.perPage, 10) || 25));
+  const perPageFv = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const pageFv = Math.max(1, parseInt(q.page, 10) || 1);
   const chillTzFv = (cfgFr && cfgFr.timezone) ? String(cfgFr.timezone).trim() : 'Asia/Bangkok';
   const toYmdFv = (d) => {
@@ -13639,7 +13729,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     }
     return null;
   };
-  if (!dateFromFv && !dateToFv && periodFv && periodFv !== 'all') {
+  if (periodFv && periodFv !== 'all') {
     const r = calcPresetRangeFv(periodFv);
     if (r && r.startDate && r.endDate) {
       dateFromFv = r.startDate;
@@ -13647,14 +13737,9 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     }
   }
   if (dateFromFv || dateToFv) {
-    forceRefundList = forceRefundList.filter((log) => {
-      const iso = log.receivedAtIso || log.receivedAt;
-      const ymd = isoToYmdFv(iso);
-      if (!ymd) return false;
-      if (dateFromFv && ymd < dateFromFv) return false;
-      if (dateToFv && ymd > dateToFv) return false;
-      return true;
-    });
+    forceRefundList = forceRefundList.filter((log) =>
+      logMatchesCrVoidRefundDateRange(log, dateFromFv, dateToFv, chillTzFv, isoToYmdFv),
+    );
   }
   if (forceRefundRowStatusFilter && forceRefundRowStatusFilter !== 'all') {
     forceRefundList = forceRefundList.filter((log) => {
@@ -13764,7 +13849,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     };
     const parts = [];
     if (o.env) parts.push('env=' + encodeURIComponent(o.env));
-    if (o.perPage != null && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.perPage != null && o.perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(o.perPage));
     if (o.page != null && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     if (o.sort && o.sort !== 'time') parts.push('sort=' + encodeURIComponent(o.sort));
     if (o.sortDir && o.sortDir !== 'desc') parts.push('sortDir=' + encodeURIComponent(o.sortDir));
@@ -13818,7 +13903,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     '<input type="hidden" name="searchField" value="' + esc(searchFieldFv) + '" />' +
     '<input type="hidden" name="forceRefundRowStatus" value="' + esc(forceRefundRowStatusFilter) + '" />' +
     '<input type="hidden" name="perPage" value="' + esc(String(perPageFv)) + '" />' +
-    '<input type="hidden" name="period" value="' + esc(periodFv) + '" />' +
+    '<input type="hidden" name="period" value="all" />' +
     '<input type="date" name="dateFrom" value="' + esc(dateFromFv) + '" class="tx-date-input" /><span class="tx-date-sep">~</span><input type="date" name="dateTo" value="' + esc(dateToFv) + '" class="tx-date-input" /><button type="submit" class="tx-date-btn">' + esc(t(locale, 'tx_apply')) + '</button></form>';
   const fvSearchForm =
     '<form method="get" action="' + baseUrlFv + '" style="display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px;">' +
@@ -13835,13 +13920,13 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     '<select name="forceRefundRowStatus" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;">' + fvStatusFilterOptions + '</select>' +
     '<button type="submit" style="padding:2px 6px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:3px;cursor:pointer;">' + esc(t(locale, 'common_search')) + '</button></form>';
   const forceRefundToolbarHtml = '<div class="tx-toolbar">' + fvSortLinks + fvSortDirLinks + '<span class="tx-toolbar-sep">|</span>' + fvPeriodLinks + fvDateForm + '<span class="tx-toolbar-sep">|</span>' + fvSearchForm + '</div>';
-  const pageLinksFv = [];
-  for (let i = 1; i <= totalPagesFv; i++) {
-    pageLinksFv.push('<a href="' + baseUrlFv + qsFv({ page: i }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (i === pageNumFv ? '#2563eb' : '#e5e7eb') + ';color:' + (i === pageNumFv ? '#fff' : '#374151') + ';">' + i + '</a>');
-  }
-  const paginationCenterFv = totalPagesFv > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinksFv.join('') + '</div>' : '';
-  const perPageOptionsFv = [10, 25, 50, 100].map((n) => '<a href="' + baseUrlFv + qsFv({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPageFv === n ? '#059669' : '#e5e7eb') + ';color:' + (perPageFv === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
-  const perPageBarFv = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptionsFv + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCountFv + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
+  const listPagerFooterFv = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountFv,
+    totalPages: totalPagesFv,
+    pageNum: pageNumFv,
+    perPage: perPageFv,
+    hrefFor: (o) => baseUrlFv + qsFv(o),
+  });
   const confirmForceRefund = (t(locale, 'cr_confirm_force_refund') || '강제환불(환불거래 종료 후 추가 환불)을 진행할까요?').replace(/'/g, "\\'").replace(/"/g, '&quot;');
   const confirmForceRefund2 = (t(locale, 'cr_confirm_force_refund_second') || '정말 승인하시겠습니까? ChillPay 환불 요청 후 가맹점과 전산에 환불 노티가 전송됩니다.').replace(/'/g, "\\'").replace(/"/g, '&quot;');
   const rows = displayForceRefundList.map((log) => {
@@ -13896,7 +13981,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     (t(locale, 'cr_force_refund_desc') || '환불거래 기간이 끝난 뒤, 환경설정의 강제환불 가능 기간(일) 안에서만 추가 환불이 가능합니다. 환불거래와 동일하게 ChillPay 환불 API 호출 후 가맹점·전산에 노티를 보냅니다.').replace(/</g, '&lt;') +
     '</p>';
   const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_transaction_id') + '</th><th>' + t(locale, 'cr_th_order_no') + '</th><th>' + t(locale, 'cr_th_amount') + '</th><th>' + t(locale, 'cr_th_amount_display') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + (t(locale, 'cr_btn_force_refund') || '강제환불') + '</th></tr></thead>';
-  const tableContent = descHtml + forceRefundToolbarHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + paginationCenterFv + perPageBarFv;
+  const tableContent = descHtml + forceRefundToolbarHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterFv;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_force_refund') || '강제환불', totalCountFv), tableContent, alertHtml, req.originalUrl, req.session.member, req, undefined, env));
 });
 
@@ -13962,7 +14047,7 @@ app.get('/admin/cancel-refund/void-deleted-list', requireAuth, requirePage('cr_v
       return tid !== '' && allowedTargetIdsVoidDel.includes(tid);
     });
   }
-  const perPageVd = Math.max(10, Math.min(100, parseInt(q.perPage, 10) || 25));
+  const perPageVd = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const pageVd = Math.max(1, parseInt(q.page, 10) || 1);
   const totalCountVd = filtered.length;
   const totalPagesVd = Math.max(1, Math.ceil(totalCountVd / perPageVd));
@@ -13973,17 +14058,17 @@ app.get('/admin/cancel-refund/void-deleted-list', requireAuth, requirePage('cr_v
     const o = { env, perPage: perPageVd, page: pageNumVd, ...overrides };
     const parts = [];
     if (o.env) parts.push('env=' + encodeURIComponent(o.env));
-    if (o.perPage != null && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.perPage != null && o.perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(o.perPage));
     if (o.page != null && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     return parts.length ? '?' + parts.join('&') : '';
   };
-  const pageLinksVd = [];
-  for (let i = 1; i <= totalPagesVd; i++) {
-    pageLinksVd.push('<a href="' + baseUrlVd + qsVd({ page: i }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (i === pageNumVd ? '#2563eb' : '#e5e7eb') + ';color:' + (i === pageNumVd ? '#fff' : '#374151') + ';">' + i + '</a>');
-  }
-  const paginationCenterVd = totalPagesVd > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinksVd.join('') + '</div>' : '';
-  const perPageOptionsVd = [10, 25, 50, 100].map((n) => '<a href="' + baseUrlVd + qsVd({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPageVd === n ? '#059669' : '#e5e7eb') + ';color:' + (perPageVd === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
-  const perPageBarVd = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptionsVd + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCountVd + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
+  const listPagerFooterVd = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountVd,
+    totalPages: totalPagesVd,
+    pageNum: pageNumVd,
+    perPage: perPageVd,
+    hrefFor: (o) => baseUrlVd + qsVd(o),
+  });
   const sourceLabel = (s) => (s === 'force_refund' ? (t(locale, 'cr_source_force_refund') || '강제환불') : s === 'force_void' ? t(locale, 'cr_source_force_void') : t(locale, 'cr_source_void'));
   const rows = displayFilteredVd.map((d) => {
     const deletedAtStr = d.deletedAtIso ? new Date(d.deletedAtIso).toLocaleString('ko-KR', { hour12: false }) : '-';
@@ -13995,7 +14080,7 @@ app.get('/admin/cancel-refund/void-deleted-list', requireAuth, requirePage('cr_v
   let listAlert = '';
   if (q.restore === 'ok') listAlert = '<div class="alert alert-ok">' + esc(t(locale, 'cr_restore_ok_msg')) + '</div>';
   if (q.restore === 'fail') listAlert = '<div class="alert alert-fail">' + esc(t(locale, 'cr_restore_fail_msg')) + '</div>';
-  const tableContent = listAlert + hint + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + paginationCenterVd + perPageBarVd;
+  const tableContent = listAlert + hint + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterVd;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'cr_void_deleted_list'), totalCountVd), tableContent, '', req.originalUrl, req.session.member, req, undefined, env));
 });
 
@@ -14098,11 +14183,11 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
   const sortDirRf = (q.sortDir || 'desc').toString().toLowerCase() === 'asc' ? 'asc' : 'desc';
   let dateFromRf = (q.dateFrom || '').toString().trim();
   let dateToRf = (q.dateTo || '').toString().trim();
-  const periodRf = (q.period || 'all').toString();
+  const periodRf = normalizeCrToolbarPeriod((q.period || 'all').toString());
   const searchKwRf = (q.search || '').toString().trim();
   const searchFieldRf = (q.searchField || 'all').toString();
   const refundRowStatusFilter = (q.refundRowStatus || 'all').toString();
-  const perPageRf = Math.max(10, Math.min(100, parseInt(q.perPage, 10) || 25));
+  const perPageRf = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const pageRf = Math.max(1, parseInt(q.page, 10) || 1);
   const chillTzRf = (cfgRefund && cfgRefund.timezone) ? String(cfgRefund.timezone).trim() : 'Asia/Bangkok';
   const toYmdRf = (d) => {
@@ -14181,7 +14266,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
     }
     return null;
   };
-  if (!dateFromRf && !dateToRf && periodRf && periodRf !== 'all') {
+  if (periodRf && periodRf !== 'all') {
     const r = calcPresetRangeRf(periodRf);
     if (r && r.startDate && r.endDate) {
       dateFromRf = r.startDate;
@@ -14189,14 +14274,9 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
     }
   }
   if (dateFromRf || dateToRf) {
-    refundList = refundList.filter((log) => {
-      const iso = log.receivedAtIso || log.receivedAt;
-      const ymd = isoToYmdRf(iso);
-      if (!ymd) return false;
-      if (dateFromRf && ymd < dateFromRf) return false;
-      if (dateToRf && ymd > dateToRf) return false;
-      return true;
-    });
+    refundList = refundList.filter((log) =>
+      logMatchesCrVoidRefundDateRange(log, dateFromRf, dateToRf, chillTzRf, isoToYmdRf),
+    );
   }
   const nowIsoRfToolbar = new Date().toISOString();
   const refundRowMeta = (log) => {
@@ -14324,7 +14404,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
     };
     const parts = [];
     if (o.env) parts.push('env=' + encodeURIComponent(o.env));
-    if (o.perPage != null && o.perPage !== 25) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.perPage != null && o.perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(o.perPage));
     if (o.page != null && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
     if (o.sort && o.sort !== 'time') parts.push('sort=' + encodeURIComponent(o.sort));
     if (o.sortDir && o.sortDir !== 'desc') parts.push('sortDir=' + encodeURIComponent(o.sortDir));
@@ -14379,7 +14459,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
     '<input type="hidden" name="searchField" value="' + esc(searchFieldRf) + '" />' +
     '<input type="hidden" name="refundRowStatus" value="' + esc(refundRowStatusFilter) + '" />' +
     '<input type="hidden" name="perPage" value="' + esc(String(perPageRf)) + '" />' +
-    '<input type="hidden" name="period" value="' + esc(periodRf) + '" />' +
+    '<input type="hidden" name="period" value="all" />' +
     '<input type="date" name="dateFrom" value="' + esc(dateFromRf) + '" class="tx-date-input" /><span class="tx-date-sep">~</span><input type="date" name="dateTo" value="' + esc(dateToRf) + '" class="tx-date-input" /><button type="submit" class="tx-date-btn">' + esc(t(locale, 'tx_apply')) + '</button></form>';
   const rfSearchForm =
     '<form method="get" action="' + baseUrlRf + '" style="display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px;">' +
@@ -14396,13 +14476,13 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
     '<select name="refundRowStatus" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;">' + rfStatusFilterOptions + '</select>' +
     '<button type="submit" style="padding:2px 6px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:3px;cursor:pointer;">' + esc(t(locale, 'common_search')) + '</button></form>';
   const refundToolbarHtml = '<div class="tx-toolbar">' + rfSortLinks + rfSortDirLinks + '<span class="tx-toolbar-sep">|</span>' + rfPeriodLinks + rfDateForm + '<span class="tx-toolbar-sep">|</span>' + rfSearchForm + '</div>';
-  const pageLinksRf = [];
-  for (let i = 1; i <= totalPagesRf; i++) {
-    pageLinksRf.push('<a href="' + baseUrlRf + qsRf({ page: i }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (i === pageNumRf ? '#2563eb' : '#e5e7eb') + ';color:' + (i === pageNumRf ? '#fff' : '#374151') + ';">' + i + '</a>');
-  }
-  const paginationCenterRf = totalPagesRf > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinksRf.join('') + '</div>' : '';
-  const perPageOptionsRf = [10, 25, 50, 100].map((n) => '<a href="' + baseUrlRf + qsRf({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPageRf === n ? '#059669' : '#e5e7eb') + ';color:' + (perPageRf === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
-  const perPageBarRf = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptionsRf + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCountRf + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
+  const listPagerFooterRf = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountRf,
+    totalPages: totalPagesRf,
+    pageNum: pageNumRf,
+    perPage: perPageRf,
+    hrefFor: (o) => baseUrlRf + qsRf(o),
+  });
   const rows = displayRefundList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
@@ -14454,7 +14534,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
     </tr>`;
   }).join('');
   const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th><th>Amount</th><th>ICOPAY</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_refund') + '</th></tr></thead>';
-  const tableContent = syncResultHtml + refundToolbarHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + paginationCenterRf + perPageBarRf + historyListHtml;
+  const tableContent = syncResultHtml + refundToolbarHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterRf + historyListHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_refund'), totalCountRf), tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
 });
 
@@ -14837,7 +14917,6 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
     reversed = reversed.filter((log) => notiHaystackPgResultLog(log, locale, logPgResult).indexOf(kw) !== -1);
   }
 
-  const allowedPerPage = [100, 200, 300, 400, 500];
   const perPage = parseAllowedPerPage(q.perPage);
   const page = Math.max(1, parseInt(q.page, 10) || 1);
   const totalCountResult = reversed.length;
@@ -14902,6 +14981,15 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       </tr>`;
     })
     .join('');
+
+  const logPagerFooterResult = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountResult,
+    totalPages: totalPagesResult,
+    pageNum: pageNumResult,
+    perPage,
+    hrefFor: (o) => '/admin/logs-result?' + buildQueryString({ ...(q || {}), ...o }),
+    rightCenterHtml: isTodayOnly ? esc(t(locale, 'logs_filter_today_all_one_page')) : undefined,
+  });
 
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
@@ -15028,27 +15116,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
           ${rows || '<tr><td colspan="14" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
-      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-        <div>
-          ${t(locale, 'tx_per_page_bar')}: 
-          ${allowedPerPage
-            .map((n) => {
-              const url = '/admin/logs-result?' + buildQueryString({ ...(q || {}), perPage: n, page: 1 });
-              const active = perPage === n;
-              return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
-            })
-            .join('')}
-          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountResult}${t(locale, 'cr_count_suffix')})
-        </div>
-        ${isTodayOnly
-          ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>'
-          : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesResult }, (_, idx) => {
-              const i = idx + 1;
-              const url = '/admin/logs-result?' + buildQueryString({ ...(q || {}), page: i, perPage });
-              const active = i === pageNumResult;
-              return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
-            }).join('')}</div>`}
-      </div>
+      ${logPagerFooterResult}
       <script>
       (function(){
         var table = document.querySelector('.logs-result-table');
@@ -18053,6 +18121,15 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
     })
     .join('');
 
+  const logPagerFooterInternal = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountInternal,
+    totalPages: totalPagesInternal,
+    pageNum: pageNumInternal,
+    perPage,
+    hrefFor: (o) => '/admin/internal?' + buildQueryString({ ...qIn, ...o }),
+    rightCenterHtml: isTodayOnly ? esc(t(locale, 'logs_filter_today_all_one_page')) : undefined,
+  });
+
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -18145,25 +18222,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
           ${rows || `<tr><td colspan="7" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
         </tbody>
       </table>
-      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-        <div>
-          ${t(locale, 'tx_per_page_bar')}: 
-          ${[100,200,300,400,500]
-            .map((n) => {
-              const url = '/admin/internal?' + buildQueryString({ ...qIn, perPage: n, page: 1 });
-              const active = perPage === n;
-              return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
-            })
-            .join('')}
-          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountInternal}${t(locale, 'cr_count_suffix')})
-        </div>
-        ${isTodayOnly ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>' : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesInternal }, (_, idx) => {
-            const i = idx + 1;
-            const url = '/admin/internal?' + buildQueryString({ ...qIn, page: i, perPage });
-            const active = i === pageNumInternal;
-            return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
-          }).join('')}</div>`}
-      </div>
+      ${logPagerFooterInternal}
       </div>
     </main>
   </div>
@@ -18296,6 +18355,15 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
     })
     .join('');
 
+  const logPagerFooterInternalResult = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountInternalResult,
+    totalPages: totalPagesInternalResult,
+    pageNum: pageNumInternalResult,
+    perPage,
+    hrefFor: (o) => '/admin/internal-result?' + buildQueryString({ ...(q || {}), ...o }),
+    rightCenterHtml: isTodayOnly ? esc(t(locale, 'logs_filter_today_all_one_page')) : undefined,
+  });
+
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -18394,25 +18462,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
           ${rows || '<tr><td colspan="11" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
-      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-        <div>
-          ${t(locale, 'tx_per_page_bar')}: 
-          ${[100,200,300,400,500]
-            .map((n) => {
-              const url = '/admin/internal-result?' + buildQueryString({ ...(q || {}), perPage: n, page: 1 });
-              const active = perPage === n;
-              return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
-            })
-            .join('')}
-          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountInternalResult}${t(locale, 'cr_count_suffix')})
-        </div>
-        ${isTodayOnly ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>' : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesInternalResult }, (_, idx) => {
-          const i = idx + 1;
-          const url = '/admin/internal-result?' + buildQueryString({ ...(q || {}), page: i, perPage });
-          const active = i === pageNumInternalResult;
-          return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
-        }).join('')}</div>`}
-      </div>
+      ${logPagerFooterInternalResult}
       </div>
     </main>
   </div>
@@ -18514,6 +18564,15 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
     })
     .join('');
 
+  const logPagerFooterDevInternal = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountDevInternal,
+    totalPages: totalPagesDevInternal,
+    pageNum: pageNumDevInternal,
+    perPage: perPageDev,
+    hrefFor: (o) => '/admin/dev-internal?' + buildQueryString({ ...qDev, ...o }),
+    rightCenterHtml: isTodayOnlyDev ? esc(t(locale, 'logs_filter_today_all_one_page')) : undefined,
+  });
+
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -18605,51 +18664,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
           ${rows || `<tr><td colspan="6" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
         </tbody>
       </table>
-      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-        <div>
-          ${t(locale, 'tx_per_page_bar')}: 
-          ${[100, 200, 300, 400, 500]
-            .map((n) => {
-              const url = '/admin/dev-internal?' + buildQueryString({ ...qDev, perPage: n, page: 1 });
-              const active = perPageDev === n;
-              return (
-                '<a href="' +
-                url +
-                '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' +
-                (active ? '#059669' : '#e5e7eb') +
-                ';color:' +
-                (active ? '#fff' : '#374151') +
-                ';">' +
-                n +
-                '</a>'
-              );
-            })
-            .join('')}
-          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountDevInternal}${t(locale, 'cr_count_suffix')})
-        </div>
-        ${
-          isTodayOnlyDev
-            ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>'
-            : '<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">' +
-              Array.from({ length: totalPagesDevInternal }, (_, idx) => {
-                const i = idx + 1;
-                const url = '/admin/dev-internal?' + buildQueryString({ ...qDev, page: i, perPage: perPageDev });
-                const active = i === pageNumDevInternal;
-                return (
-                  '<a href="' +
-                  url +
-                  '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' +
-                  (active ? '#2563eb' : '#e5e7eb') +
-                  ';color:' +
-                  (active ? '#fff' : '#374151') +
-                  ';">' +
-                  i +
-                  '</a>'
-                );
-              }).join('') +
-              '</div>'
-        }
-      </div>
+      ${logPagerFooterDevInternal}
       </div>
     </main>
   </div>
@@ -18775,6 +18790,15 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
     })
     .join('');
 
+  const logPagerFooterDevResult = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountDevResult,
+    totalPages: totalPagesDevResult,
+    pageNum: pageNumDevResult,
+    perPage,
+    hrefFor: (o) => '/admin/dev-internal-result?' + buildQueryString({ ...(q || {}), ...o }),
+    rightCenterHtml: isTodayOnly ? esc(t(locale, 'logs_filter_today_all_one_page')) : undefined,
+  });
+
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -18870,25 +18894,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
           ${rows || '<tr><td colspan="8" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
-      <div style="margin-top:10px;font-size:12px;color:#4b5563;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-        <div>
-          ${t(locale, 'tx_per_page_bar')}: 
-          ${[100,200,300,400,500]
-            .map((n) => {
-              const url = '/admin/dev-internal-result?' + buildQueryString({ ...(q || {}), perPage: n, page: 1 });
-              const active = perPage === n;
-              return '<a href="' + url + '" style="margin:0 4px;padding:4px 8px;border-radius:6px;text-decoration:none;background:' + (active ? '#059669' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + n + '</a>';
-            })
-            .join('')}
-          ${t(locale, 'cr_count_suffix')} (${t(locale, 'tx_per_page_total')} ${totalCountDevResult}${t(locale, 'cr_count_suffix')})
-        </div>
-        ${isTodayOnly ? '<div style="flex:1;text-align:center;">' + esc(t(locale, 'logs_filter_today_all_one_page')) + '</div>' : `<div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;align-items:center;">${Array.from({ length: totalPagesDevResult }, (_, idx) => {
-          const i = idx + 1;
-          const url = '/admin/dev-internal-result?' + buildQueryString({ ...(q || {}), page: i, perPage });
-          const active = i === pageNumDevResult;
-          return '<a href="' + url + '" style="padding:4px 8px;font-size:12px;border-radius:6px;text-decoration:none;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';">' + i + '</a>';
-        }).join('')}</div>`}
-      </div>
+      ${logPagerFooterDevResult}
       </div>
     </main>
   </div>
