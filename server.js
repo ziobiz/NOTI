@@ -947,7 +947,7 @@ function saveJsonConfig(filePath, value) {
 }
 
 // ========== 전산 노티 대상 설정 (internal targets) ==========
-// id -> { id, name, callbackUrl, resultUrl, pgProvider?: chillpay|jpay, linkedMid?: string }
+// id -> { id, name, callbackUrl, resultUrl, devCallbackUrl?, devResultUrl?, pgProvider?: chillpay|jpay, linkedMid?: string }
 /** ChillPay 전산 연결 MID 기본값(설정 Production Mid 가 없을 때) */
 const CHILLPAY_INTERNAL_LINKED_MID = 'M035594';
 
@@ -1009,6 +1009,8 @@ function loadInternalTargets() {
         name: v.name || '',
         callbackUrl: v.callbackUrl || '',
         resultUrl: v.resultUrl || '',
+        devCallbackUrl: String(v.devCallbackUrl || '').trim(),
+        devResultUrl: String(v.devResultUrl || '').trim(),
         pgProvider: pg,
         linkedMid,
       };
@@ -1025,6 +1027,8 @@ function loadInternalTargets() {
         name: 'Ontheline HQ JPY',
         callbackUrl: 'https://api.soonpay.co.kr/noti/CHILL/FXHJ',
         resultUrl: 'https://api.soonpay.co.kr/noti/CHILL/FXHJ',
+        devCallbackUrl: '',
+        devResultUrl: '',
         pgProvider: 'chillpay',
         linkedMid: getChillpayProductionMidForInternalLinked(),
       },
@@ -1036,6 +1040,8 @@ function loadInternalTargets() {
         name: 'Ontheline HQ USD',
         callbackUrl: 'https://api.soonpay.co.kr/noti/CHILL/FXHU',
         resultUrl: 'https://api.soonpay.co.kr/noti/CHILL/FXHU',
+        devCallbackUrl: '',
+        devResultUrl: '',
         pgProvider: 'chillpay',
         linkedMid: getChillpayProductionMidForInternalLinked(),
       },
@@ -1047,6 +1053,8 @@ function loadInternalTargets() {
         name: 'Ontheline JP JPY',
         callbackUrl: 'https://api.soonpay.co.kr/noti/CHILL/JHJ',
         resultUrl: 'https://api.soonpay.co.kr/noti/CHILL/JHJ',
+        devCallbackUrl: '',
+        devResultUrl: '',
         pgProvider: 'chillpay',
         linkedMid: getChillpayProductionMidForInternalLinked(),
       },
@@ -1058,6 +1066,8 @@ function loadInternalTargets() {
         name: 'Ontheline JP USD',
         callbackUrl: 'https://api.soonpay.co.kr/noti/CHILL/JHU',
         resultUrl: 'https://api.soonpay.co.kr/noti/CHILL/JHU',
+        devCallbackUrl: '',
+        devResultUrl: '',
         pgProvider: 'chillpay',
         linkedMid: getChillpayProductionMidForInternalLinked(),
       },
@@ -1120,6 +1130,30 @@ function findInternalTargetUrl(internalTargetId, kind) {
   return t.callbackUrl;
 }
 
+/** 개발 전산(신서버) 전용 URL. 비어 있으면 null — 운영 URL로의 폴백은 호출부에서 처리 */
+function findDevInternalTargetUrl(internalTargetId, kind) {
+  if (!internalTargetId) return null;
+  const t = INTERNAL_TARGETS.get(internalTargetId);
+  if (!t) return null;
+  const dcb = String(t.devCallbackUrl || '').trim();
+  const drs = String(t.devResultUrl || '').trim();
+  if (kind === 'result') {
+    if (drs) return drs;
+    if (dcb) return dcb;
+    return null;
+  }
+  if (dcb) return dcb;
+  return null;
+}
+
+function resolveMerchantDevInternalUrl(merchant, kind) {
+  if (!merchant) return null;
+  let u = merchant.internalTargetId ? findDevInternalTargetUrl(merchant.internalTargetId, kind) : null;
+  if (!u && merchant.internalTargetId) u = findInternalTargetUrl(merchant.internalTargetId, kind);
+  if (!u && INTERNAL_NOTI_URL) u = INTERNAL_NOTI_URL;
+  return u || null;
+}
+
 function maskJpayKeyForDisplay(key) {
   const s = String(key || '');
   if (!s) return '-';
@@ -1137,10 +1171,30 @@ function getInternalTargetsList() {
   const loaded = loadJsonConfig(INTERNAL_TARGETS_CONFIG_PATH, null);
   if (loaded && typeof loaded === 'object') {
     if (Array.isArray(loaded)) {
-      const list = loaded.filter((t) => t && typeof t === 'object').map((t) => ({ id: t.id || '', name: t.name || t.id || '', callbackUrl: t.callbackUrl || '', resultUrl: t.resultUrl || '' }));
+      const list = loaded
+        .filter((t) => t && typeof t === 'object')
+        .map((t) => ({
+          id: t.id || '',
+          name: t.name || t.id || '',
+          callbackUrl: t.callbackUrl || '',
+          resultUrl: t.resultUrl || '',
+          devCallbackUrl: String(t.devCallbackUrl || '').trim(),
+          devResultUrl: String(t.devResultUrl || '').trim(),
+        }));
       if (list.length) return list;
     } else {
-      const list = Object.entries(loaded).map(([k, v]) => (v && typeof v === 'object' ? { id: v.id || k, name: v.name || v.id || k, callbackUrl: v.callbackUrl || '', resultUrl: v.resultUrl || '' } : { id: k, name: k, callbackUrl: '', resultUrl: '' }));
+      const list = Object.entries(loaded).map(([k, v]) =>
+        v && typeof v === 'object'
+          ? {
+              id: v.id || k,
+              name: v.name || v.id || k,
+              callbackUrl: v.callbackUrl || '',
+              resultUrl: v.resultUrl || '',
+              devCallbackUrl: String(v.devCallbackUrl || '').trim(),
+              devResultUrl: String(v.devResultUrl || '').trim(),
+            }
+          : { id: k, name: k, callbackUrl: '', resultUrl: '', devCallbackUrl: '', devResultUrl: '' },
+      );
       if (list.length) return list;
     }
   }
@@ -5124,13 +5178,7 @@ async function handleNotiRequest(routeKey, req, res) {
   if (enableDevInternal) {
     try {
       const devPayload = transformForDevInternal(body, merchant);
-      let devUrl = null;
-      if (merchant.internalTargetId) {
-        devUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
-      }
-      if (!devUrl && INTERNAL_NOTI_URL) {
-        devUrl = INTERNAL_NOTI_URL;
-      }
+      const devUrl = resolveMerchantDevInternalUrl(merchant, kind);
 
       if (!devUrl) {
         console.log('[개발 전산 전송 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
@@ -5162,8 +5210,7 @@ async function handleNotiRequest(routeKey, req, res) {
     } catch (err) {
       console.error('[개발 전산 전송 실패]', err.message);
       let failUrl = devInternalTargetUrl;
-      if (!failUrl && merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
-      if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
+      if (!failUrl) failUrl = resolveMerchantDevInternalUrl(merchant, kind) || '';
       let failPayload = body;
       try {
         failPayload = transformForDevInternal(body, merchant);
@@ -5458,13 +5505,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   let devInternalTargetUrl = '';
   if (enableDevInternal) {
     try {
-      let devUrl = null;
-      if (merchant.internalTargetId) {
-        devUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
-      }
-      if (!devUrl && INTERNAL_NOTI_URL) {
-        devUrl = INTERNAL_NOTI_URL;
-      }
+      const devUrl = resolveMerchantDevInternalUrl(merchant, kind);
       if (!devUrl) {
         console.log('[JPAY 개발 전산 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
       } else if (sameJpayNotifyUrl(devUrl, internalTargetUrl)) {
@@ -5498,8 +5539,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
     } catch (err) {
       console.error('[JPAY 개발 전산 전송 실패]', err.message);
       let failUrl = devInternalTargetUrl;
-      if (!failUrl && merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
-      if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
+      if (!failUrl) failUrl = resolveMerchantDevInternalUrl(merchant, kind) || '';
       appendDevInternalLog({
         storedAt: new Date().toISOString(),
         merchantId,
@@ -15096,6 +15136,8 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
   const formNameVal = editTarget ? escAttr(editTarget.name) : '';
   const formCbVal = editTarget ? escAttr(editTarget.callbackUrl) : '';
   const formResVal = editTarget ? escAttr(editTarget.resultUrl || '') : '';
+  const formDevCbVal = editTarget ? escAttr(editTarget.devCallbackUrl || '') : '';
+  const formDevResVal = editTarget ? escAttr(editTarget.devResultUrl || '') : '';
   const pgIsJpay = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'jpay');
   const idReadonlyAttr = editTarget ? ' readonly style="background:#e5e7eb;color:#374151;cursor:not-allowed;"' : '';
   const editInvalidAlert =
@@ -15119,12 +15161,14 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
           ? escCell(getChillpayProductionMidForInternalLinked())
           : escCell((target.linkedMid || '').trim() || '-');
       return `<tr>
-          <td>${escCell(target.id)}</td>
-          <td>${escCell(target.name)}</td>
-          <td>${escCell(pgLabel)}</td>
-          <td>${linkCell}</td>
-          <td style="word-break:break-all;text-align:left;">${escCell(target.callbackUrl)}</td>
-          <td style="word-break:break-all;text-align:left;">${escCell(target.resultUrl || '')}</td>
+          <td class="cell-compact">${escCell(target.id)}</td>
+          <td class="cell-compact">${escCell(target.name)}</td>
+          <td class="cell-compact">${escCell(pgLabel)}</td>
+          <td class="cell-compact">${linkCell}</td>
+          <td class="cell-url-one-line" title="${escAttr(target.callbackUrl)}">${escCell(target.callbackUrl)}</td>
+          <td class="cell-url-one-line" title="${escAttr(target.resultUrl || '')}">${escCell(target.resultUrl || '')}</td>
+          <td class="cell-url-one-line" title="${escAttr(target.devCallbackUrl || '')}">${escCell(target.devCallbackUrl || '')}</td>
+          <td class="cell-url-one-line" title="${escAttr(target.devResultUrl || '')}">${escCell(target.devResultUrl || '')}</td>
           <td class="actions-cell">
             <div class="internal-target-actions">
             <a href="/admin/internal-targets?edit=${encodeURIComponent(String(target.id))}" class="btn-internal-target-edit">${escCell(
@@ -15153,6 +15197,27 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 14px; }
     th { background: #e5f0ff; text-align: center; }
     td { text-align: center; }
+    table.internal-targets-list { table-layout: fixed; }
+    table.internal-targets-list th { font-size: 12px; padding: 6px 6px; line-height: 1.25; }
+    table.internal-targets-list td.cell-url-one-line {
+      font-size: 11px;
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-align: left;
+      vertical-align: middle;
+      padding: 5px 6px;
+    }
+    table.internal-targets-list td.cell-compact {
+      font-size: 11px;
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: middle;
+      padding: 5px 6px;
+    }
     tr:nth-child(even) { background:#f9fafb; }
     .actions-cell { text-align:center; vertical-align:middle; }
     .internal-target-actions { display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:nowrap; }
@@ -15232,6 +15297,9 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         <p class="admin-page-desc">${t(locale, 'internal_targets_linked_mid_hint')}</p>
         <label>${t(locale, 'internal_targets_callback_url')}<input type="text" name="callbackUrl" required value="${formCbVal}" /></label>
         <label>${t(locale, 'internal_targets_result_url')}<input type="text" name="resultUrl" value="${formResVal}" /></label>
+        <p class="admin-page-desc">${t(locale, 'internal_targets_dev_urls_hint')}</p>
+        <label>${t(locale, 'internal_targets_dev_callback_url')}<input type="text" name="devCallbackUrl" value="${formDevCbVal}" placeholder="https://..." /></label>
+        <label>${t(locale, 'internal_targets_dev_result_url')}<input type="text" name="devResultUrl" value="${formDevResVal}" placeholder="https://..." /></label>
         <button type="submit">${t(locale, 'common_save')}</button>
       </form>
       <script>
@@ -15254,7 +15322,18 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
     </div>
     <div class="card">
       <h2>${t(locale, 'internal_targets_list')}</h2>
-      <table>
+      <table class="internal-targets-list">
+        <colgroup>
+          <col style="width:9%" />
+          <col style="width:11%" />
+          <col style="width:7%" />
+          <col style="width:9%" />
+          <col style="width:16%" />
+          <col style="width:16%" />
+          <col style="width:16%" />
+          <col style="width:16%" />
+          <col style="width:120px" />
+        </colgroup>
         <thead>
           <tr>
             <th>ID</th>
@@ -15263,11 +15342,13 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
             <th>${t(locale, 'internal_targets_linked_mid')}</th>
             <th>${t(locale, 'internal_targets_callback_url')}</th>
             <th>${t(locale, 'internal_targets_result_url')}</th>
+            <th>${t(locale, 'internal_targets_dev_callback_url')}</th>
+            <th>${t(locale, 'internal_targets_dev_result_url')}</th>
             <th class="actions-cell">${t(locale, 'internal_targets_manage')}</th>
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="7" style="text-align:center;color:#777;">${t(locale, 'internal_targets_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="9" style="text-align:center;color:#777;">${t(locale, 'internal_targets_empty')}</td></tr>`}
         </tbody>
       </table>
       </div>
@@ -15849,7 +15930,7 @@ app.post('/admin/internal-noti-settings', requireAuth, requirePage('internal_not
 
 app.post('/admin/internal-targets', requireAuth, requirePage('internal_targets'), (req, res) => {
   const locale = getLocale(req);
-  const { id: rawId, name, callbackUrl, resultUrl, pgProvider, linkedMid: rawLinkedMid } = req.body;
+  const { id: rawId, name, callbackUrl, resultUrl, devCallbackUrl, devResultUrl, pgProvider, linkedMid: rawLinkedMid } = req.body;
   const id = (rawId || '').toString().trim();
   const pg = (pgProvider || '').toString().trim().toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
   const jpayMidPick = (rawLinkedMid || '').toString().trim();
@@ -15882,6 +15963,8 @@ app.post('/admin/internal-targets', requireAuth, requirePage('internal_targets')
     name,
     callbackUrl,
     resultUrl: resultUrl || '',
+    devCallbackUrl: String(devCallbackUrl || '').trim(),
+    devResultUrl: String(devResultUrl || '').trim(),
     pgProvider: pg,
     linkedMid,
   });
