@@ -1362,6 +1362,9 @@ const DEFAULT_ROUTE_NO_MODE = { '392': 'current', '840': 'current', '410': 'curr
 const DEFAULT_CUSTOMER_ID_MODE = { '392': 'current', '840': 'current', '410': 'current', '764': 'current' };
 const DEFAULT_ORIGINAL = { '392': false, '840': false, '410': false, '764': false };
 const DEFAULT_CUSTOMER_NAME_MODE = { '392': 'format', '840': 'format', '410': 'format', '764': 'format' }; // 'format' | 'none'
+/** 개발 전산 노티 전용: On이면 페이로드에 고정 MerchantCode 삽입 */
+const DEFAULT_DEV_MERCHANT_CODE_MODE = { '392': 'off', '840': 'off', '410': 'off', '764': 'off' }; // 'on' | 'off'
+const DEV_INTERNAL_FIXED_MERCHANT_CODE = 'M035594';
 
 function cloneDefaultInternalNotiProfile() {
   return {
@@ -1395,6 +1398,26 @@ function normalizeInternalNotiProfile(p) {
     customerIdMode: { ...base.customerIdMode, ...(p.customerIdMode && typeof p.customerIdMode === 'object' ? p.customerIdMode : {}) },
     customerNameMode: { ...base.customerNameMode, ...(p.customerNameMode && typeof p.customerNameMode === 'object' ? p.customerNameMode : {}) },
     original: { ...base.original, ...(p.original && typeof p.original === 'object' ? p.original : {}) },
+  };
+}
+
+function cloneDefaultDevInternalNotiProfile() {
+  return {
+    ...cloneDefaultInternalNotiProfile(),
+    merchantCodeMode: { ...DEFAULT_DEV_MERCHANT_CODE_MODE },
+  };
+}
+
+function normalizeDevInternalNotiProfile(p) {
+  const base = cloneDefaultDevInternalNotiProfile();
+  if (!p || typeof p !== 'object') return base;
+  const inner = normalizeInternalNotiProfile(p);
+  return {
+    ...inner,
+    merchantCodeMode: {
+      ...base.merchantCodeMode,
+      ...(p.merchantCodeMode && typeof p.merchantCodeMode === 'object' ? p.merchantCodeMode : {}),
+    },
   };
 }
 
@@ -1593,19 +1616,19 @@ function loadDevInternalNotiRoot() {
   const loaded = loadJsonConfig(DEV_INTERNAL_NOTI_SETTINGS_PATH, null);
   if (loaded && loaded.chillpay && loaded.jpay && typeof loaded.chillpay === 'object' && typeof loaded.jpay === 'object') {
     return {
-      chillpay: normalizeInternalNotiProfile(loaded.chillpay),
-      jpay: normalizeInternalNotiProfile(loaded.jpay),
+      chillpay: normalizeDevInternalNotiProfile(loaded.chillpay),
+      jpay: normalizeDevInternalNotiProfile(loaded.jpay),
     };
   }
   if (loaded && typeof loaded === 'object' && loaded.amountRules && typeof loaded.amountRules === 'object') {
     return {
-      chillpay: normalizeInternalNotiProfile(loaded),
-      jpay: cloneDefaultInternalNotiProfile(),
+      chillpay: normalizeDevInternalNotiProfile(loaded),
+      jpay: cloneDefaultDevInternalNotiProfile(),
     };
   }
   return {
-    chillpay: cloneDefaultInternalNotiProfile(),
-    jpay: cloneDefaultInternalNotiProfile(),
+    chillpay: cloneDefaultDevInternalNotiProfile(),
+    jpay: cloneDefaultDevInternalNotiProfile(),
   };
 }
 
@@ -1617,7 +1640,7 @@ function persistDevInternalNotiRoot(root) {
 function loadDevInternalNotiSettingsFull(pg) {
   const key = pg === 'jpay' ? 'jpay' : 'chillpay';
   const root = loadDevInternalNotiRoot();
-  return normalizeInternalNotiProfile(root[key]);
+  return normalizeDevInternalNotiProfile(root[key]);
 }
 
 function loadDevInternalNotiSettings() {
@@ -1631,18 +1654,19 @@ function saveDevInternalNotiSettings(fullOrAmountRules, pgKey) {
   ensureConfigDir();
   const pg = pgKey === 'jpay' ? 'jpay' : 'chillpay';
   const root = loadDevInternalNotiRoot();
-  const current = root[pg];
+  const currentNorm = normalizeDevInternalNotiProfile(root[pg]);
   const isFull =
     fullOrAmountRules && typeof fullOrAmountRules === 'object' && fullOrAmountRules.amountRules !== undefined;
-  const full = isFull ? fullOrAmountRules : { amountRules: fullOrAmountRules || current.amountRules };
+  const full = isFull ? fullOrAmountRules : { amountRules: fullOrAmountRules || currentNorm.amountRules };
   const toSave = {
-    amountRules: full.amountRules || current.amountRules,
-    routeNoMode: full.routeNoMode || current.routeNoMode,
-    customerIdMode: full.customerIdMode || current.customerIdMode,
-    customerNameMode: full.customerNameMode || current.customerNameMode,
-    original: full.original !== undefined ? full.original : current.original,
+    amountRules: full.amountRules || currentNorm.amountRules,
+    routeNoMode: full.routeNoMode || currentNorm.routeNoMode,
+    customerIdMode: full.customerIdMode || currentNorm.customerIdMode,
+    customerNameMode: full.customerNameMode || currentNorm.customerNameMode,
+    original: full.original !== undefined ? full.original : currentNorm.original,
+    merchantCodeMode: full.merchantCodeMode !== undefined ? full.merchantCodeMode : currentNorm.merchantCodeMode,
   };
-  root[pg] = normalizeInternalNotiProfile(toSave);
+  root[pg] = normalizeDevInternalNotiProfile(toSave);
   persistDevInternalNotiRoot(root);
 }
 
@@ -4623,6 +4647,8 @@ function transformForDevInternal(original, merchant, options) {
     customerName = `ON:${origOrderNo} / ID:${origCustomerId}`;
   }
 
+  const merchantCodeMode = (settings.merchantCodeMode && settings.merchantCodeMode[currency]) || 'off';
+
   const payload = {
     TransactionId: original.TransactionId,
     Amount: amount,
@@ -4636,12 +4662,13 @@ function transformForDevInternal(original, merchant, options) {
     PaymentDescription: original.PaymentDescription || '',
     CreditCardToken: original.CreditCardToken || '',
     Currency: original.Currency,
-    CustomerName: original.CustomerName || '',
+    CustomerName: customerName,
     CardNumber: '000000000000',
     CheckSum: original.CheckSum || '',
   };
   if (routeNoMode !== 'delete') payload.RouteNo = routeNo;
   if (customerIdMode !== 'delete') payload.CustomerId = internalCustomerId;
+  if (merchantCodeMode === 'on') payload.MerchantCode = DEV_INTERNAL_FIXED_MERCHANT_CODE;
 
   return payload;
 }
@@ -15496,6 +15523,7 @@ const INTERNAL_NOTI_LEGEND_CSS = `
 function renderInternalNotiLegendHtml(locale, devPage) {
   const origKey = devPage ? 'internal_noti_li_original_dev' : 'internal_noti_li_original';
   const nameKey = devPage ? 'internal_noti_li_customer_name_dev' : 'internal_noti_li_customer_name';
+  const fieldTitleKey = devPage ? 'internal_noti_legend_field_title_dev' : 'internal_noti_legend_field_title';
   const rowAmount = (tagLabel, ruleKey) =>
     '<div class="inl-amount-line">' +
     '<span class="inl-rule-tag">' +
@@ -15520,7 +15548,7 @@ function renderInternalNotiLegendHtml(locale, devPage) {
     '</div></div>' +
     '<div class="inl-legend-block">' +
     '<div class="inl-legend-block-head">' +
-    (t(locale, 'internal_noti_legend_field_title') || '') +
+    (t(locale, fieldTitleKey) || t(locale, 'internal_noti_legend_field_title') || '') +
     '</div>' +
     '<div class="inl-field-grid">' +
     '<div class="inl-field-cell">' +
@@ -15535,6 +15563,9 @@ function renderInternalNotiLegendHtml(locale, devPage) {
     '<div class="inl-field-cell">' +
     t(locale, nameKey) +
     '</div>' +
+    (devPage
+      ? '<div class="inl-field-cell">' + t(locale, 'internal_noti_li_merchant_code_dev') + '</div>'
+      : '') +
     '</div></div>' +
     '</div>'
   );
@@ -15747,6 +15778,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
       const routeNoVal = (full.routeNoMode && full.routeNoMode[code]) || 'current';
       const customerIdVal = (full.customerIdMode && full.customerIdMode[code]) || 'current';
       const customerNameVal = (full.customerNameMode && full.customerNameMode[code]) || 'format';
+      const merchantCodeVal = (full.merchantCodeMode && full.merchantCodeMode[code]) || 'off';
       const originalChecked = full.original && full.original[code];
       return `
     <tr>
@@ -15758,6 +15790,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <input type="hidden" name="routeNo" value="${routeNoVal}" />
           <input type="hidden" name="customerId" value="${customerIdVal}" />
           <input type="hidden" name="customerName" value="${customerNameVal}" />
+          <input type="hidden" name="merchantCode" value="${merchantCodeVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
           <select name="rule" class="cell-select">${amountRuleOptions
             .map(
@@ -15776,6 +15809,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <input type="hidden" name="rule" value="${currentRule}" />
           <input type="hidden" name="customerId" value="${customerIdVal}" />
           <input type="hidden" name="customerName" value="${customerNameVal}" />
+          <input type="hidden" name="merchantCode" value="${merchantCodeVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
           <select name="routeNo" class="cell-select" title="${t(locale, 'internal_noti_route_title')}">
             <option value="current" ${routeNoVal === 'current' ? 'selected' : ''}>${t(locale, 'internal_noti_current_value')}</option>
@@ -15791,6 +15825,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <input type="hidden" name="rule" value="${currentRule}" />
           <input type="hidden" name="routeNo" value="${routeNoVal}" />
           <input type="hidden" name="customerName" value="${customerNameVal}" />
+          <input type="hidden" name="merchantCode" value="${merchantCodeVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
           <select name="customerId" class="cell-select" title="${t(locale, 'internal_noti_customer_id_title')}">
             <option value="current" ${customerIdVal === 'current' ? 'selected' : ''}>${t(locale, 'internal_noti_merchant_value')}</option>
@@ -15806,10 +15841,27 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <input type="hidden" name="rule" value="${currentRule}" />
           <input type="hidden" name="routeNo" value="${routeNoVal}" />
           <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <input type="hidden" name="merchantCode" value="${merchantCodeVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
           <select name="customerName" class="cell-select" title="${t(locale, 'internal_noti_customer_name_title')}">
             <option value="format" ${customerNameVal === 'format' ? 'selected' : ''}>${t(locale, 'on_label')}</option>
             <option value="none" ${customerNameVal === 'none' ? 'selected' : ''}>${t(locale, 'off_label')}</option>
+          </select>
+          <button type="submit" class="btn-save-row">${t(locale, 'internal_noti_save')}</button>
+        </form>
+      </td>
+      <td>
+        <form class="cell-form" method="post" action="/admin/dev-internal-noti-settings" onsubmit="return confirm('${confirmMsg}');">
+          <input type="hidden" name="pgProvider" value="${pg}" />
+          <input type="hidden" name="currency" value="${code}" />
+          <input type="hidden" name="rule" value="${currentRule}" />
+          <input type="hidden" name="routeNo" value="${routeNoVal}" />
+          <input type="hidden" name="customerId" value="${customerIdVal}" />
+          <input type="hidden" name="customerName" value="${customerNameVal}" />
+          <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
+          <select name="merchantCode" class="cell-select" title="${t(locale, 'internal_noti_merchant_code_title')}">
+            <option value="on" ${merchantCodeVal === 'on' ? 'selected' : ''}>${t(locale, 'on_label')}</option>
+            <option value="off" ${merchantCodeVal === 'off' ? 'selected' : ''}>${t(locale, 'off_label')}</option>
           </select>
           <button type="submit" class="btn-save-row">${t(locale, 'internal_noti_save')}</button>
         </form>
@@ -15822,6 +15874,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <input type="hidden" name="routeNo" value="${routeNoVal}" />
           <input type="hidden" name="customerId" value="${customerIdVal}" />
           <input type="hidden" name="customerName" value="${customerNameVal}" />
+          <input type="hidden" name="merchantCode" value="${merchantCodeVal}" />
           <label class="cell-label"><input type="checkbox" name="original" ${originalChecked ? 'checked' : ''} value="on" /> ${t(locale, 'internal_noti_original')}</label>
           <button type="submit" class="btn-save-row">${t(locale, 'internal_noti_save')}</button>
         </form>
@@ -15894,6 +15947,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
                 <th>RouteNo</th>
                 <th>CustomerId</th>
                 <th>CustomerName</th>
+                <th>${t(locale, 'internal_noti_th_merchant_code')}</th>
                 <th>${t(locale, 'internal_noti_original')}</th>
               </tr>
             </thead>
@@ -15922,6 +15976,8 @@ app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inte
     full.customerIdMode[currency] = cid === 'delete' ? 'delete' : 'current';
     const cn = (req.body.customerName || 'format').trim();
     full.customerNameMode[currency] = cn === 'none' ? 'none' : 'format';
+    const mc = (req.body.merchantCode || 'off').trim();
+    full.merchantCodeMode[currency] = mc === 'on' ? 'on' : 'off';
     full.original[currency] = req.body.original === 'on';
     saveDevInternalNotiSettings(full, pgSel);
     if (typeof appendConfigChangeLog === 'function') {
@@ -15933,7 +15989,14 @@ app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inte
           (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
           req.ip ||
           '',
-        payload: { currency, rule: req.body.rule, routeNo: req.body.routeNo, customerId: req.body.customerId, original: req.body.original },
+        payload: {
+          currency,
+          rule: req.body.rule,
+          routeNo: req.body.routeNo,
+          customerId: req.body.customerId,
+          merchantCode: req.body.merchantCode,
+          original: req.body.original,
+        },
       });
     }
   } else {
@@ -15941,6 +16004,7 @@ app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inte
     const routeNoMode = {};
     const customerIdMode = {};
     const customerNameMode = {};
+    const merchantCodeMode = {};
     const original = {};
     CURRENCY_CODES.forEach((code) => {
       let r = (req.body['rule_' + code] || '=').trim() || '=';
@@ -15952,6 +16016,8 @@ app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inte
       customerIdMode[code] = cid === 'delete' ? 'delete' : 'current';
       const cn = (req.body['customerName_' + code] || 'format').trim();
       customerNameMode[code] = cn === 'none' ? 'none' : 'format';
+      const mc = (req.body['merchantCode_' + code] || 'off').trim();
+      merchantCodeMode[code] = mc === 'on' ? 'on' : 'off';
       original[code] = req.body['original_' + code] === 'on';
     });
     saveDevInternalNotiSettings({
@@ -15959,18 +16025,19 @@ app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inte
       routeNoMode,
       customerIdMode,
       customerNameMode,
+      merchantCodeMode,
       original,
     }, pgSel);
     if (typeof appendConfigChangeLog === 'function') {
       appendConfigChangeLog({
         action: 'dev_internal_noti_settings',
-        detail: '개발 노티 설정 변경 (금액/RouteNo/CustomerId/오리지널)',
+        detail: '개발 노티 설정 변경 (금액/RouteNo/CustomerId/MerchantCode/오리지널)',
         actor: req.session.adminUser || 'unknown',
         clientIp:
           (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
           req.ip ||
           '',
-        payload: { amountRules, routeNoMode, customerIdMode, original },
+        payload: { amountRules, routeNoMode, customerIdMode, merchantCodeMode, original },
       });
     }
   }
