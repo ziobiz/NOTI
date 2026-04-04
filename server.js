@@ -4204,6 +4204,13 @@ function logMatchesCrVoidRefundDateRange(log, dateFrom, dateTo, tzFallback, isoT
   return inR(payYmd) || inR(recYmd);
 }
 
+function voidRefundNotiEntryMatchesEnv(entry, env) {
+  if (!entry) return false;
+  const eEnv = String(entry.env || 'live').toLowerCase();
+  const want = String(env || 'live').toLowerCase() === 'sandbox' ? 'sandbox' : 'live';
+  return eEnv === want;
+}
+
 function getVoidRefundWindow(paymentDateOrIso, nowIso) {
   const cfg = loadChillPayTransactionConfig();
   const tz = cfg.timezone || DEFAULT_CHILLPAY_TIMEZONE;
@@ -4413,6 +4420,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
     appendVoidRefundNotiLog({
       type,
       mode: mode || 'manual',
+      voidNotiOrigin: type === 'void' ? 'relay' : undefined,
       transactionId: txIdForLog,
       orderNo: orderNoForLog,
       merchantId: log.merchantId || '',
@@ -4487,6 +4495,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
   appendVoidRefundNotiLog({
     type: type,
     mode: mode || 'manual',
+    voidNotiOrigin: type === 'void' ? 'relay' : undefined,
     transactionId: notifBodyTxId(body) || (payload.TransactionId != null ? String(payload.TransactionId) : ''),
     orderNo: notifBodyOrderNo(body) || (payload.OrderNo != null ? String(payload.OrderNo) : ''),
     merchantId: log.merchantId || '',
@@ -5206,14 +5215,16 @@ async function handleNotiRequest(routeKey, req, res) {
     console.log('[전산 전송 스킵] enableInternal=false');
   }
 
-  // ChillPay 수동 무효/수동 환불 노티 수신 시 거래노티 로그에 기록 (수동무효와 동일 적용)
+  // ChillPay 환불/취소/무효 PG 노티 수신 시 void-refund 로그에 기록 (무효내역·거래노티 구분용)
   const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
-  const isVoidNoti = ps === 2 || ps === '2' || ps === 7 || ps === '7';
   const isRefundNoti = ps === 9 || ps === '9' || ps === 8 || ps === '8';
-  if (isVoidNoti || isRefundNoti) {
+  const isCancelNoti = !isRefundNoti && isDefinitelyCancelPaymentStatus(ps);
+  const isVoidNoti = !isRefundNoti && !isCancelNoti && isDefinitelyVoidPaymentStatus(ps);
+  if (isRefundNoti || isCancelNoti || isVoidNoti) {
     appendVoidRefundNotiLog({
-      type: isRefundNoti ? 'refund' : 'void',
+      type: isRefundNoti ? 'refund' : (isCancelNoti ? 'cancel' : 'void'),
       mode: 'manual',
+      voidNotiOrigin: isVoidNoti ? 'pg_inbound' : undefined,
       transactionId: body.TransactionId != null ? String(body.TransactionId) : (body.transactionId != null ? String(body.transactionId) : ''),
       orderNo: body.OrderNo != null ? String(body.OrderNo) : (body.orderNo != null ? String(body.orderNo) : ''),
       merchantId: merchantId || '',
@@ -9482,6 +9493,9 @@ const cancelRefundLayoutCss = ADMIN_PAGE_DESC_BOX_CSS + `
   th { background: #e5f0ff; }
   .card table th, .card table td { text-align: center; vertical-align: middle; }
   tr:nth-child(even) { background:#f9fafb; }
+  .void-list-table tr.void-row-request-void-done { background:#fff1f2 !important; }
+  .void-list-table tr.void-row-request-void-done:nth-child(even) { background:#ffe4e6 !important; }
+  .void-list-table tr.void-row-request-void-done td { background:transparent !important; }
   .tx-status-fail { color: #dc2626; font-weight: 600; }
   .tx-status-success { color: #047857; font-weight: 600; }
   .tx-status-cancel { color: #6b7280; font-weight: 600; }
@@ -11254,6 +11268,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
   const rowToCells = (row, rowNo) => {
     const kind = getPgRowStatusKind(row);
     const st = pgRowStatusStyles[kind];
+    const statusCellText = kind !== 'other' ? pgFilterLabel(kind) : (row.status || '-');
     // ICOPAY = ICOPAY 전용 설정(icopay-amount-settings.json) 통화별 금액 가공 — 노티 환경설정과 동일 규칙 종류·적용식(applyAmountRule)
     const icopayVal = row.amount != null ? formatAmountWithSeparator(toIcopay(row.amount, row.currency)) : '-';
     const txIso = pgDateTimeToIsoTh(row.transactionDate);
@@ -11276,7 +11291,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
       row.totalAmount != null ? row.totalAmount : '-',
       row.currency || '-',
       row.routeNo != null ? row.routeNo : '-',
-      row.status || '-',
+      statusCellText,
       row.settled === true ? 'Y' : (row.settled === false ? 'N' : '-'),
     ];
     const statusCellIdx = 15;
@@ -12042,6 +12057,18 @@ function isDefinitelyCancelPaymentStatus(ps) {
   return ps === 2 || ps === '2' || ps === 3 || ps === '3'
     || ps === 'Cancel' || ps === 'Canceled' || ps === 'Cancelled'
     || (typeof ps === 'string' && ps.toLowerCase() === 'cancel');
+}
+
+/** ChillPay 무효(Void) 노티로 볼 값: 콜백 20/24, Transaction API 6/7. (2=취소는 제외) */
+function isDefinitelyVoidPaymentStatus(ps) {
+  if (ps == null || ps === '') return false;
+  if (ps === 20 || ps === '20' || ps === 24 || ps === '24') return true;
+  if (ps === 6 || ps === '6' || ps === 7 || ps === '7') return true;
+  if (typeof ps === 'string') {
+    const low = ps.toLowerCase();
+    if (low === 'voided' || low === 'voidsuccess' || low === 'void requested' || low === 'voidrequested') return true;
+  }
+  return false;
 }
 
 /**
@@ -13128,6 +13155,11 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
     const confirmVoid2 = confirmVoid2Msg.replace(/'/g, "\\'");
     const sentEntry = voidSentMap[String(txId).trim()];
     const alreadyVoided = !!sentEntry;
+    const highlightRequestVoidDone =
+      !!sentEntry &&
+      voidRefundNotiEntryMatchesEnv(sentEntry, env) &&
+      String(sentEntry.voidNotiOrigin || '').trim() !== 'pg_inbound';
+    const trClassAttr = highlightRequestVoidDone ? ' class="void-row-request-void-done"' : '';
     // 무효 컬럼: 이미 무효 노티를 보낸 건은 "무효완료"로 고정, 그 외에는 시간 구간에 따라 버튼/비활성 표시
     let voidHtml = '';
     if (alreadyVoided) {
@@ -13185,7 +13217,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
         + `</div>`;
     }
     const sentDt = sentEntry ? formatDateAndTimeTHJP(sentEntry.sentAtIso || sentEntry.sentAt) : { date: '-', timeTh: '-', timeJp: '-' };
-    return `<tr>
+    return `<tr${trClassAttr}>
       <td class="col-date">${esc(dt.date)}</td>
       <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
       <td class="col-date">${esc(sentDt.date)}</td>
@@ -13491,6 +13523,9 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cr_void_s
     if (type === 'void') {
       return mode === 'auto' ? 'auto_void' : 'void';
     }
+    if (type === 'cancel') {
+      return mode === 'auto' ? 'auto_cancel' : 'cancel_noti';
+    }
     if (type === 'refund') {
       return mode === 'auto' ? 'auto_refund' : 'manual_refund';
     }
@@ -13499,6 +13534,8 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cr_void_s
   const categoryLabel = (cat) => {
     if (cat === 'auto_void') return t(locale, 'void_summary_auto_void');
     if (cat === 'void') return t(locale, 'void_summary_void');
+    if (cat === 'auto_cancel') return t(locale, 'void_summary_auto_cancel');
+    if (cat === 'cancel_noti') return t(locale, 'void_summary_cancel_noti');
     if (cat === 'email_void') return t(locale, 'void_summary_email_void');
     if (cat === 'auto_refund') return t(locale, 'void_summary_auto_refund');
     if (cat === 'manual_refund') return t(locale, 'void_summary_manual_refund');
@@ -13518,7 +13555,14 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cr_void_s
       orderNo: e.orderNo || '',
       merchantId: e.merchantId || '',
       routeNo: e.routeNo || '',
-      detail: e.type === 'void' ? 'Void noti' : (e.type === 'refund' ? 'Refund noti' : (e.type || '')),
+      detail:
+        e.type === 'void'
+          ? t(locale, 'void_summary_detail_void_noti')
+          : e.type === 'cancel'
+            ? t(locale, 'void_summary_detail_cancel_noti')
+            : e.type === 'refund'
+              ? t(locale, 'void_summary_detail_refund_noti')
+              : (e.type || ''),
     });
   }
   for (const m of emailEntries) {
