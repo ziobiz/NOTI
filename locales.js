@@ -465,7 +465,8 @@ const messages = {
     test_config_label_return_url: 'ReturnUrl (PG 결제 완료 후 돌아올 URL)',
     test_config_placeholder_return_url: '예: https://tapi.soonpay.co.kr/pay/chillResult',
     test_config_label_use_result_page: '테스트결과페이지 사용하기',
-    test_config_use_result_page_desc: '체크 시: PG 결제 완료 후 우리 서버의 테스트 결과 페이지로 이동합니다. 체크 해제 시: 위 주소 입력창에 입력한 URL로 이동합니다.',
+    test_config_use_result_page_desc:
+      '체크 시: PG 결제 완료 후 우리 서버의 테스트 결과 페이지로 이동합니다. 체크 해제 시: 위 주소 입력창에 입력한 URL로 이동합니다. 체크한 설정마다 아래 Route 번호와 같은 `/noti/result/번호`(칠페이 URL Result)는 브라우저 복귀 시 가맹점이 아니라 `/noti/test-result`로만 연결되도록 예약됩니다. 이 옵션을 켠 설정이 하나도 없으면 예전과 같이 20번만 예약됩니다.',
     test_config_hint_result_url: 'ChillPay URL Result(노티 수신) 등록: {{resultUrl}}',
     test_config_hint_return_url: '(고객 리다이렉트용) Return URL 등록: {{returnUrl}}',
     test_config_list_title: '등록된 테스트 환경',
@@ -1600,7 +1601,8 @@ const messages = {
     test_config_label_return_url: 'ReturnUrl（PG決済完了後に戻るURL）',
     test_config_placeholder_return_url: '例: https://tapi.soonpay.co.kr/pay/chillResult',
     test_config_label_use_result_page: 'テスト結果ページを使用する',
-    test_config_use_result_page_desc: 'チェック時: PG決済完了後、当サーバーのテスト結果ページへ遷移します。未チェック時: 上記入力欄のURLへ遷移します。',
+    test_config_use_result_page_desc:
+      'チェック時: PG決済完了後、当サーバーのテスト結果ページへ遷移します。未チェック時: 上記入力欄のURLへ遷移します。チェックした各設定の Route 番号に対応する `/noti/result/番号`（ChillPay URL Result）は、ブラウザ復帰を `/noti/test-result` に固定します。どの設定もオフの場合は従来どおり 20 のみ予約されます。',
     test_config_hint_result_url: 'ChillPay URL Result（通知受信）登録: {{resultUrl}}',
     test_config_hint_return_url: '(顧客リダイレクト用) Return URL登録: {{returnUrl}}',
     test_config_list_title: '登録済みテスト環境',
@@ -2744,7 +2746,8 @@ const messages = {
     test_config_label_return_url: 'ReturnUrl (URL to return to after PG payment completes)',
     test_config_placeholder_return_url: 'e.g. https://tapi.soonpay.co.kr/pay/chillResult',
     test_config_label_use_result_page: 'Use test result page',
-    test_config_use_result_page_desc: 'If checked: redirect to this server’s test result page after PG payment. If unchecked: redirect to the URL entered above.',
+    test_config_use_result_page_desc:
+      'If checked: redirect to this server’s test result page after PG payment. If unchecked: redirect to the URL entered above. For each checked config, `/noti/result/<Route No>` (ChillPay URL Result) is reserved so browser returns go to `/noti/test-result` instead of a merchant URL. If none are checked, only route 20 stays reserved (backward compatible).',
     test_config_hint_result_url: 'Register ChillPay URL Result (noti receive) as: {{resultUrl}}',
     test_config_hint_return_url: 'Register Return URL (customer redirect) as: {{returnUrl}}',
     test_config_list_title: 'Registered test environments',
@@ -3873,7 +3876,8 @@ const messages = {
     test_config_placeholder_payment_api: 'เช่น https://sandbox-bankdemo3.chillpay.co/ChillCredit/...',
     test_config_placeholder_return_url: 'เช่น https://tapi.soonpay.co.kr/pay/chillResult',
     test_config_label_use_result_page: 'ใช้หน้าผลการทดสอบ',
-    test_config_use_result_page_desc: 'เมื่อเลือก: หลัง PG ชำระเงินเสร็จจะเปลี่ยนไปยังหน้าผลการทดสอบของเซิร์ฟเวอร์นี้ เมื่อไม่เลือก: จะเปลี่ยนไปยัง URL ที่กรอกไว้ด้านบน',
+    test_config_use_result_page_desc:
+      'เมื่อเลือก: หลัง PG ชำระเงินเสร็จจะเปลี่ยนไปยังหน้าผลการทดสอบของเซิร์ฟเวอร์นี้ เมื่อไม่เลือก: จะเปลี่ยนไปยัง URL ที่กรอกไว้ด้านบน แต่ละการตั้งค่าที่เลือก หมายเลข Route ด้านล่างจะสงวน `/noti/result/หมายเลข` (ChillPay URL Result) ให้เบราว์เซอร์ไป `/noti/test-result` เท่านั้น หากไม่มีรายการใดเลือก จะสงวนแค่เลข 20 เหมือนเดิม',
     test_config_hint_result_url: 'ลงทะเบียน ChillPay URL Result (รับ noti) เป็น: {{resultUrl}}',
     test_config_hint_return_url: 'ลงทะเบียน Return URL (สำหรับเปลี่ยนหน้าให้ลูกค้า) เป็น: {{returnUrl}}',
     test_config_list_title: 'สภาพแวดล้อมทดสอบที่ลงทะเบียนแล้ว',
@@ -5000,7 +5004,8 @@ const messages = {
     test_config_label_return_url: 'ReturnUrl（PG支付完成后返回的URL）',
     test_config_placeholder_return_url: '例如：https://tapi.soonpay.co.kr/pay/chillResult',
     test_config_label_use_result_page: '使用测试结果页面',
-    test_config_use_result_page_desc: '勾选时：PG支付完成后跳转到本服务器的测试结果页面。未勾选时：跳转到上方输入框中的URL。',
+    test_config_use_result_page_desc:
+      '勾选时：PG支付完成后跳转到本服务器的测试结果页面。未勾选时：跳转到上方输入框中的URL。勾选后，下方 Route 号对应的 `/noti/result/号码`（ChillPay URL Result）在浏览器回跳时固定到 `/noti/test-result`。若没有任何配置勾选，则仍仅保留 20 号（与旧版一致）。',
     test_config_hint_result_url: 'ChillPay URL Result（接收通知）注册为：{{resultUrl}}',
     test_config_hint_return_url: '（客户重定向用）Return URL 注册为：{{returnUrl}}',
     test_config_list_title: '已注册的测试环境',

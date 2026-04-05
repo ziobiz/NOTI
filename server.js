@@ -1703,6 +1703,49 @@ function saveTestConfigs() {
   saveJsonConfig(TEST_CONFIGS_CONFIG_PATH, obj);
 }
 
+/** ChillPay `/noti/result/N` 용 경로 번호(1~50). 유효하지 않으면 null */
+function normalizeChillpayPgNotiRouteNoSegment(v) {
+  const n = parseInt(String(v == null ? '' : v).trim(), 10);
+  if (!Number.isFinite(n) || n < 1 || n > 50) return null;
+  return String(n);
+}
+
+/**
+ * 테스트 환경(test-configs)에서 「테스트결과페이지 사용」이 켜진 항목의 Route 번호에 대응하는
+ * `/noti/result/N` 은 브라우저 복귀 시 `/noti/test-result` 로 고정(구 result/20 전용 동작).
+ * 예약 번호가 하나도 없으면 하위 호환으로 20만 예약.
+ */
+function getChillpayTestResultReservedRouteNos() {
+  const set = new Set();
+  try {
+    TEST_CONFIGS.forEach((cfg) => {
+      if (!cfg || !cfg.useTestResultPage) return;
+      const seg = normalizeChillpayPgNotiRouteNoSegment(cfg.routeNo);
+      if (seg) set.add(seg);
+    });
+  } catch (_) {}
+  if (set.size === 0) set.add('20');
+  return set;
+}
+
+function isChillpayTestReservedResultRouteKey(routeKey) {
+  const m = String(routeKey || '').match(/^result\/(\d+)$/);
+  if (!m) return false;
+  const seg = normalizeChillpayPgNotiRouteNoSegment(m[1]);
+  if (!seg) return false;
+  return getChillpayTestResultReservedRouteNos().has(seg);
+}
+
+/** 테스트 결제 화면·리다이렉트 테스트 입력칸 기본값 */
+function getDefaultChillpayTestResultRouteNoForUi() {
+  const nums = [...getChillpayTestResultReservedRouteNos()]
+    .map((s) => parseInt(s, 10))
+    .filter((n) => Number.isFinite(n));
+  if (!nums.length) return '20';
+  nums.sort((a, b) => a - b);
+  return String(nums[0]);
+}
+
 // ========== 가맹점 라우팅 설정 (merchantId -> { …, resultDeliveryMode?: auto|autot|no_browser_redirect|post_force_redirect }) ==========
 // routeCallbackKey / routeResultKey 는 PG에 등록할 우리 쪽 노티 URL의 마지막 경로입니다.
 // 예) PG callback URL: https://api.our-system.com/noti/rount_c1  → routeCallbackKey = 'rount_c1'
@@ -5327,7 +5370,7 @@ async function handleNotiRequest(routeKey, req, res) {
   if (shouldRedirectResultBrowser) {
     const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
     const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
-    let redirectTo = routeKey === 'result/20' ? baseUrl + '/noti/test-result' : targetUrl;
+    let redirectTo = isChillpayTestReservedResultRouteKey(routeKey) ? baseUrl + '/noti/test-result' : targetUrl;
     if (redirectTo && isOurTestReturnUrl(redirectTo, reqHost)) {
       redirectTo = baseUrl + '/noti/test-result' + (redirectTo.includes('?') ? redirectTo.slice(redirectTo.indexOf('?')) : '');
     }
@@ -5840,7 +5883,8 @@ app.get('/noti/:kind/:no', (req, res) => {
   let targetUrl = null;
   const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
   const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
-  if ((kind === 'result' && no === '20') || routeKey === 'result/20') {
+  const resultSegGet = kind === 'result' ? normalizeChillpayPgNotiRouteNoSegment(no) : null;
+  if (resultSegGet && getChillpayTestResultReservedRouteNos().has(resultSegGet)) {
     targetUrl = baseUrl + '/noti/test-result';
   }
   if (!targetUrl) {
@@ -17133,6 +17177,7 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
   const locale = getLocale(req);
   const selectedId = (req.query.configId || '').toString();
   const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
+  const defaultChillpayTestResultRoute = getDefaultChillpayTestResultRouteNoForUi();
   const testResultLinks = Array.from(TEST_CONFIGS.values())
     .filter((c) => c.useTestResultPage)
     .map(
@@ -17232,7 +17277,7 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
         <p class="admin-page-desc"><strong>${t(locale, 'test_run_merchant_result_title')}</strong></p>
         <p class="admin-page-desc">${t(locale, 'test_run_merchant_result_desc')}</p>
         <div style="display:flex;gap:8px;align-items:center;margin-top:8px;" id="result-redirect-test-form">
-          <input type="number" id="result-redirect-no" min="1" max="50" value="20" style="width:80px;padding:6px 10px;border-radius:6px;border:1px solid #d1d5db;" />
+          <input type="number" id="result-redirect-no" min="1" max="50" value="${defaultChillpayTestResultRoute.replace(/"/g, '&quot;')}" style="width:80px;padding:6px 10px;border-radius:6px;border:1px solid #d1d5db;" />
           <button type="button" id="result-redirect-go" style="padding:8px 14px;background:#0ea5e9;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;">${t(locale, 'test_run_btn_open_new')}</button>
         </div>
         <script>
@@ -17240,10 +17285,11 @@ app.get('/admin/test-pay', requireAuth, requirePage('test_run'), (req, res) => {
             var form = document.getElementById('result-redirect-test-form');
             var noInput = document.getElementById('result-redirect-no');
             var goBtn = document.getElementById('result-redirect-go');
+            var defResultNo = parseInt('${String(defaultChillpayTestResultRoute).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}', 10) || 20;
             if (form && noInput && goBtn) {
               function openResultRedirect() {
-                var no = (noInput && noInput.value) ? parseInt(noInput.value, 10) : 20;
-                if (isNaN(no) || no < 1 || no > 50) no = 20;
+                var no = (noInput && noInput.value) ? parseInt(noInput.value, 10) : defResultNo;
+                if (isNaN(no) || no < 1 || no > 50) no = defResultNo;
                 var base = '${baseUrl.replace(/'/g, "\\'")}';
                 var url = base + '/noti/result/' + no + '?OrderNo=TEST-REDIRECT&PaymentStatus=0';
                 window.open(url, '_blank', 'noopener');
@@ -17716,9 +17762,16 @@ app.get('/admin/test-pay/return', requireAuth, requirePage('test_run'), (req, re
   const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const logs = Array.isArray(NOTI_LOGS) ? NOTI_LOGS : [];
-  // 테스트 기준: ChillPay URL Result 가 /noti/result/20 인 노티만 대상으로 삼는다.
+  // 테스트 기준: 테스트 환경에서 예약된 /noti/result/N (구 result/20) 노티만 대상
+  const reservedResultRoutes = getChillpayTestResultReservedRouteNos();
   const latestTestLog = [...logs].slice().reverse().find((log) => {
-    return log && log.kind === 'result' && (log.routeKey === 'result/20' || log.routeKey === '20');
+    if (!log || log.kind !== 'result') return false;
+    const rk = log.routeKey;
+    if (rk === '20') return reservedResultRoutes.has('20');
+    const m = String(rk || '').match(/^result\/(\d+)$/);
+    if (!m) return false;
+    const seg = normalizeChillpayPgNotiRouteNoSegment(m[1]);
+    return seg ? reservedResultRoutes.has(seg) : false;
   });
   let resultTitle = t(locale, 'test_pay_title');
   let resultMessage = t(locale, 'result_no_noti_7d');
