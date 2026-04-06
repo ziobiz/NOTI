@@ -1154,6 +1154,29 @@ function resolveMerchantDevInternalUrl(merchant, kind) {
   return u || null;
 }
 
+/** 가맹점 릴레이 끔·대체=전산: 저장된 Callback/Result URL 우선, 없으면 전산 대상 설정·INTERNAL_NOTI_URL */
+function resolveRelayOffInternalUrl(merchant, kind) {
+  if (!merchant) return null;
+  const key = kind === 'result' ? 'relayOffInternalResultUrl' : 'relayOffInternalCallbackUrl';
+  const override = String(merchant[key] || '').trim();
+  if (override) return override;
+  if (merchant.internalTargetId) {
+    let u = findInternalTargetUrl(merchant.internalTargetId, kind);
+    if (!u && INTERNAL_NOTI_URL) u = INTERNAL_NOTI_URL;
+    return u || null;
+  }
+  return INTERNAL_NOTI_URL ? String(INTERNAL_NOTI_URL).trim() : null;
+}
+
+/** 가맹점 릴레이 끔·대체=개발: 저장된 Callback/Result URL 우선, 없으면 resolveMerchantDevInternalUrl */
+function resolveRelayOffDevUrl(merchant, kind) {
+  if (!merchant) return null;
+  const key = kind === 'result' ? 'relayOffDevResultUrl' : 'relayOffDevCallbackUrl';
+  const override = String(merchant[key] || '').trim();
+  if (override) return override;
+  return resolveMerchantDevInternalUrl(merchant, kind);
+}
+
 function maskJpayKeyForDisplay(key) {
   const s = String(key || '');
   if (!s) return '-';
@@ -5245,17 +5268,24 @@ async function handleNotiRequest(routeKey, req, res) {
 
   let internalDeliverySuccess = false;
   let internalTargetUrl = '';
+  const rofChill = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
+  const useRelayOffInternalUrls = !enableRelay && rofChill === 'internal';
+  const useRelayOffDevUrls = !enableRelay && rofChill === 'dev_internal';
 
   // 전산 전송 (실패해도 PG 응답에는 영향 없음) — 릴레이 끔+대체=전산 인 경우에도 동일 가공(transformForInternal)
   if (deliverChillpayInternal) {
     try {
       const internalPayload = transformForInternal(body, merchant);
       let internalUrl = null;
-      if (merchant.internalTargetId) {
-        internalUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
-      }
-      if (!internalUrl && INTERNAL_NOTI_URL) {
-        internalUrl = INTERNAL_NOTI_URL;
+      if (useRelayOffInternalUrls) {
+        internalUrl = resolveRelayOffInternalUrl(merchant, kind);
+      } else {
+        if (merchant.internalTargetId) {
+          internalUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
+        }
+        if (!internalUrl && INTERNAL_NOTI_URL) {
+          internalUrl = INTERNAL_NOTI_URL;
+        }
       }
 
       if (!internalUrl) {
@@ -5288,8 +5318,13 @@ async function handleNotiRequest(routeKey, req, res) {
     } catch (err) {
       console.error('[전산 전송 실패]', err.message);
       let failUrl = internalTargetUrl;
-      if (!failUrl && merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
-      if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
+      if (!failUrl) {
+        if (useRelayOffInternalUrls) failUrl = resolveRelayOffInternalUrl(merchant, kind) || '';
+        else {
+          if (merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
+          if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
+        }
+      }
       let failPayload = body;
       try {
         failPayload = transformForInternal(body, merchant);
@@ -5335,7 +5370,7 @@ async function handleNotiRequest(routeKey, req, res) {
   if (deliverChillpayDevInternal) {
     try {
       const devPayload = transformForDevInternal(body, merchant);
-      const devUrl = resolveMerchantDevInternalUrl(merchant, kind);
+      const devUrl = useRelayOffDevUrls ? resolveRelayOffDevUrl(merchant, kind) : resolveMerchantDevInternalUrl(merchant, kind);
 
       if (!devUrl) {
         console.log('[개발 전산 전송 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
@@ -5367,7 +5402,10 @@ async function handleNotiRequest(routeKey, req, res) {
     } catch (err) {
       console.error('[개발 전산 전송 실패]', err.message);
       let failUrl = devInternalTargetUrl;
-      if (!failUrl) failUrl = resolveMerchantDevInternalUrl(merchant, kind) || '';
+      if (!failUrl) {
+        failUrl =
+          (useRelayOffDevUrls ? resolveRelayOffDevUrl(merchant, kind) : resolveMerchantDevInternalUrl(merchant, kind)) || '';
+      }
       let failPayload = body;
       try {
         failPayload = transformForDevInternal(body, merchant);
@@ -5659,9 +5697,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
     }
   } else if (deliverJpayInternalProcessed) {
     try {
-      let internalUrl = null;
-      if (merchant.internalTargetId) internalUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
-      if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
+      const internalUrl = resolveRelayOffInternalUrl(merchant, kind);
       if (!internalUrl) {
         console.log('[JPAY 전산(가공) 스킵] URL 미설정, merchant=', merchantId);
         appendInternalLog({
@@ -5707,8 +5743,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
     } catch (err) {
       console.error('[JPAY 전산(가공) 전송 실패]', err.message);
       let failUrl = internalTargetUrl;
-      if (!failUrl && merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
-      if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
+      if (!failUrl) failUrl = resolveRelayOffInternalUrl(merchant, kind) || '';
       let failPayload = body;
       try {
         failPayload = transformForInternal(body, merchant, { pgProvider: 'jpay' });
@@ -5787,7 +5822,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
     }
   } else if (deliverJpayDevProcessed) {
     try {
-      const devUrl = resolveMerchantDevInternalUrl(merchant, kind);
+      const devUrl = resolveRelayOffDevUrl(merchant, kind);
       if (!devUrl) {
         console.log('[JPAY 개발(가공) 스킵] URL 미설정, merchant=', merchantId);
         appendDevInternalLog({
@@ -5833,7 +5868,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
     } catch (err) {
       console.error('[JPAY 개발(가공) 전송 실패]', err.message);
       let failUrl = devInternalTargetUrl;
-      if (!failUrl) failUrl = resolveMerchantDevInternalUrl(merchant, kind) || '';
+      if (!failUrl) failUrl = resolveRelayOffDevUrl(merchant, kind) || '';
       let failPayload = body;
       try {
         failPayload = transformForDevInternal(body, merchant, { pgProvider: 'jpay' });
@@ -8360,6 +8395,15 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   const sortedEntries = getSortedMerchantEntries(sortType);
   const chillpayRedirectRouteNosJson = JSON.stringify(getChillpayRedirectRouteNosForUi());
   const chillpayRedirectAlertJson = JSON.stringify(t(locale, 'merchants_alert_redirect_hosted'));
+  const internalTargetsRelayOffJson = JSON.stringify(
+    Array.from(INTERNAL_TARGETS.entries()).map(([tid, tg]) => ({
+      id: tid,
+      callbackUrl: tg.callbackUrl || '',
+      resultUrl: tg.resultUrl || '',
+      devCallbackUrl: String(tg.devCallbackUrl || '').trim(),
+      devResultUrl: String(tg.devResultUrl || '').trim(),
+    })),
+  );
 
   const rows = Array.from(sortedEntries)
     .map(([id, m]) => {
@@ -8455,6 +8499,10 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
                   ? 'autot'
                   : 'auto'
               }"
+              data-relay-off-internal-cb="${escAttr(m.relayOffInternalCallbackUrl || '')}"
+              data-relay-off-internal-rs="${escAttr(m.relayOffInternalResultUrl || '')}"
+              data-relay-off-dev-cb="${escAttr(m.relayOffDevCallbackUrl || '')}"
+              data-relay-off-dev-rs="${escAttr(m.relayOffDevResultUrl || '')}"
               style="padding:4px 8px;font-size:12px;background:#facc15;color:#111827;border:none;border-radius:4px;cursor:pointer;"
             >${t(locale, 'merchants_edit')}</button>
             <form method="post" action="/admin/merchants/delete" onsubmit="return confirm('${confirmDel}') && confirm('${confirmDel2}');" style="margin:0;">
@@ -8632,7 +8680,33 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           </label>
           <p class="admin-page-desc" style="margin-top:8px;">${t(locale, 'merchants_relay_off_forward_hint')}</p>
         </div>
-        <div id="merch-relay-format-wrap">
+        <div id="merch-relay-off-internal-urls" style="display:none;margin-top:12px;padding:10px 12px;background:#ecfdf5;border:1px solid #6ee7b7;border-radius:8px;">
+          <div style="font-weight:600;margin-bottom:8px;">${t(locale, 'merchants_relay_off_urls_internal_title')}</div>
+          <label>
+            ${t(locale, 'merchants_relay_off_urls_callback')}
+            <input type="url" name="relayOffInternalCallbackUrl" id="merchant-relay-off-int-cb" style="width:100%;box-sizing:border-box;margin-top:4px;padding:8px;border-radius:6px;border:1px solid #d1d5db;" placeholder="https://…" />
+          </label>
+          <label style="margin-top:10px;">
+            ${t(locale, 'merchants_relay_off_urls_result')}
+            <input type="url" name="relayOffInternalResultUrl" id="merchant-relay-off-int-rs" style="width:100%;box-sizing:border-box;margin-top:4px;padding:8px;border-radius:6px;border:1px solid #d1d5db;" placeholder="https://…" />
+          </label>
+          <button type="button" id="btn-fill-relay-off-int-from-target" style="margin-top:10px;padding:6px 12px;font-size:12px;background:#059669;color:#fff;border:none;border-radius:6px;cursor:pointer;">${t(locale, 'merchants_relay_off_urls_fill_from_target')}</button>
+          <p class="admin-page-desc" style="margin-top:8px;">${t(locale, 'merchants_relay_off_urls_internal_hint')}</p>
+        </div>
+        <div id="merch-relay-off-dev-urls" style="display:none;margin-top:12px;padding:10px 12px;background:#eff6ff;border:1px solid #93c5fd;border-radius:8px;">
+          <div style="font-weight:600;margin-bottom:8px;">${t(locale, 'merchants_relay_off_urls_dev_title')}</div>
+          <label>
+            ${t(locale, 'merchants_relay_off_urls_callback')}
+            <input type="url" name="relayOffDevCallbackUrl" id="merchant-relay-off-dev-cb" style="width:100%;box-sizing:border-box;margin-top:4px;padding:8px;border-radius:6px;border:1px solid #d1d5db;" placeholder="https://…" />
+          </label>
+          <label style="margin-top:10px;">
+            ${t(locale, 'merchants_relay_off_urls_result')}
+            <input type="url" name="relayOffDevResultUrl" id="merchant-relay-off-dev-rs" style="width:100%;box-sizing:border-box;margin-top:4px;padding:8px;border-radius:6px;border:1px solid #d1d5db;" placeholder="https://…" />
+          </label>
+          <button type="button" id="btn-fill-relay-off-dev-from-target" style="margin-top:10px;padding:6px 12px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;">${t(locale, 'merchants_relay_off_urls_fill_from_target_dev')}</button>
+          <p class="admin-page-desc" style="margin-top:8px;">${t(locale, 'merchants_relay_off_urls_dev_hint')}</p>
+        </div>
+        <div id="merch-relay-format-only-wrap">
         <label>
           ${t(locale, 'merchants_label_relay_format')}
           <select name="relayFormat" id="merchant-relay-format">
@@ -8642,6 +8716,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           </select>
         </label>
         <p class="admin-page-desc">${t(locale, 'merchants_relay_format_hint')}</p>
+        </div>
+        <div id="merch-result-delivery-wrap">
         <label>
           ${t(locale, 'merchants_label_result_delivery_mode')}
           <select name="resultDeliveryMode" id="merchant-result-delivery-mode">
@@ -8756,6 +8832,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       var editButtons = document.querySelectorAll('.edit-merchant');
       var chillpayRedirectRouteNos = ${chillpayRedirectRouteNosJson};
       var chillpayRedirectHostedMsg = ${chillpayRedirectAlertJson};
+      var internalTargetsRelayOff = ${internalTargetsRelayOffJson};
 
       function routeNoFromCbSelectVal(val) {
         if (!val) return null;
@@ -8774,17 +8851,40 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       // 항상 이 도메인 기준으로 전체 주소 생성
       var baseUrl = 'https://noti.icopay.net';
 
+      function findInternalTargetRelayOff(tid) {
+        if (!tid || !internalTargetsRelayOff || !internalTargetsRelayOff.length) return null;
+        for (var i = 0; i < internalTargetsRelayOff.length; i++) {
+          if (internalTargetsRelayOff[i].id === tid) return internalTargetsRelayOff[i];
+        }
+        return null;
+      }
+
+      function syncRelayOffUrlPanels() {
+        var relayCb = document.getElementById('merchant-enable-relay');
+        var relayOn = relayCb && relayCb.checked;
+        var rof = document.getElementById('merchant-relay-off-forward');
+        var v = (rof && rof.value) || '';
+        var pInt = document.getElementById('merch-relay-off-internal-urls');
+        var pDev = document.getElementById('merch-relay-off-dev-urls');
+        var showInt = !relayOn && v === 'internal';
+        var showDev = !relayOn && v === 'dev_internal';
+        if (pInt) pInt.style.display = showInt ? 'block' : 'none';
+        if (pDev) pDev.style.display = showDev ? 'block' : 'none';
+      }
+
       function syncRelayMerchantUrls() {
         var relayCb = document.getElementById('merchant-enable-relay');
         var relayOn = relayCb && relayCb.checked;
         var urlBlock = document.getElementById('merch-relay-url-block');
-        var fmtWrap = document.getElementById('merch-relay-format-wrap');
+        var fmtOnlyWrap = document.getElementById('merch-relay-format-only-wrap');
+        var resultDelWrap = document.getElementById('merch-result-delivery-wrap');
         var cbIn = document.getElementById('merchant-callback-url');
         var rsIn = document.getElementById('merchant-result-url');
         var useTest = document.getElementById('use-test-result-url');
         var fmtSel = document.getElementById('merchant-relay-format');
         if (urlBlock) urlBlock.style.display = relayOn ? 'block' : 'none';
-        if (fmtWrap) fmtWrap.style.display = relayOn ? 'block' : 'none';
+        if (fmtOnlyWrap) fmtOnlyWrap.style.display = relayOn ? 'block' : 'none';
+        if (resultDelWrap) resultDelWrap.style.display = 'block';
         if (cbIn) {
           cbIn.required = !!relayOn;
           cbIn.disabled = !relayOn;
@@ -8794,6 +8894,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         if (fmtSel) fmtSel.disabled = !relayOn;
         var rofWrap = document.getElementById('merch-relay-off-forward-wrap');
         if (rofWrap) rofWrap.style.display = relayOn ? 'none' : 'block';
+        syncRelayOffUrlPanels();
       }
 
       function syncPgBlocks() {
@@ -8875,6 +8976,41 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       if (radJpay) radJpay.addEventListener('change', function () { syncPgBlocks(); updatePreviews(); });
       var relayCbEl = document.getElementById('merchant-enable-relay');
       if (relayCbEl) relayCbEl.addEventListener('change', syncRelayMerchantUrls);
+      var rofSelectEl = document.getElementById('merchant-relay-off-forward');
+      if (rofSelectEl) rofSelectEl.addEventListener('change', syncRelayOffUrlPanels);
+
+      var btnFillRelayOffInt = document.getElementById('btn-fill-relay-off-int-from-target');
+      if (btnFillRelayOffInt && form) {
+        btnFillRelayOffInt.addEventListener('click', function () {
+          var sel = form.querySelector('select[name="internalTargetId"]');
+          var tg = findInternalTargetRelayOff(sel && sel.value);
+          if (!tg) {
+            alert('${(t(locale, 'merchants_relay_off_urls_fill_no_target') || '').replace(/'/g, "\\'")}');
+            return;
+          }
+          var icb = document.getElementById('merchant-relay-off-int-cb');
+          var irs = document.getElementById('merchant-relay-off-int-rs');
+          if (icb) icb.value = tg.callbackUrl || '';
+          if (irs) irs.value = (tg.resultUrl || tg.callbackUrl || '');
+        });
+      }
+      var btnFillRelayOffDev = document.getElementById('btn-fill-relay-off-dev-from-target');
+      if (btnFillRelayOffDev && form) {
+        btnFillRelayOffDev.addEventListener('click', function () {
+          var sel = form.querySelector('select[name="internalTargetId"]');
+          var tg = findInternalTargetRelayOff(sel && sel.value);
+          if (!tg) {
+            alert('${(t(locale, 'merchants_relay_off_urls_fill_no_target') || '').replace(/'/g, "\\'")}');
+            return;
+          }
+          var dcb = document.getElementById('merchant-relay-off-dev-cb');
+          var drs = document.getElementById('merchant-relay-off-dev-rs');
+          var opCb = (tg.devCallbackUrl || tg.callbackUrl || '');
+          var opRs = (tg.devResultUrl || tg.devCallbackUrl || tg.resultUrl || tg.callbackUrl || '');
+          if (dcb) dcb.value = opCb;
+          if (drs) drs.value = opRs;
+        });
+      }
 
       if (cbCopyBtn && cbPreview) {
         cbCopyBtn.addEventListener('click', function () {
@@ -8954,6 +9090,16 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         if (relayCheckbox) {
           relayCheckbox.checked = (button.dataset.enableRelay || 'Y') === 'Y';
         }
+        var rofSelect = form.querySelector('select[name="relayOffForwardTarget"]');
+        if (rofSelect) rofSelect.value = button.dataset.relayOffForward || '';
+        var riCb = form.querySelector('input[name="relayOffInternalCallbackUrl"]');
+        var riRs = form.querySelector('input[name="relayOffInternalResultUrl"]');
+        var rdCb = form.querySelector('input[name="relayOffDevCallbackUrl"]');
+        var rdRs = form.querySelector('input[name="relayOffDevResultUrl"]');
+        if (riCb) riCb.value = button.dataset.relayOffInternalCb || '';
+        if (riRs) riRs.value = button.dataset.relayOffInternalRs || '';
+        if (rdCb) rdCb.value = button.dataset.relayOffDevCb || '';
+        if (rdRs) rdRs.value = button.dataset.relayOffDevRs || '';
         syncRelayMerchantUrls();
         if (internalCheckbox) {
           internalCheckbox.checked = (button.dataset.enableInternal || 'Y') === 'Y';
@@ -8961,8 +9107,6 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         if (devInternalCheckbox) {
           devInternalCheckbox.checked = (button.dataset.enableDevInternal || 'N') === 'Y';
         }
-        var rofSelect = form.querySelector('select[name="relayOffForwardTarget"]');
-        if (rofSelect) rofSelect.value = button.dataset.relayOffForward || '';
         var relayFormatSelect = form.querySelector('select[name="relayFormat"]');
         if (relayFormatSelect) relayFormatSelect.value = button.dataset.relayFormat || 'raw';
         var rdmSelect = form.querySelector('select[name="resultDeliveryMode"]');
@@ -9280,6 +9424,22 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
   const relayOffForwardSaved = enableRelayOn
     ? ''
     : normalizeMerchantRelayOffForwardTarget(req.body && req.body.relayOffForwardTarget);
+  const relayOffInternalCbSaved =
+    !enableRelayOn && relayOffForwardSaved === 'internal'
+      ? String((req.body && req.body.relayOffInternalCallbackUrl) || '').trim()
+      : '';
+  const relayOffInternalRsSaved =
+    !enableRelayOn && relayOffForwardSaved === 'internal'
+      ? String((req.body && req.body.relayOffInternalResultUrl) || '').trim()
+      : '';
+  const relayOffDevCbSaved =
+    !enableRelayOn && relayOffForwardSaved === 'dev_internal'
+      ? String((req.body && req.body.relayOffDevCallbackUrl) || '').trim()
+      : '';
+  const relayOffDevRsSaved =
+    !enableRelayOn && relayOffForwardSaved === 'dev_internal'
+      ? String((req.body && req.body.relayOffDevResultUrl) || '').trim()
+      : '';
 
   MERCHANTS.set(merchantId, {
     ...prev,
@@ -9295,6 +9455,10 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     enableInternal: enableInternal === 'on',
     enableDevInternal: enableDevInternal === 'on',
     relayOffForwardTarget: relayOffForwardSaved,
+    relayOffInternalCallbackUrl: relayOffInternalCbSaved,
+    relayOffInternalResultUrl: relayOffInternalRsSaved,
+    relayOffDevCallbackUrl: relayOffDevCbSaved,
+    relayOffDevResultUrl: relayOffDevRsSaved,
     relayFormat: fmt,
     jpayRouteCallbackKey: jpayCb,
     jpayRouteResultKey: jpayRs,
