@@ -1431,6 +1431,21 @@ function cloneDefaultDevInternalNotiProfile() {
   };
 }
 
+/** 개발 노티 설정 저장용: CustomerId 모드 — 가맹점 전산값 / PG 수신값 유지 / 필드 제외 */
+function normalizeDevCustomerIdModeForSave(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  if (s === 'delete') return 'delete';
+  if (s === 'passthrough') return 'passthrough';
+  return 'current';
+}
+
+/** 개발 전산 가공 시 통화별 CustomerId 모드 (알 수 없는 값은 current) */
+function effectiveDevCustomerIdMode(settings, currency) {
+  const v = (settings.customerIdMode && settings.customerIdMode[currency]) || 'current';
+  if (v === 'delete' || v === 'passthrough') return v;
+  return 'current';
+}
+
 function normalizeDevInternalNotiProfile(p) {
   const base = cloneDefaultDevInternalNotiProfile();
   if (!p || typeof p !== 'object') return base;
@@ -4700,7 +4715,7 @@ function transformForDevInternal(original, merchant, options) {
   const routeNo = (merchant && merchant.routeNo) || '7';
   const internalCustomerId = (merchant && merchant.internalCustomerId) || 'M035594';
   const routeNoMode = (settings.routeNoMode && settings.routeNoMode[currency]) || 'current';
-  const customerIdMode = (settings.customerIdMode && settings.customerIdMode[currency]) || 'current';
+  const customerIdMode = effectiveDevCustomerIdMode(settings, currency);
 
   const amountRaw = Number(original.Amount) || 0;
   const processed = applyDevAmountRule(amountRaw, currency, settings.amountRules);
@@ -4734,7 +4749,13 @@ function transformForDevInternal(original, merchant, options) {
     CheckSum: original.CheckSum || '',
   };
   if (routeNoMode !== 'delete') payload.RouteNo = routeNo;
-  if (customerIdMode !== 'delete') payload.CustomerId = internalCustomerId;
+  if (customerIdMode === 'delete') {
+    /* omit CustomerId */
+  } else if (customerIdMode === 'passthrough') {
+    payload.CustomerId = origCustomerId;
+  } else {
+    payload.CustomerId = internalCustomerId;
+  }
   if (merchantCodeMode === 'on') payload.MerchantCode = DEV_INTERNAL_FIXED_MERCHANT_CODE;
 
   return payload;
@@ -4754,7 +4775,7 @@ function merchantShouldDeliverChillpayInternal(merchant, enableRelay, enableInte
   return !enableRelay && normalizeMerchantRelayOffForwardTarget(merchant && merchant.relayOffForwardTarget) === 'internal';
 }
 
-/** ChillPay: 개발환경설정 가공 전송 — 「개발 노티 사용」 또는 릴레이 끔+대체=개발 */
+/** ChillPay: 개발 환경설정 가공 전송 — 「개발 노티 사용」 또는 릴레이 끔+대체=개발 */
 function merchantShouldDeliverChillpayDevInternal(merchant, enableRelay, enableDevInternalChecked) {
   if (enableDevInternalChecked === true) return true;
   return !enableRelay && normalizeMerchantRelayOffForwardTarget(merchant && merchant.relayOffForwardTarget) === 'dev_internal';
@@ -5842,7 +5863,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
       } else {
         const devPayload = transformForDevInternal(body, merchant, { pgProvider: 'jpay' });
         devInternalTargetUrl = devUrl;
-        console.log('[JPAY 개발 전산 전송] 가맹점 릴레이 끔·대체=개발, 개발환경설정 가공 후 POST, merchant=', merchantId, 'url=', devUrl);
+        console.log('[JPAY 개발 전산 전송] 가맹점 릴레이 끔·대체=개발, 개발 환경설정 가공 후 POST, merchant=', merchantId, 'url=', devUrl);
         let devRes = await sendToInternal(devUrl, devPayload);
         devDeliverySuccess = devRes.success;
         if (!devDeliverySuccess) {
@@ -12852,7 +12873,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
   );
 });
 
-// 취소 노티 재전송: 전산 = 가공 로직(개발환경설정) 적용, 피지 = 원문 그대로 전송. 이 구조 유지.
+// 취소 노티 재전송: 전산 = 가공 로직(개발 환경설정) 적용, 피지 = 원문 그대로 전송. 이 구조 유지.
 app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage('cr_cancel'), async (req, res) => {
   const locale = getLocale(req);
   const index = parseInt(req.body.index, 10);
@@ -12877,7 +12898,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
   if (isSuccessPaymentBody(body)) {
     return res.redirect('/admin/cancel-refund/cancel?resend=fail&reason=' + encodeURIComponent('이 건은 결제 완료 노티(PaymentStatus=1)입니다. 취소 노티가 아니므로 전산 재전송할 수 없습니다.'));
   }
-  // 전산 재전송: 가공 로직(개발환경설정) 적용 — transformForInternal 사용
+  // 전산 재전송: 가공 로직(개발 환경설정) 적용 — transformForInternal 사용
   const bodyForCancel = { ...body, PaymentStatus: 2 };
   const internalPayload = transformForInternal(bodyForCancel, merchant);
   try {
@@ -15966,7 +15987,7 @@ function renderInternalNotiLegendHtml(locale, devPage) {
     t(locale, 'internal_noti_li_route_delete') +
     '</div>' +
     '<div class="inl-field-cell">' +
-    t(locale, 'internal_noti_li_customer_id_delete') +
+    (devPage ? t(locale, 'internal_noti_li_customer_id_dev') : t(locale, 'internal_noti_li_customer_id_delete')) +
     '</div>' +
     '<div class="inl-field-cell">' +
     t(locale, origKey) +
@@ -16238,8 +16259,9 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
           <input type="hidden" name="customerName" value="${customerNameVal}" />
           <input type="hidden" name="merchantCode" value="${merchantCodeVal}" />
           <input type="hidden" name="original" value="${originalChecked ? 'on' : ''}" />
-          <select name="customerId" class="cell-select" title="${t(locale, 'internal_noti_customer_id_title')}">
+          <select name="customerId" class="cell-select" style="max-width:132px;min-width:120px;" title="${t(locale, 'internal_noti_customer_id_title')}">
             <option value="current" ${customerIdVal === 'current' ? 'selected' : ''}>${t(locale, 'internal_noti_merchant_value')}</option>
+            <option value="passthrough" ${customerIdVal === 'passthrough' ? 'selected' : ''}>${t(locale, 'internal_noti_customer_id_passthrough')}</option>
             <option value="delete" ${customerIdVal === 'delete' ? 'selected' : ''}>${t(locale, 'internal_noti_delete')}</option>
           </select>
           <button type="submit" class="btn-save-row">${t(locale, 'internal_noti_save')}</button>
@@ -16383,8 +16405,7 @@ app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inte
     full.amountRules[currency] = r;
     const rn = (req.body.routeNo || 'current').trim();
     full.routeNoMode[currency] = rn === 'delete' ? 'delete' : 'current';
-    const cid = (req.body.customerId || 'current').trim();
-    full.customerIdMode[currency] = cid === 'delete' ? 'delete' : 'current';
+    full.customerIdMode[currency] = normalizeDevCustomerIdModeForSave(req.body.customerId);
     const cn = (req.body.customerName || 'format').trim();
     full.customerNameMode[currency] = cn === 'none' ? 'none' : 'format';
     const mc = (req.body.merchantCode || 'off').trim();
@@ -16423,8 +16444,7 @@ app.post('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inte
       amountRules[code] = r;
       const rn = (req.body['routeNo_' + code] || 'current').trim();
       routeNoMode[code] = rn === 'delete' ? 'delete' : 'current';
-      const cid = (req.body['customerId_' + code] || 'current').trim();
-      customerIdMode[code] = cid === 'delete' ? 'delete' : 'current';
+      customerIdMode[code] = normalizeDevCustomerIdModeForSave(req.body['customerId_' + code]);
       const cn = (req.body['customerName_' + code] || 'format').trim();
       customerNameMode[code] = cn === 'none' ? 'none' : 'format';
       const mc = (req.body['merchantCode_' + code] || 'off').trim();
