@@ -1816,6 +1816,7 @@ function loadMerchants() {
         enableDevInternal: false,
         relayOffForwardTarget: '',
         relayFormat: 'raw',
+        relayEnrichmentMode: 'plain',
       },
     ],
   ]);
@@ -4568,7 +4569,18 @@ async function sendVoidOrRefundNoti(log, type, mode) {
       : 'application/json';
   for (const { url } of urls) {
     try {
-      const res = await relayToMerchant(url, payload, { contentType: relayCt });
+      let sendBody = payload;
+      let sendOpts = { contentType: relayCt };
+      if (pgProv === 'chillpay' && merchantRelayEnrichmentEnabled(merchant)) {
+        const rfVr =
+          merchant.relayFormat === 'form' ? 'form' : merchant.relayFormat === 'json' ? 'json' : 'json';
+        const ctVr = rfVr === 'form' ? 'application/x-www-form-urlencoded' : 'application/json';
+        const enriched = enrichMerchantRelayPayload(merchant, rfVr, payload, undefined, ctVr, log.env || 'live');
+        const built = buildEnrichedRelayArgs(rfVr, { contentType: ctVr }, payload, enriched);
+        sendBody = built.body;
+        sendOpts = built.relayOpts;
+      }
+      const res = await relayToMerchant(url, sendBody, sendOpts);
       if (res.status < 200 || res.status >= 300) relayOk = false;
     } catch (e) {
       relayOk = false;
@@ -5014,6 +5026,112 @@ async function relayToMerchant(callbackUrl, body, options = {}) {
   return res;
 }
 
+/** 가맹점 릴레이 보강(Enriched): MerchantCode(MID)·RouteNo만 추가. 전산/개발 transform 과 무관 */
+function merchantRelayEnrichmentEnabled(merchant) {
+  return merchant && String(merchant.relayEnrichmentMode || '').toLowerCase() === 'enriched';
+}
+
+function resolveChillpayRelayMidForEnv(env) {
+  const cfg = loadChillPayTransactionConfig();
+  const e = String(env || 'live').toLowerCase();
+  if (e === 'sandbox') return String((cfg.sandbox && cfg.sandbox.mid) || '').trim();
+  return String((cfg.production && cfg.production.mid) || '').trim();
+}
+
+/**
+ * PG 원문 구조 유지에 가깝게 MerchantCode·RouteNo 필드만 합침.
+ * - json/form: 파싱된 body 객체에 얕게 병합
+ * - raw: JSON·폼 문자열이면 파싱 후 병합, 그 외는 body 객체가 있으면 병합
+ */
+function enrichMerchantRelayPayload(merchant, relayFormat, body, rawBody, incomingContentType, env) {
+  if (!merchantRelayEnrichmentEnabled(merchant)) {
+    return { body, rawBody, relayContentType: undefined };
+  }
+  const mid = resolveChillpayRelayMidForEnv(env);
+  const routeNoVal = String((merchant && merchant.routeNo) || '').trim();
+  const extra = { MerchantCode: mid, RouteNo: routeNoVal };
+
+  const rf = relayFormat === 'json' || relayFormat === 'form' ? relayFormat : 'raw';
+  if (rf === 'json' || rf === 'form') {
+    if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
+      return { body: { ...body, ...extra }, rawBody: undefined, relayContentType: undefined };
+    }
+    return { body, rawBody, relayContentType: undefined };
+  }
+
+  const ct = String(incomingContentType || '').toLowerCase();
+  const rawStr =
+    rawBody !== undefined && rawBody !== null
+      ? Buffer.isBuffer(rawBody)
+        ? rawBody.toString('utf8')
+        : String(rawBody)
+      : '';
+  if (rawStr.trim()) {
+    const trim = rawStr.trim();
+    if (ct.includes('json') || trim.startsWith('{')) {
+      try {
+        const obj = JSON.parse(rawStr);
+        if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+          return { body: { ...obj, ...extra }, rawBody: undefined, relayContentType: 'application/json' };
+        }
+      } catch (_) {
+        /* fall through */
+      }
+    }
+    if (ct.includes('application/x-www-form-urlencoded') || (/[=]/.test(trim) && !trim.startsWith('{'))) {
+      try {
+        const params = new URLSearchParams(trim);
+        params.set('MerchantCode', mid);
+        params.set('RouteNo', routeNoVal);
+        return {
+          body: undefined,
+          rawBody: params.toString(),
+          relayContentType: 'application/x-www-form-urlencoded',
+        };
+      } catch (_) {
+        /* fall through */
+      }
+    }
+  }
+  if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
+    const outCt = ct.includes('application/x-www-form-urlencoded') ? 'application/x-www-form-urlencoded' : 'application/json';
+    return { body: { ...body, ...extra }, rawBody: undefined, relayContentType: outCt };
+  }
+  return { body, rawBody, relayContentType: undefined };
+}
+
+/** 보강릴레이용 relayToMerchant 인자 정규화 (원문 raw → 파싱 후 직렬화 시 Content-Type 보정) */
+function buildEnrichedRelayArgs(relayFormat, relayOpts, body, enriched) {
+  if (!enriched) return { body, relayOpts };
+  const rawLen =
+    enriched.rawBody !== undefined && enriched.rawBody !== null
+      ? Buffer.isBuffer(enriched.rawBody)
+        ? enriched.rawBody.length
+        : String(enriched.rawBody).length
+      : 0;
+  if (rawLen > 0) {
+    return {
+      body: undefined,
+      relayOpts: {
+        contentType: enriched.relayContentType || 'application/x-www-form-urlencoded',
+        rawBody: enriched.rawBody,
+      },
+    };
+  }
+  if (enriched.body && typeof enriched.body === 'object' && !Buffer.isBuffer(enriched.body)) {
+    const baseCt = (relayOpts && relayOpts.contentType) || '';
+    const useCt =
+      relayFormat === 'raw' && enriched.relayContentType
+        ? enriched.relayContentType
+        : baseCt || 'application/json';
+    return {
+      body: enriched.body,
+      relayOpts: { contentType: useCt, rawBody: undefined },
+    };
+  }
+  return { body, relayOpts };
+}
+
 /**
  * 전산 쪽으로 가공된 노티 전송
  * HTTP 2xx여도 응답 본문에 success: false / ok: false 가 있으면 실패로 처리 (전산에서 결제 미존재 등)
@@ -5359,10 +5477,18 @@ async function handleNotiRequest(routeKey, req, res) {
   } else {
     relayOpts = { contentType: incomingContentType, rawBody: rawBodyStr || undefined };
   }
+  let relayBody = body;
+  let relayOptsSend = relayOpts;
+  if (resolveMerchantListPgAcquirer(merchant) === 'chillpay' && merchantRelayEnrichmentEnabled(merchant)) {
+    const enriched = enrichMerchantRelayPayload(merchant, relayFormat, body, relayOpts.rawBody, incomingContentType, env);
+    const built = buildEnrichedRelayArgs(relayFormat, relayOpts, body, enriched);
+    relayBody = built.body;
+    relayOptsSend = built.relayOpts;
+  }
   if (enableRelay && targetUrl) {
     try {
-      console.log('[포워딩 중] 가맹점으로 릴레이:', merchantId, kind, targetUrl, 'relayFormat=', relayFormat, 'Content-Type=', relayOpts.contentType);
-      let relayRes = await relayToMerchant(targetUrl, body, relayOpts);
+      console.log('[포워딩 중] 가맹점으로 릴레이:', merchantId, kind, targetUrl, 'relayFormat=', relayFormat, 'Content-Type=', relayOptsSend.contentType);
+      let relayRes = await relayToMerchant(targetUrl, relayBody, relayOptsSend);
       relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
       if (relaySuccess) {
         console.log('[포워딩 성공] status=', relayRes.status);
@@ -5370,7 +5496,7 @@ async function handleNotiRequest(routeKey, req, res) {
         relayFailReason = `HTTP ${relayRes.status}` + (relayRes.data && typeof relayRes.data === 'string' ? ': ' + relayRes.data.slice(0, 200) : '');
         console.warn('[포워딩 실패] status=', relayRes.status, ' 1회 재시도 예정');
         await new Promise((r) => setTimeout(r, 2000));
-        relayRes = await relayToMerchant(targetUrl, body, relayOpts);
+        relayRes = await relayToMerchant(targetUrl, relayBody, relayOptsSend);
         relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
         if (relaySuccess) {
           console.log('[포워딩 재시도 성공] status=', relayRes.status);
@@ -5385,7 +5511,7 @@ async function handleNotiRequest(routeKey, req, res) {
       console.error('[포워딩 실패]', err.message, ' 1회 재시도 예정');
       try {
         await new Promise((r) => setTimeout(r, 2000));
-        const retryRes = await relayToMerchant(targetUrl, body, relayOpts);
+        const retryRes = await relayToMerchant(targetUrl, relayBody, relayOptsSend);
         relaySuccess = retryRes.status >= 200 && retryRes.status < 300;
         if (relaySuccess) {
           console.log('[포워딩 재시도 성공]');
@@ -8642,6 +8768,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
                   : ''
               }"
               data-relay-format="${m.relayFormat || 'raw'}"
+              data-relay-enrichment="${m.relayEnrichmentMode === 'enriched' ? 'enriched' : 'plain'}"
               data-merchant-pg-kind="${merchantPgKind}"
               data-jpay-route-callback-key="${jpayCbKey}"
               data-jpay-route-result-key="${jpayRsKey}"
@@ -8872,6 +8999,14 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           </select>
         </label>
         <p class="admin-page-desc">${t(locale, 'merchants_relay_format_hint')}</p>
+        <label style="margin-top:10px;display:block;">
+          ${t(locale, 'merchants_relay_enrichment_label')}
+          <select name="relayEnrichmentMode" id="merchant-relay-enrichment" style="margin-top:6px;">
+            <option value="plain">${t(locale, 'merchants_relay_enrichment_plain')}</option>
+            <option value="enriched">${t(locale, 'merchants_relay_enrichment_enriched')}</option>
+          </select>
+        </label>
+        <p class="admin-page-desc">${t(locale, 'merchants_relay_enrichment_hint')}</p>
         </div>
         <div id="merch-result-delivery-wrap">
         <label>
@@ -9048,6 +9183,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         if (rsIn) rsIn.disabled = !relayOn;
         if (useTest) useTest.disabled = !relayOn;
         if (fmtSel) fmtSel.disabled = !relayOn;
+        var enrichSel = document.getElementById('merchant-relay-enrichment');
+        if (enrichSel) enrichSel.disabled = !relayOn;
         var rofWrap = document.getElementById('merch-relay-off-forward-wrap');
         if (rofWrap) rofWrap.style.display = relayOn ? 'none' : 'block';
         syncRelayOffUrlPanels();
@@ -9265,6 +9402,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         }
         var relayFormatSelect = form.querySelector('select[name="relayFormat"]');
         if (relayFormatSelect) relayFormatSelect.value = button.dataset.relayFormat || 'raw';
+        var relayEnrichSelect = form.querySelector('select[name="relayEnrichmentMode"]');
+        if (relayEnrichSelect) relayEnrichSelect.value = button.dataset.relayEnrichment || 'plain';
         var rdmSelect = form.querySelector('select[name="resultDeliveryMode"]');
         if (rdmSelect) rdmSelect.value = button.dataset.resultDeliveryMode || 'auto';
 
@@ -9499,6 +9638,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     enableInternal,
     enableDevInternal,
     relayFormat,
+    relayEnrichmentMode: rawRelayEnrichmentMode,
     resultDeliveryMode: rawResultDeliveryMode,
     jpayRouteCallbackKey,
     jpayRouteResultKey,
@@ -9561,6 +9701,9 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
   }
 
   const fmt = enableRelayOn && (relayFormat === 'json' || relayFormat === 'form') ? relayFormat : 'raw';
+  const remRaw = String(rawRelayEnrichmentMode || '').trim().toLowerCase();
+  const relayEnrichmentModeSaved =
+    enableRelayOn && pgKind === 'chillpay' && remRaw === 'enriched' ? 'enriched' : 'plain';
   const rdmRaw = String(rawResultDeliveryMode || 'auto').trim().toLowerCase();
   const resultDeliveryModeSaved =
     rdmRaw === 'no_browser_redirect' || rdmRaw === 'post_only'
@@ -9622,6 +9765,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     jpayResultUrl: '',
     chillpayRecurring: chillpayRecurringYn,
     resultDeliveryMode: resultDeliveryModeSaved,
+    relayEnrichmentMode: relayEnrichmentModeSaved,
   });
 
   console.log('[관리자] 가맹점 저장:', merchantId, MERCHANTS.get(merchantId));
