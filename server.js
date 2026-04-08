@@ -5026,7 +5026,7 @@ async function relayToMerchant(callbackUrl, body, options = {}) {
   return res;
 }
 
-/** 가맹점 릴레이 보강(Enriched): MerchantCode(MID)·RouteNo만 추가. 전산/개발 transform 과 무관 */
+/** 가맹점 릴레이 보강(Enriched): MerchantCode(MID)·RouteNo·(빈 경우) CustomerName 보강. 전산/개발 transform 과 무관 */
 function merchantRelayEnrichmentEnabled(merchant) {
   return merchant && String(merchant.relayEnrichmentMode || '').toLowerCase() === 'enriched';
 }
@@ -5038,8 +5038,80 @@ function resolveChillpayRelayMidForEnv(env) {
   return String((cfg.production && cfg.production.mid) || '').trim();
 }
 
+function getFirstNonEmptyField(obj, keys) {
+  if (!obj || typeof obj !== 'object') return '';
+  for (const k of keys) {
+    const v = obj[k];
+    if (v != null && String(v).trim() !== '') return String(v).trim();
+  }
+  return '';
+}
+
+/** CustomerName·customerName 모두 비었는지 */
+function relayCustomerNameIsBlankInObject(obj) {
+  return getFirstNonEmptyField(obj, ['CustomerName', 'customerName']) === '';
+}
+
 /**
- * PG 원문 구조 유지에 가깝게 MerchantCode·RouteNo 필드만 합침.
+ * PG 노티에 CustomerName이 비어 있을 때, 같은 본문에 있는 결제 요청 시 흔한 필드로 보강.
+ * 별칭 이름 → CustomerId/customerId → Description/description 순.
+ */
+function pickCustomerNameFromPaymentInitFields(obj) {
+  if (!obj || typeof obj !== 'object') return '';
+  const fromAlt = getFirstNonEmptyField(obj, [
+    'CustName',
+    'custName',
+    'FullName',
+    'fullName',
+    'CardHolderName',
+    'cardHolderName',
+    'PayerName',
+    'payerName',
+    'BillingName',
+    'billingName',
+    'BuyerName',
+    'buyerName',
+    'UserName',
+    'userName',
+    'HolderName',
+    'CustomerFullName',
+    'customerFullName',
+  ]);
+  if (fromAlt) return fromAlt;
+  const cid = getFirstNonEmptyField(obj, ['CustomerId', 'customerId']);
+  if (cid) return cid;
+  return getFirstNonEmptyField(obj, ['Description', 'description']);
+}
+
+function applyEnrichedRelayCustomerNameToBody(body) {
+  if (!body || typeof body !== 'object' || Buffer.isBuffer(body)) return body;
+  if (!relayCustomerNameIsBlankInObject(body)) return body;
+  const fill = pickCustomerNameFromPaymentInitFields(body);
+  if (!fill) return body;
+  return { ...body, CustomerName: fill };
+}
+
+function urlSearchParamsToObject(params) {
+  const o = {};
+  try {
+    for (const [k, v] of params.entries()) {
+      o[k] = v;
+    }
+  } catch (_) {}
+  return o;
+}
+
+function applyEnrichedRelayCustomerNameToParams(params) {
+  if (!params) return;
+  const o = urlSearchParamsToObject(params);
+  if (!relayCustomerNameIsBlankInObject(o)) return;
+  const fill = pickCustomerNameFromPaymentInitFields(o);
+  if (!fill) return;
+  params.set('CustomerName', fill);
+}
+
+/**
+ * PG 원문 구조 유지에 가깝게 MerchantCode·RouteNo 합침. CustomerName이 비면 결제 요청에 가까운 동일 본문 필드로 보강.
  * - json/form: 파싱된 body 객체에 얕게 병합
  * - raw: JSON·폼 문자열이면 파싱 후 병합, 그 외는 body 객체가 있으면 병합
  */
@@ -5054,7 +5126,11 @@ function enrichMerchantRelayPayload(merchant, relayFormat, body, rawBody, incomi
   const rf = relayFormat === 'json' || relayFormat === 'form' ? relayFormat : 'raw';
   if (rf === 'json' || rf === 'form') {
     if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
-      return { body: { ...body, ...extra }, rawBody: undefined, relayContentType: undefined };
+      return {
+        body: applyEnrichedRelayCustomerNameToBody({ ...body, ...extra }),
+        rawBody: undefined,
+        relayContentType: undefined,
+      };
     }
     return { body, rawBody, relayContentType: undefined };
   }
@@ -5072,7 +5148,11 @@ function enrichMerchantRelayPayload(merchant, relayFormat, body, rawBody, incomi
       try {
         const obj = JSON.parse(rawStr);
         if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-          return { body: { ...obj, ...extra }, rawBody: undefined, relayContentType: 'application/json' };
+          return {
+            body: applyEnrichedRelayCustomerNameToBody({ ...obj, ...extra }),
+            rawBody: undefined,
+            relayContentType: 'application/json',
+          };
         }
       } catch (_) {
         /* fall through */
@@ -5083,6 +5163,7 @@ function enrichMerchantRelayPayload(merchant, relayFormat, body, rawBody, incomi
         const params = new URLSearchParams(trim);
         params.set('MerchantCode', mid);
         params.set('RouteNo', routeNoVal);
+        applyEnrichedRelayCustomerNameToParams(params);
         return {
           body: undefined,
           rawBody: params.toString(),
@@ -5095,7 +5176,11 @@ function enrichMerchantRelayPayload(merchant, relayFormat, body, rawBody, incomi
   }
   if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
     const outCt = ct.includes('application/x-www-form-urlencoded') ? 'application/x-www-form-urlencoded' : 'application/json';
-    return { body: { ...body, ...extra }, rawBody: undefined, relayContentType: outCt };
+    return {
+      body: applyEnrichedRelayCustomerNameToBody({ ...body, ...extra }),
+      rawBody: undefined,
+      relayContentType: outCt,
+    };
   }
   return { body, rawBody, relayContentType: undefined };
 }

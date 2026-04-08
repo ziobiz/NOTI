@@ -1006,7 +1006,7 @@ const messages = {
     merchants_relay_enrichment_plain: '릴레이',
     merchants_relay_enrichment_enriched: '보강 릴레이',
     merchants_relay_enrichment_hint:
-      '보강 릴레이: PG 원문 구조를 유지한 채 필드명 MerchantCode(ChillPay MID, 환경별)·RouteNo(가맹점 route 번호)만 덧붙여 가맹점 URL로 전송합니다. 전산/개발 노티 가공과는 별개입니다. JPAY 가맹점은 저장 시 자동으로 「릴레이」만 적용됩니다.',
+      '보강 릴레이: PG 원문 구조를 유지한 채 MerchantCode(ChillPay MID, 환경별)·RouteNo(가맹점 route 번호)를 덧붙입니다. CustomerName이 비어 있으면 같은 노티 본문의 결제 요청에 가까운 값(이름 별칭 필드 → CustomerId → Description 순)으로 채웁니다. 전산/개발 노티 가공과는 별개입니다. JPAY 가맹점은 저장 시 자동으로 「릴레이」만 적용됩니다.',
     merchants_label_result_delivery_mode: 'RESULT 전달 (브라우저 POST 시)',
     merchants_result_delivery_auto: 'AUTO',
     merchants_result_delivery_autot: 'AUTOT',
@@ -2169,7 +2169,7 @@ const messages = {
     merchants_relay_enrichment_plain: 'リレー',
     merchants_relay_enrichment_enriched: '補強リレー',
     merchants_relay_enrichment_hint:
-      '補強リレー: PG原文構造を保ったままフィールド名 MerchantCode(ChillPay MID・環境別)・RouteNo(加盟店 route 番号)のみ付与します。基幹/開発通知の加工とは別です。JPAY は保存時「リレー」のみになります。',
+      '補強リレー: PG原文を保ち MerchantCode(ChillPay MID・環境別)・RouteNo を付与。CustomerName が空なら同一通知本文の決済リクエストに近い値(名前別名→CustomerId→Description)で補完。基幹/開発とは別。JPAY は保存時「リレー」のみ。',
     merchants_label_result_delivery_mode: 'RESULT 配信（ブラウザ POST 時）',
     merchants_result_delivery_auto: 'AUTO',
     merchants_result_delivery_autot: 'AUTOT',
@@ -3334,7 +3334,7 @@ const messages = {
     merchants_relay_enrichment_plain: 'Relay',
     merchants_relay_enrichment_enriched: 'Enriched relay',
     merchants_relay_enrichment_hint:
-      'Enriched relay: keeps the PG payload shape and only adds fields MerchantCode (ChillPay MID per env) and RouteNo (merchant route number). Separate from internal/dev transforms. JPAY merchants are saved as Relay only.',
+      'Enriched relay: adds MerchantCode (ChillPay MID per env) and RouteNo. If CustomerName is empty, fills it from the same notify body (alternate name keys, then CustomerId, then Description). Separate from internal/dev transforms. JPAY saves as Relay only.',
     merchants_label_result_delivery_mode: 'RESULT delivery (browser POST)',
     merchants_result_delivery_auto: 'AUTO',
     merchants_result_delivery_autot: 'AUTOT',
@@ -4490,7 +4490,7 @@ const messages = {
     merchants_relay_enrichment_plain: 'รีเลย์',
     merchants_relay_enrichment_enriched: 'รีเลย์เสริม',
     merchants_relay_enrichment_hint:
-      'รีเลย์เสริม: คงโครงสร้างจาก PG เพิ่มเฉพาะชื่อฟิลด์ MerchantCode (ChillPay MID ตามสภาพแวดล้อม) และ RouteNo (หมายเลข route ร้าน) แยกจากการแปลงแจ้งภายใน/dev JPAY จะบันทึกเป็นรีเลย์อย่างเดียว',
+      'รีเลย์เสริม: เพิ่ม MerchantCode (ChillPay MID) และ RouteNo ถ้า CustomerName ว่างจะเติมจาก body เดียวกัน (ชื่อสำรอง→CustomerId→Description) แยกจากภายใน/dev JPAY บันทึกเป็นรีเลย์อย่างเดียว',
     merchants_label_result_delivery_mode: 'ส่ง RESULT (เมื่อเบราว์เซอร์ POST)',
     merchants_result_delivery_auto: 'AUTO',
     merchants_result_delivery_autot: 'AUTOT',
@@ -5646,7 +5646,7 @@ const messages = {
     merchants_relay_enrichment_plain: '中继',
     merchants_relay_enrichment_enriched: '增强中继',
     merchants_relay_enrichment_hint:
-      '增强中继：在保持 PG 原文结构的前提下，仅追加字段名 MerchantCode（ChillPay MID，按环境）与 RouteNo（商户 route 编号）。与内部/开发通知加工无关。JPAY 商户保存时仅「中继」。',
+      '增强中继：追加 MerchantCode（ChillPay MID，按环境）与 RouteNo。若 CustomerName 为空，用同一通知正文中的支付相关字段补全（姓名别名→CustomerId→Description）。与内部/开发加工无关。JPAY 保存时仅「中继」。',
     merchants_label_result_delivery_mode: 'RESULT 传递（浏览器 POST 时）',
     merchants_result_delivery_auto: 'AUTO',
     merchants_result_delivery_autot: 'AUTOT',
