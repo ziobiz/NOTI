@@ -1177,6 +1177,27 @@ function resolveRelayOffDevUrl(merchant, kind) {
   return resolveMerchantDevInternalUrl(merchant, kind);
 }
 
+/**
+ * ChillPay Result: 브라우저가 미들웨어로 돌아올 때 최종 이동 URL.
+ * 릴레이 ON → 가맹점 resultUrl(원문 릴레이 대상).
+ * 릴레이 OFF + 대체 송부(전산/개발) → 해당 Callback/Result URL(서버 POST와 동일 목적지 우선).
+ */
+function resolveChillpayResultBrowserForwardUrl(merchant, enableRelay) {
+  if (!merchant || typeof merchant !== 'object') return '';
+  if (enableRelay !== false) {
+    return String(merchant.resultUrl || '').trim();
+  }
+  const rof = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
+  if (rof === 'dev_internal') {
+    const u = resolveRelayOffDevUrl(merchant, 'result');
+    if (u) return String(u).trim();
+  } else if (rof === 'internal') {
+    const u = resolveRelayOffInternalUrl(merchant, 'result');
+    if (u) return String(u).trim();
+  }
+  return String(merchant.resultUrl || '').trim();
+}
+
 function maskJpayKeyForDisplay(key) {
   const s = String(key || '');
   if (!s) return '-';
@@ -1794,6 +1815,7 @@ function loadMerchants() {
     Object.entries(loaded).forEach(([id, v]) => {
       if (v && typeof v === 'object') {
         delete v.enableJpaySoonpayMirror;
+        delete v.devSubstituteCountsAsRelayResponse;
       }
       map.set(id, v);
     });
@@ -1835,6 +1857,7 @@ function saveMerchants() {
   MERCHANTS.forEach((v, id) => {
     const copy = { ...v };
     delete copy.enableJpaySoonpayMirror;
+    delete copy.devSubstituteCountsAsRelayResponse;
     obj[id] = copy;
   });
   saveJsonConfig(MERCHANTS_CONFIG_PATH, obj);
@@ -4556,8 +4579,10 @@ async function sendVoidOrRefundNoti(log, type, mode) {
     payload.TransactionId,
   );
   const urls = [];
-  if (merchant.callbackUrl) urls.push({ url: merchant.callbackUrl, kind: 'callback' });
-  if (merchant.resultUrl && merchant.resultUrl !== merchant.callbackUrl) urls.push({ url: merchant.resultUrl, kind: 'result' });
+  if (merchant.enableRelay !== false) {
+    if (merchant.callbackUrl) urls.push({ url: merchant.callbackUrl, kind: 'callback' });
+    if (merchant.resultUrl && merchant.resultUrl !== merchant.callbackUrl) urls.push({ url: merchant.resultUrl, kind: 'result' });
+  }
   let relayOk = true;
   const relayCt =
     pgProv === 'jpay'
@@ -4739,7 +4764,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
     orderNo: notifBodyOrderNo(body) || (payload.OrderNo != null ? String(payload.OrderNo) : ''),
     merchantId: log.merchantId || '',
     routeNo: merchant ? (merchant.routeNo || '') : '',
-    relayStatus: relayOk ? 'ok' : 'fail',
+    relayStatus: urls.length === 0 ? 'skip' : relayOk ? 'ok' : 'fail',
     internalStatus: deliverChillpayInternalVr
       ? internalTargetUrl
         ? internalOk
@@ -5798,7 +5823,9 @@ async function handleNotiRequest(routeKey, req, res) {
   if (shouldRedirectResultBrowser) {
     const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
     const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
-    let redirectTo = isChillpayTestReservedResultRouteKey(routeKey) ? baseUrl + '/noti/test-result' : targetUrl;
+    let redirectTo = isChillpayTestReservedResultRouteKey(routeKey)
+      ? baseUrl + '/noti/test-result'
+      : resolveChillpayResultBrowserForwardUrl(merchant, enableRelay) || targetUrl;
     if (redirectTo && isOurTestReturnUrl(redirectTo, reqHost)) {
       redirectTo = baseUrl + '/noti/test-result' + (redirectTo.includes('?') ? redirectTo.slice(redirectTo.indexOf('?')) : '');
     }
@@ -6457,7 +6484,9 @@ app.get('/noti/:kind/:no', (req, res) => {
   if (!targetUrl) {
   let match = findMerchantByRouteKey(routeKey);
   if (match && match.kind === 'result') {
-    let u = match.targetUrl || '';
+    const m = match.merchant;
+    const er = m && m.enableRelay !== false;
+    let u = resolveChillpayResultBrowserForwardUrl(m, er) || match.targetUrl || '';
     if (u && isOurTestReturnUrl(u, reqHost)) {
       u = baseUrl + '/noti/test-result' + (u.includes('?') ? u.slice(u.indexOf('?')) : '');
     }
@@ -9106,20 +9135,14 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <p class="admin-page-desc">${t(locale, 'merchants_result_delivery_hint')}</p>
         </div>
         <div id="merch-relay-url-block">
+        <p class="admin-page-desc" style="margin-bottom:10px;">${t(locale, 'merchants_origin_urls_dual_role_hint')}</p>
         <label>
           ${t(locale, 'merchants_label_callback_url')}
           <input type="text" name="callbackUrl" id="merchant-callback-url" />
         </label>
         <label>
           ${t(locale, 'merchants_label_result_url')}
-          <div style="display:flex;align-items:center;gap:8px;">
-            <input type="text" name="resultUrl" id="merchant-result-url" style="flex:1;" />
-            <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#374151;white-space:nowrap;">
-              <input type="checkbox" id="use-test-result-url" />
-              ${t(locale, 'merchants_check_test_result_url')}
-            </label>
-          </div>
-          <div class="admin-page-desc" style="margin-top:8px;">${t(locale, 'merchants_result_url_hint')} <code style="background:#f3f4f6;padding:1px 4px;border-radius:4px;">https://noti.icopay.net/admin/test-pay/return</code></div>
+          <input type="text" name="resultUrl" id="merchant-result-url" />
         </label>
         </div>
         <div id="merch-chillpay-route-fields">
@@ -9256,17 +9279,15 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var resultDelWrap = document.getElementById('merch-result-delivery-wrap');
         var cbIn = document.getElementById('merchant-callback-url');
         var rsIn = document.getElementById('merchant-result-url');
-        var useTest = document.getElementById('use-test-result-url');
         var fmtSel = document.getElementById('merchant-relay-format');
-        if (urlBlock) urlBlock.style.display = relayOn ? 'block' : 'none';
+        if (urlBlock) urlBlock.style.display = 'block';
         if (fmtOnlyWrap) fmtOnlyWrap.style.display = relayOn ? 'block' : 'none';
         if (resultDelWrap) resultDelWrap.style.display = 'block';
         if (cbIn) {
           cbIn.required = !!relayOn;
-          cbIn.disabled = !relayOn;
+          cbIn.disabled = false;
         }
-        if (rsIn) rsIn.disabled = !relayOn;
-        if (useTest) useTest.disabled = !relayOn;
+        if (rsIn) rsIn.disabled = false;
         if (fmtSel) fmtSel.disabled = !relayOn;
         var enrichSel = document.getElementById('merchant-relay-enrichment');
         if (enrichSel) enrichSel.disabled = !relayOn;
@@ -9408,18 +9429,6 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       if (jpayRsCopyBtn && jpayRsPreview) {
         jpayRsCopyBtn.addEventListener('click', function () {
           copyToClipboard(jpayRsPreview);
-        });
-      }
-
-      // 가맹점 result URL → 테스트결과페이지 넣기 체크 시 고정 URL 자동 세팅
-      var rsUrlInput = form ? form.querySelector('input[name="resultUrl"]') : null;
-      var useTestResultCheckbox = form ? document.getElementById('use-test-result-url') : null;
-      var TEST_RESULT_URL = 'https://noti.icopay.net/admin/test-pay/return';
-      if (useTestResultCheckbox && rsUrlInput) {
-        useTestResultCheckbox.addEventListener('change', function () {
-          if (this.checked) {
-            rsUrlInput.value = TEST_RESULT_URL;
-          }
         });
       }
 
@@ -9799,8 +9808,9 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
       ? 'autot'
       : 'auto';
   const prev = MERCHANTS.get(merchantId) || before || {};
-  const cbSaved = enableRelayOn ? String(callbackUrl || '').trim() : '';
-  const rsSaved = enableRelayOn ? String(resultUrl || '').trim() : '';
+  // 릴레이 OFF여도 저장: 브라우저 복귀(302/폼 POST)용. 서버 릴레이·무효환불 가맹점 POST는 enableRelay 일 때만 사용.
+  const cbSaved = String(callbackUrl || '').trim();
+  const rsSaved = String(resultUrl || '').trim();
   const rnSaved = pgKind === 'jpay' ? '' : String(routeNo || '').trim();
   const icSaved = pgKind === 'jpay' ? '' : String(internalCustomerId || '').trim();
   const recRaw = String(rawChillpayRecurring || '').trim().toUpperCase();
@@ -9824,7 +9834,6 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     !enableRelayOn && relayOffForwardSaved === 'dev_internal'
       ? String((req.body && req.body.relayOffDevResultUrl) || '').trim()
       : '';
-
   MERCHANTS.set(merchantId, {
     ...prev,
     merchantId,
@@ -13196,7 +13205,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
     const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
     const internalUrl = merchant && (merchant.internalTargetId ? findInternalTargetUrl(merchant.internalTargetId, 'callback') : null) || INTERNAL_NOTI_URL;
-    const hasPgUrl = merchant && (merchant.callbackUrl || merchant.resultUrl);
+    const hasPgUrl = merchant && merchant.enableRelay !== false && (merchant.callbackUrl || merchant.resultUrl);
     const internalBtn = internalUrl
       ? '<form method="post" action="/admin/cancel-refund/cancel-resend-internal" style="display:inline;"><input type="hidden" name="index" value="' + realIndex + '" /><button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;">' + t(locale, 'cr_btn_resend_internal') + '</button></form>'
       : '<span style="color:#9ca3af;font-size:11px;">' + t(locale, 'cr_internal_url_not_set') + '</span>';
@@ -13390,6 +13399,12 @@ app.post('/admin/cancel-refund/cancel-resend-pg', requireAuth, requirePage('cr_c
   const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
   if (!merchant) {
     return res.redirect('/admin/cancel-refund/cancel?resendPg=fail&reasonPg=' + encodeURIComponent('가맹점 없음'));
+  }
+  if (merchant.enableRelay === false) {
+    return res.redirect(
+      '/admin/cancel-refund/cancel?resendPg=fail&reasonPg=' +
+        encodeURIComponent(t(locale, 'cr_resend_pg_requires_relay') || '가맹점 노티(릴레이)가 꺼진 설정에서는 피지 재전송 대상 URL이 아닙니다.'),
+    );
   }
   const targetUrl = (log.targetUrl && String(log.targetUrl).trim()) || merchant.callbackUrl || merchant.resultUrl || '';
   if (!targetUrl) {
