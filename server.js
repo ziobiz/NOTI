@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const os = require('os');
 const nodemailer = require('nodemailer');
 const { t } = require('./locales');
+const pgNotifyDelivery = require('./lib/pgNotifyDelivery');
 
 const app = express();
 const SUPPORTED_LOCALES = ['ko', 'ja', 'en', 'th', 'zh'];
@@ -335,6 +336,31 @@ app.use((req, res, next) => {
 
 const RELAY_TIMEOUT_MS = 15000;
 const INTERNAL_TIMEOUT_MS = 10000;
+/** 개발 노티(JSON POST) 최대 시도 횟수(기본 2 = 최초 1 + 재시도 1). 실패 시 DEV_INTERNAL_RETRY_DELAY_MS 간격으로 반복. */
+const DEV_INTERNAL_HTTP_MAX_ATTEMPTS = Math.min(8, Math.max(1, parseInt(process.env.DEV_INTERNAL_HTTP_MAX_ATTEMPTS || '2', 10) || 2));
+const DEV_INTERNAL_RETRY_DELAY_MS = Math.max(0, parseInt(process.env.DEV_INTERNAL_RETRY_DELAY_MS || '2000', 10) || 2000);
+
+/** ICOPAY pg-notify(JSON POST) 재전송: 백오프·지터·상한·422/본문 실패 정책 (환경변수로 조정) */
+const PG_NOTIFY_DELIVERY = {
+  maxAttempts: Math.min(16, Math.max(1, parseInt(process.env.PG_NOTIFY_MAX_ATTEMPTS || '8', 10) || 8)),
+  backoffBaseMs: Math.max(100, parseInt(process.env.PG_NOTIFY_BACKOFF_BASE_MS || '1000', 10) || 1000),
+  backoffMaxMs: Math.max(500, parseInt(process.env.PG_NOTIFY_BACKOFF_MAX_MS || '120000', 10) || 120000),
+  jitterRatio: Math.min(0.5, Math.max(0, parseFloat(process.env.PG_NOTIFY_JITTER_RATIO || '0.2') || 0.2)),
+  totalDeadlineMs: Math.max(5000, parseInt(process.env.PG_NOTIFY_TOTAL_DEADLINE_MS || '120000', 10) || 120000),
+  /** ICOPAY 계약: 422 기본 재시도(retryable true). 끄려면 PG_NOTIFY_RETRY_ON_422=0|false */
+  retryOn422: (() => {
+    const s = String(process.env.PG_NOTIFY_RETRY_ON_422 || '').trim().toLowerCase();
+    if (s === '') return true;
+    return !['0', 'false', 'no', 'off'].includes(s);
+  })(),
+  retryOnBodyFailure: ['1', 'true', 'yes'].includes(String(process.env.PG_NOTIFY_RETRY_ON_BODY_FAILURE || '').toLowerCase()),
+  /** DEAD_LETTER 시 SMTP 알림 수신(설정 시). ChillPay 환경설정 SMTP 사용 */
+  dlqEmailTo: String(process.env.PG_NOTIFY_DLQ_EMAIL_TO || '').trim(),
+  workerIntervalMs: Math.max(5000, parseInt(process.env.PG_NOTIFY_WORKER_INTERVAL_MS || '20000', 10) || 20000),
+  workerDisabled: ['1', 'true', 'yes'].includes(String(process.env.PG_NOTIFY_DISABLE_WORKER || '').toLowerCase()),
+};
+const runSerializedPgNotify = pgNotifyDelivery.createPerKeyChain();
+const inflightPgNotifyJobIds = new Set();
 
 // ===== 테스트 / 라이브 환경 분리 (APP_ENV=test | production) =====
 const APP_ENV = (process.env.APP_ENV || process.env.NODE_ENV || 'production').toLowerCase() === 'test' ? 'test' : 'production';
@@ -1905,6 +1931,7 @@ const SYSTEM_MONITOR_STATE_PATH = path.join(DATA_DIR, 'system-monitor-state.json
 const SSL_MONITOR_STATE_PATH = path.join(DATA_DIR, 'ssl-monitor-state.json');
 const SERVER_SITUATION_ANALYSES_PATH = path.join(DATA_DIR, 'server-situation-analyses.json');
 const RECURRING_CALLBACK_LOG_PATH = path.join(DATA_DIR, 'recurring-callback.log');
+const PG_NOTIFY_DELIVERY_JOBS_PATH = path.join(DATA_DIR, 'pg-notify-delivery-jobs.json');
 const VOID_UI_DELETED_RETENTION_DAYS = 31;
 
 /** 저장값이 없을 때만 사용: 환경변수 SYSTEM_MONITOR_MONTHLY_QUOTA_GB (기본 300GB) */
@@ -2721,6 +2748,44 @@ function hasRealVoidManualEmailSent(transactionId, merchantId, env, cfgOpt) {
 
 // ===== ChillPay Recurring 콜백 로그 (메모리·파일 보관은 환경설정 일수) =====
 let RECURRING_CALLBACK_LOGS = loadJsonLogFile(RECURRING_CALLBACK_LOG_PATH, 'at');
+
+function loadPgNotifyDeliveryJobs() {
+  try {
+    if (!fs.existsSync(PG_NOTIFY_DELIVERY_JOBS_PATH)) return [];
+    const raw = fs.readFileSync(PG_NOTIFY_DELIVERY_JOBS_PATH, 'utf8');
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+function prunePgNotifyDeliveryJobs(jobs) {
+  const now = Date.now();
+  const maxLen = 2000;
+  const deliveredRetainMs = 14 * 24 * 60 * 60 * 1000;
+  const terminalRetainMs = 90 * 24 * 60 * 60 * 1000;
+  const filtered = jobs.filter((j) => {
+    const iso = j.updatedAtIso || j.createdAtIso;
+    const t = iso ? Date.parse(iso) : now;
+    if (Number.isNaN(t)) return true;
+    if (j.status === 'DELIVERED' && now - t > deliveredRetainMs) return false;
+    if ((j.status === 'DEAD_LETTER' || j.status === 'FAILED') && now - t > terminalRetainMs) return false;
+    return true;
+  });
+  if (filtered.length > maxLen) return filtered.slice(-maxLen);
+  return filtered;
+}
+function persistPgNotifyDeliveryJobs() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    PG_NOTIFY_DELIVERY_JOBS = prunePgNotifyDeliveryJobs(PG_NOTIFY_DELIVERY_JOBS);
+    fs.writeFileSync(PG_NOTIFY_DELIVERY_JOBS_PATH, JSON.stringify(PG_NOTIFY_DELIVERY_JOBS), 'utf8');
+  } catch (e) {
+    console.warn('[pg-notify-delivery] persist failed', e.message || e);
+  }
+}
+let PG_NOTIFY_DELIVERY_JOBS = loadPgNotifyDeliveryJobs();
+
 function appendRecurringCallbackLog(entry) {
   const nowIso = new Date().toISOString();
   const log = { ...entry, at: nowIso };
@@ -2746,6 +2811,7 @@ function reloadMemLogsFromDisk() {
   TEST_LOGS = loadJsonLogFile(TEST_LOG_PATH, 'loggedAtIso');
   MAIL_LOGS = loadJsonLogFile(MAIL_LOG_PATH, 'sentAtIso');
   RECURRING_CALLBACK_LOGS = loadJsonLogFile(RECURRING_CALLBACK_LOG_PATH, 'at');
+  PG_NOTIFY_DELIVERY_JOBS = loadPgNotifyDeliveryJobs();
 }
 
 function normalizeCurrencyCode(value) {
@@ -3043,6 +3109,10 @@ function internalHaystackAdminLog(log, locale) {
     log.routeNo,
     log.internalTargetId,
     payloadJson,
+    log.upstreamResponsePreview,
+    log.upstreamHttpStatus,
+    log.deliveryAttempts,
+    log.upstreamError,
   ]
     .join(' ')
     .toLowerCase();
@@ -3091,6 +3161,10 @@ function internalResultHaystackLog(log, locale, envLabel) {
     internalStatus,
     deliveryLabel,
     payloadJson,
+    log.upstreamResponsePreview,
+    log.upstreamHttpStatus,
+    log.deliveryAttempts,
+    log.upstreamError,
   ]
     .join(' ')
     .toLowerCase();
@@ -4694,6 +4768,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
   if (deliverChillpayDevInternalVr) {
     try {
       let devUrl = null;
+      let devAggVr = null;
       if (useRelayOffDevUrlsVr) {
         devUrl = resolveRelayOffDevUrl(merchant, 'callback');
       } else {
@@ -4704,16 +4779,10 @@ async function sendVoidOrRefundNoti(log, type, mode) {
       } else {
         devInternalTargetUrl = devUrl;
         console.log('[취소 노티 → 개발 전산] url=', devUrl, 'PaymentStatus=', devPayload.PaymentStatus, 'TransactionId=', devPayload.TransactionId);
-        let devRes = await sendToInternal(devUrl, devPayload);
-        devOk = devRes.success;
-        if (!devOk) {
-          console.warn('[취소 노티 → 개발 전산 실패] status=', devRes.status, ' 1회 재시도 예정');
-          await new Promise((r) => setTimeout(r, 2000));
-          devRes = await sendToInternal(devUrl, devPayload);
-          devOk = devRes.success;
-          if (devOk) console.log('[취소 노티 → 개발 전산 재시도 성공]');
-          else console.warn('[취소 노티 → 개발 전산 재시도 실패]');
-        }
+        devAggVr = await sendDevInternalHttpNotify(devUrl, devPayload);
+        devOk = devAggVr.success;
+        if (devOk) console.log('[취소 노티 → 개발 전산 완료] attempts=', devAggVr.attempts);
+        else console.warn('[취소 노티 → 개발 전산 실패] attempts=', devAggVr.attempts, 'status=', devAggVr.status);
       }
       appendDevInternalLog({
         storedAt: new Date().toISOString(),
@@ -4724,6 +4793,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
         internalTargetUrl: devInternalTargetUrl,
         internalDeliveryStatus: devInternalTargetUrl ? (devOk ? 'ok' : 'fail') : 'skip',
         pgProvider: pgProv,
+        ...(devInternalTargetUrl && devAggVr ? devInternalLogUpstreamExtras(devAggVr) : {}),
       });
     } catch (err) {
       console.error('[무효/환불 노티 → 개발 전산 실패]', err.message);
@@ -4817,6 +4887,85 @@ async function sendSmtpTextMail({ to, subject, text }) {
     rejected: Array.isArray(info && info.rejected) ? info.rejected.map(String) : [],
     response: info && info.response ? String(info.response) : '',
   };
+}
+
+/** ICOPAY pg-notify URL 로그·알림용 토큰 마스킹 */
+function maskPgNotifyUrlForLog(url) {
+  if (!url) return '';
+  try {
+    return String(url).replace(/(\/api\/open\/pg-notify\/)([^/?#]+)(?=\/|\?|#|$)/gi, (_, prefix, tok) => {
+      if (!tok || tok.length <= 10) return prefix + '***';
+      return prefix + tok.slice(0, 4) + '…' + tok.slice(-4);
+    });
+  } catch {
+    return String(url).slice(0, 96);
+  }
+}
+
+function notifyPgNotifyDeadLetter(job) {
+  if (!job || job.status !== 'DEAD_LETTER') return;
+  const maskedUrl = maskPgNotifyUrlForLog(job.url);
+  const payload = job.payload && typeof job.payload === 'object' ? job.payload : {};
+  const txId = String(payload.TransactionId ?? payload.transactionId ?? '').trim();
+  const orderNo = String(payload.OrderNo ?? payload.orderNo ?? '').trim();
+  const text =
+    `PG notify delivery DEAD_LETTER\n` +
+    `jobId: ${job.id}\n` +
+    `url: ${maskedUrl}\n` +
+    `attempts: ${job.attempts}\n` +
+    `lastHttpStatus: ${job.lastHttpStatus}\n` +
+    `terminalReason: ${job.terminalReason}\n` +
+    `transactionId: ${txId || '-'}\n` +
+    `orderNo: ${orderNo || '-'}\n` +
+    `responseSnippet: ${String(job.lastBodyPreview || '').slice(0, 400)}`;
+  try {
+    appendMailLog({
+      type: 'pg_notify_dlq',
+      jobId: job.id,
+      maskedUrl,
+      transactionId: txId || undefined,
+      orderNo: orderNo || undefined,
+      attempts: job.attempts,
+      lastHttpStatus: job.lastHttpStatus,
+      terminalReason: job.terminalReason || '',
+      emailTo: PG_NOTIFY_DELIVERY.dlqEmailTo || '',
+      deliveryStatus: PG_NOTIFY_DELIVERY.dlqEmailTo ? 'pending_send' : 'log_only',
+    });
+  } catch (_) {}
+  const to = PG_NOTIFY_DELIVERY.dlqEmailTo;
+  if (!to) return;
+  setImmediate(() => {
+    sendSmtpTextMail({
+      to,
+      subject: `[NOTI] PG notify DEAD_LETTER ${String(job.id).slice(0, 8)}`,
+      text,
+    })
+      .then((info) => {
+        try {
+          appendMailLog({
+            type: 'pg_notify_dlq_email',
+            jobId: job.id,
+            maskedUrl,
+            emailTo: to,
+            deliveryStatus: 'ok',
+            messageId: info && info.messageId ? String(info.messageId) : '',
+          });
+        } catch (_) {}
+      })
+      .catch((e) => {
+        console.warn('[pg-notify-delivery] DLQ mail failed', e.message || e);
+        try {
+          appendMailLog({
+            type: 'pg_notify_dlq_email',
+            jobId: job.id,
+            maskedUrl,
+            emailTo: to,
+            deliveryStatus: 'fail',
+            error: String(e.message || e).slice(0, 200),
+          });
+        } catch (_) {}
+      });
+  });
 }
 
 /**
@@ -5242,31 +5391,292 @@ function buildEnrichedRelayArgs(relayFormat, relayOpts, body, enriched) {
   return { body, relayOpts };
 }
 
+function truncateInternalHttpResponsePreview(data, maxLen) {
+  const n = maxLen == null ? 480 : maxLen;
+  if (data === undefined || data === null) return '';
+  let s;
+  try {
+    s = typeof data === 'object' ? JSON.stringify(data) : String(data);
+  } catch (_) {
+    s = String(data);
+  }
+  if (s.length <= n) return s;
+  return s.slice(0, n) + '…';
+}
+
 /**
- * 전산 쪽으로 가공된 노티 전송
- * HTTP 2xx여도 응답 본문에 success: false / ok: false 가 있으면 실패로 처리 (전산에서 결제 미존재 등)
+ * 전산/개발 노티 URL로 JSON POST
+ * - HTTP 2xx 이어도 본문이 객체일 때 success·ok 가 false 이면 실패(전산·ICOPAY PG 등)
+ * - ICOPAY PG(/api/open/pg-notify): processed·received 가 명시된 경우 false 이면 실패(결제내역 반영 실패 등)
+ * - ICOPAY 계약: 응답 JSON의 retryable 은 재시도 판별에 전달(옵션)
+ * - opts.idempotencyKey: ICOPAY 합의 시 헤더 Idempotency-Key (재전송 시 동일 값)
  */
-async function sendToInternal(internalUrl, payload) {
-  if (!internalUrl) return { success: false, status: 0 };
+async function sendToInternal(internalUrl, payload, opts) {
+  if (!internalUrl) return { success: false, status: 0, responsePreview: '', durationMs: 0 };
+  const o = opts || {};
+  const t0 = Date.now();
+  const headers = { 'Content-Type': 'application/json' };
+  if (o.idempotencyKey) {
+    const k = String(o.idempotencyKey).trim().slice(0, 200);
+    if (k) headers['Idempotency-Key'] = k;
+  }
   try {
     const res = await axios.post(internalUrl, payload, {
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       timeout: INTERNAL_TIMEOUT_MS,
       validateStatus: () => true,
     });
+    const responsePreview = truncateInternalHttpResponsePreview(res.data);
     const statusOk = res.status >= 200 && res.status < 300;
     let bodyOk = true;
-    if (statusOk && res.data != null && typeof res.data === 'object') {
-      if (res.data.success === false || res.data.ok === false) {
-        bodyOk = false;
-        if (res.data.message || res.data.reason) console.warn('[전산 응답] success=false', res.data.message || res.data.reason);
+    let bodyRetryable;
+    if (res.data != null && typeof res.data === 'object') {
+      const d = res.data;
+      if (Object.prototype.hasOwnProperty.call(d, 'retryable')) {
+        bodyRetryable = !!d.retryable;
+      }
+      if (statusOk) {
+        if (d.success === false || d.ok === false) {
+          bodyOk = false;
+          if (d.message || d.reason) console.warn('[전산 응답] success=false', d.message || d.reason);
+        }
+        if (Object.prototype.hasOwnProperty.call(d, 'processed') && d.processed === false) {
+          bodyOk = false;
+          console.warn('[전산 응답] processed=false', d.message || d.reason || '');
+        }
+        if (Object.prototype.hasOwnProperty.call(d, 'received') && d.received === false) {
+          bodyOk = false;
+          console.warn('[전산 응답] received=false', d.message || d.reason || '');
+        }
       }
     }
     const ok = statusOk && bodyOk;
-    return { success: ok, status: res.status };
+    const out = { success: ok, status: res.status, responsePreview, durationMs: Date.now() - t0 };
+    if (bodyRetryable !== undefined) out.retryable = bodyRetryable;
+    return out;
   } catch (err) {
-    return { success: false, status: 0, error: err.message };
+    return { success: false, status: 0, error: err.message, responsePreview: '', durationMs: Date.now() - t0 };
   }
+}
+
+function createPgNotifyDeliveryJobRecord(internalUrl, payload, idempotencyKey) {
+  const nowIso = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    idempotencyKey,
+    url: internalUrl,
+    payload: JSON.parse(JSON.stringify(payload)),
+    status: 'PENDING',
+    attempts: 0,
+    maxAttempts: PG_NOTIFY_DELIVERY.maxAttempts,
+    nextAttemptAtIso: null,
+    lastHttpStatus: null,
+    lastBodyPreview: '',
+    lastDurationMs: null,
+    lastError: null,
+    attemptHistory: [],
+    createdAtIso: nowIso,
+    updatedAtIso: nowIso,
+    deliveryStartedAtIso: nowIso,
+    terminalReason: null,
+    manualRetries: 0,
+  };
+}
+
+function recordPgNotifyJobAttempt(job, last) {
+  job.lastHttpStatus = last.status;
+  job.lastBodyPreview = (last.responsePreview || '').slice(0, 480);
+  job.lastDurationMs = last.durationMs;
+  job.lastError = last.error || null;
+  job.attemptHistory.push({
+    atIso: new Date().toISOString(),
+    status: last.status,
+    durationMs: last.durationMs,
+    preview: (last.responsePreview || '').slice(0, 240),
+    error: last.error || undefined,
+    retryable: last.retryable !== undefined ? !!last.retryable : undefined,
+  });
+  job.updatedAtIso = new Date().toISOString();
+}
+
+async function finalizePgNotifyJobAfterLoop(job, last, cfg, retryOpts, tFirst) {
+  const elapsedMs = Date.now() - tFirst;
+  const state = pgNotifyDelivery.terminalDeliveryState(last, { ...cfg, ...retryOpts }, job.attempts, elapsedMs);
+  job.status = state === 'PENDING' ? 'DEAD_LETTER' : state;
+  job.nextAttemptAtIso = null;
+  if (job.status === 'DEAD_LETTER' || job.status === 'FAILED') {
+    const r = pgNotifyDelivery.shouldRetryDelivery(last, retryOpts);
+    if (!r.retry) job.terminalReason = r.reason;
+    else if (job.attempts >= cfg.maxAttempts) job.terminalReason = 'max_attempts';
+    else if (elapsedMs >= cfg.totalDeadlineMs) job.terminalReason = 'deadline_exceeded';
+    else job.terminalReason = r.reason || 'exhausted';
+  }
+  job.updatedAtIso = new Date().toISOString();
+  persistPgNotifyDeliveryJobs();
+  if (job.status === 'DEAD_LETTER') {
+    console.warn(
+      '[pg-notify-delivery] DEAD_LETTER',
+      job.id,
+      maskPgNotifyUrlForLog(job.url),
+      job.lastHttpStatus,
+      job.terminalReason,
+      'attempts=' + job.attempts
+    );
+    notifyPgNotifyDeadLetter(job);
+  }
+  return {
+    success: last.success,
+    status: last.status,
+    error: last.error,
+    responsePreview: last.responsePreview || '',
+    attempts: job.attempts,
+    attemptStatuses: job.attemptHistory.map((h) => h.status),
+    deliveryState: job.status,
+    jobId: job.id,
+    durationMsTotal: elapsedMs,
+  };
+}
+
+/**
+ * 단일 pg-notify 배송 작업(신규 또는 워커 재개). 동일 payload·URL로 axios 본문 불변.
+ */
+async function runPgNotifyDeliveryJobLifecycle(job, isResume) {
+  const cfg = {
+    maxAttempts: PG_NOTIFY_DELIVERY.maxAttempts,
+    backoffBaseMs: PG_NOTIFY_DELIVERY.backoffBaseMs,
+    backoffMaxMs: PG_NOTIFY_DELIVERY.backoffMaxMs,
+    jitterRatio: PG_NOTIFY_DELIVERY.jitterRatio,
+    totalDeadlineMs: PG_NOTIFY_DELIVERY.totalDeadlineMs,
+  };
+  const retryOpts = {
+    retryOn422: PG_NOTIFY_DELIVERY.retryOn422,
+    retryOnBodyFailure: PG_NOTIFY_DELIVERY.retryOnBodyFailure,
+  };
+  const tFirst = Date.parse(job.deliveryStartedAtIso || job.createdAtIso) || Date.now();
+  inflightPgNotifyJobIds.add(job.id);
+  const postOpts = { idempotencyKey: job.idempotencyKey };
+  try {
+    let last = await sendToInternal(job.url, job.payload, postOpts);
+    if (isResume) job.attempts = (job.attempts || 0) + 1;
+    else job.attempts = 1;
+    recordPgNotifyJobAttempt(job, last);
+    persistPgNotifyDeliveryJobs();
+
+    while (!last.success && job.attempts < cfg.maxAttempts) {
+      const r = pgNotifyDelivery.shouldRetryDelivery(last, retryOpts);
+      if (!r.retry) break;
+      if (Date.now() - tFirst >= cfg.totalDeadlineMs) break;
+      let waitMs = pgNotifyDelivery.computeBackoffMs(job.attempts - 1, cfg);
+      const elapsed = Date.now() - tFirst;
+      if (elapsed + waitMs > cfg.totalDeadlineMs) waitMs = Math.max(0, cfg.totalDeadlineMs - elapsed);
+      if (waitMs > 0) {
+        job.nextAttemptAtIso = new Date(Date.now() + waitMs).toISOString();
+        job.status = 'PENDING';
+        job.updatedAtIso = new Date().toISOString();
+        persistPgNotifyDeliveryJobs();
+        await new Promise((res) => setTimeout(res, waitMs));
+      }
+      job.nextAttemptAtIso = null;
+      last = await sendToInternal(job.url, job.payload, postOpts);
+      job.attempts++;
+      recordPgNotifyJobAttempt(job, last);
+      persistPgNotifyDeliveryJobs();
+    }
+    return await finalizePgNotifyJobAfterLoop(job, last, cfg, retryOpts, tFirst);
+  } finally {
+    inflightPgNotifyJobIds.delete(job.id);
+  }
+}
+
+function shouldPgNotifyWorkerPickJob(job) {
+  if (job.status !== 'PENDING') return false;
+  if (inflightPgNotifyJobIds.has(job.id)) return false;
+  const now = Date.now();
+  if (job.nextAttemptAtIso) {
+    const t = Date.parse(job.nextAttemptAtIso);
+    return !Number.isNaN(t) && t <= now;
+  }
+  const u = Date.parse(job.updatedAtIso || job.createdAtIso);
+  if (Number.isNaN(u)) return true;
+  return now - u > 60 * 1000;
+}
+
+let pgNotifyDeliveryWorkerBusy = false;
+function tickPgNotifyDeliveryWorker() {
+  if (PG_NOTIFY_DELIVERY.workerDisabled || pgNotifyDeliveryWorkerBusy) return;
+  pgNotifyDeliveryWorkerBusy = true;
+  try {
+    for (const job of PG_NOTIFY_DELIVERY_JOBS) {
+      if (!shouldPgNotifyWorkerPickJob(job)) continue;
+      const jid = job.id;
+      const idem = job.idempotencyKey;
+      setImmediate(() => {
+        runSerializedPgNotify(idem, async () => {
+          const fresh = PG_NOTIFY_DELIVERY_JOBS.find((j) => j.id === jid);
+          if (!fresh || fresh.status !== 'PENDING' || !shouldPgNotifyWorkerPickJob(fresh)) return;
+          await runPgNotifyDeliveryJobLifecycle(fresh, true);
+        }).catch((e) => console.warn('[pg-notify-delivery] worker job error', e.message || e));
+      });
+    }
+  } finally {
+    pgNotifyDeliveryWorkerBusy = false;
+  }
+}
+
+/**
+ * 개발 노티(ICOPAY pg-notify JSON POST): 멱등 키당 직렬 전송, 지수 백오프+지터, 상태 파일 data/pg-notify-delivery-jobs.json
+ */
+async function sendDevInternalHttpNotify(internalUrl, payload) {
+  if (!internalUrl) {
+    return {
+      success: false,
+      status: 0,
+      responsePreview: '',
+      attempts: 0,
+      attemptStatuses: [],
+      deliveryState: 'FAILED',
+      error: 'no_url',
+    };
+  }
+  const idem = pgNotifyDelivery.buildIdempotencyKey(internalUrl, payload);
+  return runSerializedPgNotify(idem, async () => {
+    const job = createPgNotifyDeliveryJobRecord(internalUrl, payload, idem);
+    PG_NOTIFY_DELIVERY_JOBS.push(job);
+    persistPgNotifyDeliveryJobs();
+    return runPgNotifyDeliveryJobLifecycle(job, false);
+  });
+}
+
+function devInternalUpstreamCellText(log) {
+  const prev = (log && log.upstreamResponsePreview) ? String(log.upstreamResponsePreview).trim() : '';
+  const st = log && log.upstreamHttpStatus != null && log.upstreamHttpStatus !== '' ? String(log.upstreamHttpStatus) : '';
+  const att = log && log.deliveryAttempts != null ? Number(log.deliveryAttempts) : 0;
+  const err = log && log.upstreamError ? String(log.upstreamError).trim() : '';
+  const bits = [];
+  if (att > 1) bits.push('×' + att);
+  if (st) bits.push('HTTP ' + st);
+  if (err) bits.push(err.length > 100 ? err.slice(0, 100) + '…' : err);
+  const head = bits.join(' · ');
+  if (prev && head) return head + '\n' + prev;
+  if (prev) return prev;
+  if (head) return head;
+  return '';
+}
+
+/** 개발 노티 로그에 저장할 업스트림(수락 측) 메타 — JSON POST 경로만 채움 */
+function devInternalLogUpstreamExtras(agg) {
+  if (!agg || typeof agg !== 'object') return {};
+  const ok = !!agg.success;
+  return {
+    upstreamHttpStatus: agg.status,
+    upstreamResponsePreview: agg.responsePreview || undefined,
+    deliveryAttempts: agg.attempts,
+    deliveryAttemptStatuses: agg.attempts > 1 ? agg.attemptStatuses : undefined,
+    upstreamError: !ok && agg.error ? agg.error : undefined,
+    pgNotifyDeliveryState: agg.deliveryState || undefined,
+    pgNotifyJobId: agg.jobId || undefined,
+    pgNotifyDurationMsTotal: agg.durationMsTotal != null ? agg.durationMsTotal : undefined,
+  };
 }
 
 // routeKey(rount_c1, rount_r1 등)로 어떤 가맹점/타입(callback,result) 인지 찾기
@@ -5763,23 +6173,19 @@ async function handleNotiRequest(routeKey, req, res) {
     try {
       const devPayload = transformForDevInternal(body, merchant);
       const devUrl = useRelayOffDevUrls ? resolveRelayOffDevUrl(merchant, kind) : resolveMerchantDevInternalUrl(merchant, kind);
+      let devAggResult = null;
 
       if (!devUrl) {
         console.log('[개발 전산 전송 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
       } else {
         devInternalTargetUrl = devUrl;
-        console.log('[개발 전산 전송 중] 개발 전산 시스템으로 가공 데이터 전송, merchant=', merchantId, 'url=', devUrl);
-        let devRes = await sendToInternal(devUrl, devPayload);
-        devDeliverySuccess = devRes.success;
+        console.log('[개발 전산 전송 중] 개발 전산 시스템으로 가공 데이터 전송, merchant=', merchantId, 'url=', devUrl, 'maxAttempts=', DEV_INTERNAL_HTTP_MAX_ATTEMPTS);
+        devAggResult = await sendDevInternalHttpNotify(devUrl, devPayload);
+        devDeliverySuccess = devAggResult.success;
         if (devDeliverySuccess) {
-          console.log('[개발 전산 전송 완료]');
+          console.log('[개발 전산 전송 완료] attempts=', devAggResult.attempts, 'status=', devAggResult.status);
         } else {
-          console.warn('[개발 전산 전송 실패] status=', devRes.status, ' 1회 재시도 예정');
-          await new Promise((r) => setTimeout(r, 2000));
-          devRes = await sendToInternal(devUrl, devPayload);
-          devDeliverySuccess = devRes.success;
-          if (devDeliverySuccess) console.log('[개발 전산 전송 재시도 성공]');
-          else console.warn('[개발 전산 전송 재시도 실패]');
+          console.warn('[개발 전산 전송 실패] attempts=', devAggResult.attempts, 'lastStatus=', devAggResult.status, devAggResult.error || '');
         }
       }
       appendDevInternalLog({
@@ -5790,6 +6196,7 @@ async function handleNotiRequest(routeKey, req, res) {
         payload: devPayload,
         internalTargetUrl: devInternalTargetUrl,
         internalDeliveryStatus: devInternalTargetUrl ? (devDeliverySuccess ? 'ok' : 'fail') : 'skip',
+        ...(devInternalTargetUrl && devAggResult ? devInternalLogUpstreamExtras(devAggResult) : {}),
       });
     } catch (err) {
       console.error('[개발 전산 전송 실패]', err.message);
@@ -6237,13 +6644,8 @@ async function handleJpayNotiRequest(routeKey, req, res) {
         const devPayload = transformForDevInternal(body, merchant, { pgProvider: 'jpay' });
         devInternalTargetUrl = devUrl;
         console.log('[JPAY 개발 전산 전송] 가맹점 릴레이 끔·대체=개발, 개발 환경설정 가공 후 POST, merchant=', merchantId, 'url=', devUrl);
-        let devRes = await sendToInternal(devUrl, devPayload);
-        devDeliverySuccess = devRes.success;
-        if (!devDeliverySuccess) {
-          await new Promise((r) => setTimeout(r, 2000));
-          devRes = await sendToInternal(devUrl, devPayload);
-          devDeliverySuccess = devRes.success;
-        }
+        const devAggJpay = await sendDevInternalHttpNotify(devUrl, devPayload);
+        devDeliverySuccess = devAggJpay.success;
         appendDevInternalLog({
           storedAt: new Date().toISOString(),
           merchantId,
@@ -6257,6 +6659,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
           pgProvider: 'jpay',
           routeKey,
           ...jpayInternalLogExtras(),
+          ...devInternalLogUpstreamExtras(devAggJpay),
         });
       }
     } catch (err) {
@@ -6591,14 +6994,17 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
     nav.push(navGroup(t(locale, 'nav_merchant'), ['/admin/merchants'], link('/admin/merchants', t(locale, 'nav_merchant_settings'))));
   }
   if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('traffic_analysis') || can('mail_logs')) {
-    const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/mail-logs', '/admin/traffic'];
+    const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/pg-notify-delivery', '/admin/mail-logs', '/admin/traffic'];
     const logItems = [];
     if (can('pg_result')) logItems.push(link('/admin/logs-result', t(locale, 'nav_pg_result')));
     if (can('internal_result')) logItems.push(link('/admin/internal-result', t(locale, 'nav_internal_result')));
     if (can('dev_result')) logItems.push(link('/admin/dev-internal-result', t(locale, 'nav_dev_result')));
     if (can('pg_logs')) logItems.push(link('/admin/logs', t(locale, 'nav_pg_noti_log')));
     if (can('internal_logs')) logItems.push(link('/admin/internal', t(locale, 'nav_internal_noti_log')));
-    if (can('dev_internal_logs')) logItems.push(link('/admin/dev-internal', t(locale, 'nav_dev_internal_noti_log')));
+    if (can('dev_internal_logs')) {
+      logItems.push(link('/admin/dev-internal', t(locale, 'nav_dev_internal_noti_log')));
+      logItems.push(link('/admin/pg-notify-delivery', t(locale, 'nav_pg_notify_delivery')));
+    }
     if (can('mail_logs')) logItems.push(link('/admin/mail-logs', t(locale, 'nav_mail_logs')));
     if (can('traffic_analysis')) logItems.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis')));
     nav.push(navGroup(t(locale, 'nav_logs'), logPaths, logItems.join('')));
@@ -13339,7 +13745,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
   let devOk = true;
   if (devUrl) {
     try {
-      const devResult = await sendToInternal(devUrl, devPayload);
+      const devResult = await sendDevInternalHttpNotify(devUrl, devPayload);
       devOk = devResult.success;
       appendDevInternalLog({
         storedAt: new Date().toISOString(),
@@ -13350,6 +13756,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
         internalTargetUrl: devUrl,
         internalDeliveryStatus: devOk ? 'ok' : 'fail',
         pgProvider: 'chillpay',
+        ...devInternalLogUpstreamExtras(devResult),
       });
     } catch (e) {
       devOk = false;
@@ -19577,10 +19984,12 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       const resendBtn = canResend
         ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDev === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend">${devResendLabel}</button></form>`
         : '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawDev, esc) + '</span>';
+      const upStr = devInternalUpstreamCellText(log);
       return `<tr>
         <td class="col-date">${highlightLogSearchHtml(dt.date, logSearchRawDev, esc)}</td>
         <td class="col-time">TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawDev, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawDev, esc)}</span></td>
         <td class="col-status"><span class="${internalClass}">${highlightLogSearchHtml(internalLabel, logSearchRawDev, esc)}</span></td>
+        <td class="col-upstream"><pre class="cell-upstream-pre">${upStr ? esc(upStr) : '—'}</pre></td>
         <td class="col-header"><pre>${highlightLogSearchHtml(jsonHeader, logSearchRawDev, esc)}</pre></td>
         <td class="col-json"><pre>${highlightLogSearchHtml(jsonValue, logSearchRawDev, esc)}</pre></td>
         <td class="col-action">${resendBtn}</td>
@@ -19637,6 +20046,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
     .label-none { color:#b91c1c; font-weight:700; }
     .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
     .btn-resend:hover { background: #1d4ed8; }
+    .cell-upstream-pre { font-family: ui-monospace, monospace; font-size: 11px; text-align: left; margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow: auto; }
   </style>
 </head>
 <body>
@@ -19648,6 +20058,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_internal_noti_log')} (${totalCountDevInternal})</h1>
       ${hubHtmlDevInternal}
       <p class="admin-page-desc">${t(locale, 'internal_logs_desc')}</p>
+      <p class="admin-page-desc">${t(locale, 'dev_internal_logs_retry_hint')}</p>
       ${(() => {
         const fh =
           (logPgDev === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
@@ -19673,19 +20084,20 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
         );
       })()}
       <table>
-        <colgroup><col style="width:8%;" /><col style="width:10%;" /><col style="width:6%;" /><col style="width:22%;" /><col style="width:46%;" /><col style="width:6%;" /></colgroup>
+        <colgroup><col style="width:8%;" /><col style="width:9%;" /><col style="width:6%;" /><col style="width:14%;" /><col style="width:17%;" /><col style="width:34%;" /><col style="width:8%;" /></colgroup>
         <thead>
           <tr>
             <th>${t(locale, 'pg_logs_th_received_date')}</th>
             <th>${t(locale, 'pg_logs_th_received_time')}</th>
             <th>${t(locale, 'cr_th_internal_receive')}</th>
+            <th>${t(locale, 'dev_internal_th_upstream')}</th>
             <th>${t(locale, 'internal_logs_header')}</th>
             <th>${t(locale, 'internal_logs_value')}</th>
             <th>${t(locale, 'pg_logs_th_resend')}</th>
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="6" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="7" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
         </tbody>
       </table>
       ${logPagerFooterDevInternal}
@@ -19716,13 +20128,166 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
   }
   const resendKind = (req.body.resendKind || '').toString().toLowerCase() || (isCancelNotiBody(log.payload || {}) ? 'cancel' : 'payment');
   try {
-    const result = await sendToInternal(url, log.payload);
+    const result = await sendDevInternalHttpNotify(url, log.payload);
     if (result.success) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
-    const reason = result.status ? 'HTTP ' + result.status : (result.error || '');
+    const reason =
+      (result.attempts > 1 ? result.attempts + ' attempts, ' : '') +
+      (result.status ? 'HTTP ' + result.status : result.error || '');
     return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
   } catch (err) {
     return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(err.message || String(err)) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
   }
+});
+
+app.get('/admin/pg-notify-delivery', requireAuth, requirePage('dev_internal_logs'), (req, res) => {
+  PG_NOTIFY_DELIVERY_JOBS = loadPgNotifyDeliveryJobs();
+  const locale = getLocale(req);
+  const q = req.query || {};
+  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+  const adminUser = req.session.adminUser || '';
+  const nowDate = new Date();
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const filter = (q.status || 'all').toString().toLowerCase();
+  const jobs = [...PG_NOTIFY_DELIVERY_JOBS]
+    .filter((j) => {
+      if (filter === 'all') return true;
+      const st = String(j.status || '');
+      if (filter === 'dead_letter') return st.toUpperCase() === 'DEAD_LETTER';
+      return st.toLowerCase() === filter;
+    })
+    .sort((a, b) => {
+      const ta = Date.parse(b.updatedAtIso || b.createdAtIso) || 0;
+      const tb = Date.parse(a.updatedAtIso || a.createdAtIso) || 0;
+      return ta - tb;
+    })
+    .slice(0, 200);
+  const msg =
+    q.msg === 'queued'
+      ? `<div class="alert alert-ok" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#d1fae5;border:1px solid #6ee7b7;color:#065f46;">${esc(t(locale, 'pg_notify_delivery_queued'))}</div>`
+      : q.err
+      ? `<div class="alert alert-fail" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#fee2e2;border:1px solid #fecaca;color:#991b1b;">${esc(t(locale, 'pg_notify_delivery_err'))}</div>`
+      : '';
+  const filterLink = (st, label) => {
+    const active = filter === st ? ' font-weight:700;color:#1d4ed8;' : '';
+    return `<a href="/admin/pg-notify-delivery?status=${esc(st)}" style="margin-right:12px;${active}">${esc(label)}</a>`;
+  };
+  const rows = jobs.length
+    ? jobs
+        .map((j) => {
+          const u = esc((j.url || '').slice(0, 96) + (j.url && j.url.length > 96 ? '…' : ''));
+          const retryBtn =
+            j.status === 'DEAD_LETTER' || j.status === 'FAILED'
+              ? `<form method="post" action="/admin/pg-notify-delivery/retry" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_notify_delivery_retry_confirm') || 'OK?').replace(/'/g, "\\'")}');"><input type="hidden" name="jobId" value="${esc(j.id)}" /><button type="submit" class="btn-resend">${esc(t(locale, 'pg_notify_delivery_retry'))}</button></form>`
+              : '—';
+          return `<tr>
+            <td>${esc(String(j.status || ''))}</td>
+            <td>${j.attempts != null ? esc(String(j.attempts)) : '—'}</td>
+            <td>${j.lastHttpStatus != null ? esc(String(j.lastHttpStatus)) : '—'}</td>
+            <td>${j.lastDurationMs != null ? esc(String(j.lastDurationMs)) : '—'}</td>
+            <td style="text-align:left;font-size:11px;word-break:break-all;">${u}</td>
+            <td style="font-size:11px;">${esc(j.updatedAtIso || '')}</td>
+            <td style="font-size:11px;">${esc(j.terminalReason || '')}</td>
+            <td>${retryBtn}</td>
+          </tr>`;
+        })
+        .join('')
+    : `<tr><td colspan="8" style="text-align:center;color:#777;">${esc(t(locale, 'pg_notify_delivery_empty'))}</td></tr>`;
+
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${esc(t(locale, 'pg_notify_delivery_title'))}</title>
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
+    table { border-collapse: collapse; width: 100%; background:#ffffff; border-radius:8px; overflow:hidden; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; }
+    th { background: #e5f0ff; text-align: center; color:#1f2937; }
+    td { text-align: center; }
+    tr:nth-child(even) { background:#f9fafb; }
+    .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
+    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
+    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
+    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
+    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
+    .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
+    .nav-group { margin-bottom:2px; border:1px solid transparent; border-radius:6px; }
+    .nav-group-summary { font-size:14px; font-weight:600; color:#e5e7eb; padding:6px 8px; cursor:pointer; list-style:none; text-transform:uppercase; letter-spacing:0.06em; display:flex; align-items:center; justify-content:space-between; border-radius:6px; }
+    .nav-group-summary::-webkit-details-marker { display:none; }
+    .nav-group-summary::marker { content:""; }
+    .nav-group-summary::after { content:"\\25BC"; font-size:14px; opacity:0.7; transition:transform 0.15s ease; flex-shrink:0; }
+    .nav-group[open] .nav-group-summary::after { transform:rotate(-180deg); }
+    .nav-group-items { padding-left:4px; padding-bottom:4px; }
+    .nav-group-items a { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:13px; border-radius:6px; }
+    .nav a,
+    .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
+    .nav a:hover, .nav a.active { background:rgba(59, 130, 246, 0.35); color:#dbeafe; }
+    .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; }
+    .topbar { background:#e0f2fe; border-radius:10px; padding:8px 14px; font-size:13px; color:#1e293b; display:flex; justify-content:space-between; align-items:center; border:1px solid #bae6fd; flex-wrap:wrap; }
+    .card { background:#ffffff; padding:18px 22px; border-radius:10px; box-shadow:0 10px 25px rgba(15,23,42,0.06); margin-bottom:8px; border:1px solid #e5e7eb; }
+    .btn-resend { padding:4px 10px; font-size:12px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl || '/admin/pg-notify-delivery', req)}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl || '/admin/pg-notify-delivery')}
+      <div class="card">
+        <h1 style="margin:0 0 8px 0;">${esc(t(locale, 'pg_notify_delivery_title'))}</h1>
+        <p class="admin-page-desc">${t(locale, 'pg_notify_delivery_desc')}</p>
+        ${msg}
+        <p style="font-size:13px;margin:8px 0 12px;">
+          ${filterLink('all', t(locale, 'pg_notify_delivery_filter_all'))}
+          ${filterLink('pending', 'PENDING')}
+          ${filterLink('delivered', 'DELIVERED')}
+          ${filterLink('failed', 'FAILED')}
+          ${filterLink('dead_letter', 'DEAD_LETTER')}
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>${esc(t(locale, 'pg_notify_delivery_th_status'))}</th>
+              <th>${esc(t(locale, 'pg_notify_delivery_th_attempts'))}</th>
+              <th>${esc(t(locale, 'pg_notify_delivery_th_last_http'))}</th>
+              <th>${esc(t(locale, 'pg_notify_delivery_th_duration'))}</th>
+              <th>${esc(t(locale, 'pg_notify_delivery_th_url'))}</th>
+              <th>${esc(t(locale, 'pg_notify_delivery_th_updated'))}</th>
+              <th>${esc(t(locale, 'pg_notify_delivery_th_terminal'))}</th>
+              <th>${esc(t(locale, 'pg_notify_delivery_th_action'))}</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
+});
+
+app.post('/admin/pg-notify-delivery/retry', requireAuth, requirePage('dev_internal_logs'), (req, res) => {
+  const jobId = (req.body && req.body.jobId ? String(req.body.jobId) : '').trim();
+  PG_NOTIFY_DELIVERY_JOBS = loadPgNotifyDeliveryJobs();
+  const job = PG_NOTIFY_DELIVERY_JOBS.find((j) => j.id === jobId);
+  if (!job || (job.status !== 'DEAD_LETTER' && job.status !== 'FAILED')) {
+    return res.redirect('/admin/pg-notify-delivery?err=1');
+  }
+  job.attempts = 0;
+  job.deliveryStartedAtIso = new Date().toISOString();
+  job.status = 'PENDING';
+  job.terminalReason = null;
+  job.nextAttemptAtIso = null;
+  job.attemptHistory = [];
+  job.manualRetries = (job.manualRetries || 0) + 1;
+  persistPgNotifyDeliveryJobs();
+  setImmediate(() => {
+    runSerializedPgNotify(job.idempotencyKey, () => runPgNotifyDeliveryJobLifecycle(job, false)).catch((e) =>
+      console.warn('[pg-notify-delivery] manual retry error', e.message || e)
+    );
+  });
+  return res.redirect('/admin/pg-notify-delivery?msg=queued');
 });
 
 // 개발결과 (요약) 페이지
@@ -19801,6 +20366,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       const resendBtn = canResend
         ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="dev-internal-result" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDevRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${devResendLabel}</button></form>`
         : '-';
+      const upStrRes = devInternalUpstreamCellText(log);
       return `<tr>
         <td>${highlightLogSearchHtml(dt.date, logSearchRawDevRes, esc)}</td>
         <td>TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawDevRes, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawDevRes, esc)}</span></td>
@@ -19808,7 +20374,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
         <td>${highlightLogSearchHtml(envLabel, logSearchRawDevRes, esc)}</td>
         <td>${highlightLogSearchHtml(log.merchantId || '-', logSearchRawDevRes, esc)}</td>
         <td><span class="${statusClass}">${highlightLogSearchHtml(label, logSearchRawDevRes, esc)}</span></td>
-        <td class="col-fail-reason">-</td>
+        <td class="col-fail-reason"><pre class="cell-upstream-pre">${upStrRes ? esc(upStrRes) : '—'}</pre></td>
         <td>${resendBtn}</td>
       </tr>`;
     })
@@ -19838,6 +20404,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
     .status-fail { color: #dc2626; font-weight: 600; }
     .time-jp { color: #2563eb; }
     .col-fail-reason { text-align: center; word-break: break-all; max-width: 200px; }
+    .cell-upstream-pre { font-family: ui-monospace, monospace; font-size: 11px; text-align: left; margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 100px; overflow: auto; }
     .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
     .alert { padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
     .alert-ok { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
@@ -19874,6 +20441,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_result')} (${totalCountDevResult})</h1>
       ${hubHtmlDevResult}
       <p class="admin-page-desc">${t(locale, 'dev_result_desc')}</p>
+      <p class="admin-page-desc">${t(locale, 'dev_internal_logs_retry_hint')}</p>
       ${(() => {
         const fh =
           (logPgDevRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
@@ -19910,7 +20478,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
             <th>${t(locale, 'common_env')}</th>
             <th>merchant id</th>
             <th>${t(locale, 'dev_result_th_success')}</th>
-            <th>${t(locale, 'cr_th_fail_reason')}</th>
+            <th>${t(locale, 'dev_internal_th_upstream')}</th>
             <th>${t(locale, 'pg_logs_th_resend')}</th>
           </tr>
         </thead>
@@ -21470,4 +22038,5 @@ app.listen(PORT, () => {
     console.log('INTERNAL_NOTI_URL 미설정 → 전산 전송 비활성');
   }
   startPgTransactionFetchInterval();
+  setInterval(tickPgNotifyDeliveryWorker, PG_NOTIFY_DELIVERY.workerIntervalMs);
 });
