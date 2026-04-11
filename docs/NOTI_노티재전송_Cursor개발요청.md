@@ -6,6 +6,18 @@
 - ICOPAY가 **수신·파싱·저장(및 합의된 후처리)에 실패**한 경우, NOTI는 이를 **명확히 구분**해 **재전송(백오프)** 할 수 있어야 한다.
 - 권장 패턴: **동기 HTTP 계약** — 응답 **HTTP 상태 코드**와(선택) **JSON 본문**으로 성공/실패를 구분한다.
 
+## 노티 연동 vs URL 결제 연동 — 반드시 구분 (결제대행사·연동 개발사)
+
+**노티(Notify / 서버→서버 콜백)** 와 **URL 결제(브라우저 결제·결과 페이지 흐름)** 는 ICOPAY에서 **연동 목적·검증·가맹점 분기 규칙이 다릅니다.** 문서·명세·테스트를 한 덩어리로 취급하면 안 됩니다.
+
+| 구분 | 역할 | ICOPAY 쪽 전제(요약) |
+|------|------|----------------------|
+| **노티** | 대행사·NOTI가 **Notify URL**로 보내는 **POST**(JSON 또는 폼). 승인/변경 결과를 **서버가 수신** | 배포설정에서 **노티 연동**(`integ_noti_yn`)이 켜진 바인딩 기준. 가맹점 분기는 **MID + 루트번호**가 중심. 서버 간이므로 **`Content-Type: application/json` POST** 는 **200 + JSON**(또는 합의된 422/503) 응답을 전제로 함(브라우저 리다이렉트와 혼동 금지). |
+| **URL 결제** | 고객 **브라우저**가 결제/복귀 URL을 오감. 공통 MID·다가맹점 구조가 흔함 | **URL 결제** 연동(`integ_url_pay_yn`) 및 업체코드(**`compId` / `icopayCompId=`**) 요구가 노티와 **다를 수 있음**. **GET·폼 POST** 는 사용자 **결과 페이지(pay-result)** 로 보내는 경로와 맞물릴 수 있음. |
+
+- **혼동 시 증상**: 노티인데 URL결제 전용 규칙(업체코드 강제·응답을 리다이렉트로 처리 등)을 적용하면 **수신 실패·재전송 중단·가맹점 오분기**가 난다.
+- **권장**: 결제대행사·연동 개발사 납품 명세에 **「노티 URL 스펙」절과 「URL 결제(브라우저)」절을 분리**하고, 엔드포인트·필수 파라미터·성공 응답 형식(HTTP 상태·본문)을 채널별로 명시한다.
+
 ## ICOPAY(pg-app) 응답 계약 (구현됨 — NOTI 파싱 기준)
 
 적용 경로: `/api/open/pg-notify/...` 중 **브라우저용 pay-result 리다이렉트가 아닌** 서버-투-서버 응답(JSON·폼 POST 등).
@@ -42,12 +54,76 @@
 
 - 동일 노티 건에 대해 ICOPAY가 중복을 안전하게 처리할 **키**(헤더 `Idempotency-Key` 또는 본문 필드) 합의 후, NOTI는 재전송 시 **동일 키·동일 원문** 유지
 
+## NOTI → ICOPAY 요청 헤더 (수신 성격: 라이브 / 재전송) — **노티미들웨어 개발 요청용**
+
+ICOPAY(`pg-app`)는 노티 수신 시 아래 헤더를 읽어 DB·관리 화면 **「노티수령정보」**의 **수신성격**에 `LIVE`(라이브) / `RETRY`(재전송) / `UNKNOWN`(미표시)를 저장한다. **헤더가 없으면 항상 미표시**이므로, 운영에서 구분을 쓰려면 NOTI가 **ICOPAY로 POST할 때** 헤더를 넣어야 한다.
+
+### 1) 권장 헤더 (명시적)
+
+| 헤더 이름 | 값 | 의미 |
+|-----------|-----|------|
+| **`X-Icopay-Notify-Delivery`** | `LIVE` | NOTI가 해당 건을 ICOPAY로 **최초 전달**하는 HTTP 요청(실시간 파이프라인의 첫 POST). |
+| **`X-Icopay-Notify-Delivery`** | `RETRY` | 동일 논리 건(동일 `Idempotency-Key`·동일 원문 정책)에 대해 **이전 전달이 실패·재시도 대상**이어서 NOTI가 **다시** ICOPAY로 POST하는 요청. |
+
+- 값은 **대소문자 무관** (`live` / `LIVE` 동일).
+- 동일 의미의 별칭 헤더(ICOPAY가 동일하게 처리): **`X-Noti-Delivery`**, **`X-Notify-Delivery`** — 값은 위와 같이 `LIVE` 또는 `RETRY`.
+- (선택) 레거시 호환: `PRIMARY`, `FIRST` → LIVE 취급 / `RESEND`, `DUPLICATE` → RETRY 취급.
+
+**우선순위:** `X-Icopay-Notify-Delivery`(및 별칭 `X-Noti-Delivery`, `X-Notify-Delivery`)가 **비어 있지 않으면** 이 값이 **시도 번호 헤더보다 우선**한다.
+
+### 2) 대안 헤더 (시도 횟수)
+
+다음 헤더 **이름** 중 하나에 **정수**를 넣어도 된다. (여러 개 오면 구현에서 먼저 잡히는 하나를 사용하면 됨.)
+
+| 헤더 이름 (예시) | 값 | ICOPAY 해석 |
+|------------------|-----|-------------|
+| `X-Noti-Attempt` | `1` | **LIVE** |
+| `X-Noti-Attempt` | `2`, `3`, … | **RETRY** |
+| `X-Delivery-Attempt` | 동일 규칙 | 동일 |
+| `X-Retry-Attempt` | 동일 규칙 | 동일 |
+| `X-Icopay-Notify-Attempt` | 동일 규칙 | 동일 |
+
+- **`1` 이하(정수 1)** → LIVE, **`2` 이상** → RETRY.
+- 숫자가 아니면 해당 헤더는 무시되고, 다른 헤더도 없으면 **미표시(UNKNOWN)**.
+
+### 3) NOTI 구현 시 권장 동작
+
+1. **첫 ICOPAY POST:** `X-Icopay-Notify-Delivery: LIVE` **또는** `X-Noti-Attempt: 1`.
+2. **재전송 POST:** 본문·`Idempotency-Key`(합의 시) 등 **기존 정책과 동일**하게 유지하고, `X-Icopay-Notify-Delivery: RETRY` **또는** `X-Noti-Attempt`를 **2 이상**으로 올린다.
+3. **브라우저**로 보내는 URL 결제 복귀 등 **ICOPAY 노티 URL이 아닌 경로**에는 적용하지 않아도 된다. 대상은 **서버-투-서버**로 ICOPAY `pg-notify`에 POST하는 노티만.
+
+### 4) 요청 예시 (개발 참고)
+
+```http
+POST /api/open/pg-notify/{token}/cb01 HTTP/1.1
+Host: {icopay-host}
+Content-Type: application/json
+X-Icopay-Notify-Delivery: RETRY
+Idempotency-Key: {동일-키}
+
+{…본문 JSON…}
+```
+
+```http
+POST /api/open/pg-notify/{token}/cb01 HTTP/1.1
+Host: {icopay-host}
+Content-Type: application/json
+X-Noti-Attempt: 2
+
+{…본문 JSON…}
+```
+
+### 5) ICOPAY 쪽 참조
+
+- 판별 로직: 저장소 `pg-app` — `com.pg.util.NotifyIngressDeliveryKindResolver`
+- DB 컬럼: `tb_pg_notify_inbound.ingress_delivery_kind` (`LIVE` / `RETRY` / `NULL`·`UNKNOWN`)
+
 ## NOTI에서 구현할 기능 (범위)
 
 ### 1. 전달 결과 해석
 
 - ICOPAY로 `POST`(또는 합의된 메서드) 후:
- - `statusCode`, 응답 본문(일부만 저장 가능, 최대 길이 제한), 소요 시간(ms)
+  - `statusCode`, 응답 본문(일부만 저장 가능, 최대 길이 제한), 소요 시간(ms)
 - (선택) JSON이면 `success` / `processed` 등 합의 필드 파싱
 
 ### 2. 재시도 정책
@@ -112,9 +188,11 @@
 | 403 등 4xx | 비재시도(408·429 제외) |
 | 5xx·타임아웃 | 재시도 |
 | 멱등 | 헤더 `Idempotency-Key` = 페이로드 기반 SHA-256(64hex), 재시도마다 동일 |
+| 수신성격(ICOPAY) | 내부 URL에 `/api/open/pg-notify/` 포함 시 `X-Icopay-Notify-Delivery` + `X-Noti-Attempt` 설정. 끄기: `PG_NOTIFY_ICOPAY_INGRESS_HEADERS=0` |
+| 시도 번호 | 실시간 파이프라인 첫 POST=1(LIVE); 동일 흐름 내 2초 재시도=2(RETRY); 개발 노티 배송 job은 `attemptHistory` 길이·`icopayNotifyHttpAttemptBase`로 누적(프로세스 재개·DLQ 수동 재시도 시에도 RETRY 유지). 관리 화면 **전산/개발 재전송** 단발 POST는 `X-Noti-Attempt: 2`(RETRY) |
 | 상태 | `data/pg-notify-delivery-jobs.json`, PENDING/DELIVERED/FAILED/DEAD_LETTER |
 | DLQ 알림 | `PG_NOTIFY_DLQ_EMAIL_TO` + ChillPay SMTP; 콘솔·`mail-logs`에 `pg_notify_dlq` 기록 |
-| 수동 재전송 | `/admin/pg-notify-delivery` (개발 노티 권한) |
+| 수동 재전송 | `/admin/pg-notify-delivery` (개발 노티 권한); DLQ 재시도 시 `manualRetries`를 `icopayNotifyHttpAttemptBase`에 반영 |
 | URL 로그 | DEAD_LETTER 콘솔·알림에서 pg-notify 토큰 마스킹 |
 
 코드: `lib/pgNotifyDelivery.js`, `server.js`의 `sendToInternal` / `sendDevInternalHttpNotify` / pg-notify 배송 작업·워커.

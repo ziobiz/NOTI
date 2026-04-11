@@ -19,6 +19,10 @@ const { t } = require('./locales');
 const pgNotifyDelivery = require('./lib/pgNotifyDelivery');
 
 const app = express();
+/** Nginx 등 리버스 프록시 뒤에서 X-Forwarded-*·req.ip 반영. 끄려면 TRUST_PROXY=0 */
+if (!['0', 'false', 'no', 'off'].includes(String(process.env.TRUST_PROXY || '1').trim().toLowerCase())) {
+  app.set('trust proxy', 1);
+}
 const SUPPORTED_LOCALES = ['ko', 'ja', 'en', 'th', 'zh'];
 function getLocale(req) {
   const lang = req.cookies?.lang || req.query?.lang || 'ko';
@@ -310,6 +314,13 @@ if (!fs.existsSync(staticDir)) fs.mkdirSync(staticDir, { recursive: true });
 app.use('/static', express.static(staticDir));
 app.use(systemMonitorTrafficMiddleware);
 
+// Nginx/LB 업스트림 헬스(세션·설정 로드 없음). 구버전은 파일 하단에만 있어 순서 이슈 가능 → 상단 고정
+function sendLivenessJson(res) {
+  res.status(200).type('application/json').send(JSON.stringify({ status: 'ok', service: 'pg-notification-relay' }));
+}
+app.get('/health', (req, res) => sendLivenessJson(res));
+app.get('/healthz', (req, res) => sendLivenessJson(res));
+
 // 루트(/) 접속 시 관리자 로그인으로 이동
 app.get('/', (req, res) => res.redirect('/admin/login'));
 
@@ -358,6 +369,12 @@ const PG_NOTIFY_DELIVERY = {
   dlqEmailTo: String(process.env.PG_NOTIFY_DLQ_EMAIL_TO || '').trim(),
   workerIntervalMs: Math.max(5000, parseInt(process.env.PG_NOTIFY_WORKER_INTERVAL_MS || '20000', 10) || 20000),
   workerDisabled: ['1', 'true', 'yes'].includes(String(process.env.PG_NOTIFY_DISABLE_WORKER || '').toLowerCase()),
+  /** ICOPAY tb_pg_notify_inbound 수신성격용 헤더(X-Icopay-Notify-Delivery, X-Noti-Attempt). 끄려면 PG_NOTIFY_ICOPAY_INGRESS_HEADERS=0 */
+  icopayIngressHeaders: (() => {
+    const s = String(process.env.PG_NOTIFY_ICOPAY_INGRESS_HEADERS || '').trim().toLowerCase();
+    if (s === '') return true;
+    return !['0', 'false', 'no', 'off'].includes(s);
+  })(),
 };
 const runSerializedPgNotify = pgNotifyDelivery.createPerKeyChain();
 const inflightPgNotifyJobIds = new Set();
@@ -734,7 +751,12 @@ if (!adminConfig) {
     passwordHash,
     otpSecret: process.env.ADMIN_OTP_SECRET || '',
   };
-  saveAdminConfig(adminConfig);
+  try {
+    saveAdminConfig(adminConfig);
+  } catch (e) {
+    console.error('[startup] admin.json write failed:', (e && e.message) || e, e && e.code ? '(' + e.code + ')' : '');
+    console.error('[startup] fix write permission on', CONFIG_DIR, '— admin exists in memory only until fixed.');
+  }
 }
 
 // ===== 회원(멀티 역할) 저장소: SUPER_ADMIN, ADMIN, OPERATOR =====
@@ -870,7 +892,12 @@ if (!MEMBERS || MEMBERS.length === 0) {
       createdAt: new Date().toISOString(),
     },
   ];
-  saveMembers(MEMBERS);
+  try {
+    saveMembers(MEMBERS);
+  } catch (e) {
+    console.error('[startup] members.json write failed:', (e && e.message) || e, e && e.code ? '(' + e.code + ')' : '');
+    console.error('[startup] fix write permission on', CONFIG_DIR, '— members exist in memory only until fixed.');
+  }
 }
 
 function verifyOtp(secret, token) {
@@ -970,6 +997,25 @@ function loadJsonConfig(filePath, fallback) {
 function saveJsonConfig(filePath, value) {
   ensureConfigDir();
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+/** 기동 시 시드 등: config 쓰기 실패(EACCES 등)해도 프로세스는 살려 502 루프 방지 */
+function trySaveJsonConfigOrWarn(filePath, value, context) {
+  try {
+    saveJsonConfig(filePath, value);
+    return true;
+  } catch (e) {
+    const code = e && e.code != null ? String(e.code) : '';
+    console.error(
+      '[startup]',
+      context || 'config',
+      'write failed:',
+      (e && e.message) || String(e),
+      code ? '(' + code + ')' : ''
+    );
+    console.error('[startup] path:', filePath, '— app user needs write permission on config/ (chown/chmod).');
+    return false;
+  }
 }
 
 // ========== 전산 노티 대상 설정 (internal targets) ==========
@@ -1104,7 +1150,7 @@ function loadInternalTargets() {
   initial.forEach((v, id) => {
     obj[id] = v;
   });
-  saveJsonConfig(INTERNAL_TARGETS_CONFIG_PATH, obj);
+  trySaveJsonConfigOrWarn(INTERNAL_TARGETS_CONFIG_PATH, obj, 'internal-targets.json seed');
   return initial;
 }
 
@@ -1618,7 +1664,7 @@ function loadIcopayAmountRoot() {
     chillpay: normalizeIcopayAmountProfile({ amountRules: internal.chillpay.amountRules }),
     jpay: normalizeIcopayAmountProfile({ amountRules: internal.jpay.amountRules }),
   };
-  saveJsonConfig(ICOPAY_AMOUNT_SETTINGS_PATH, root);
+  trySaveJsonConfigOrWarn(ICOPAY_AMOUNT_SETTINGS_PATH, root, 'icopay-amount-settings.json seed');
   return root;
 }
 
@@ -1872,7 +1918,7 @@ function loadMerchants() {
   initial.forEach((v, id) => {
     obj[id] = v;
   });
-  saveJsonConfig(MERCHANTS_CONFIG_PATH, obj);
+  trySaveJsonConfigOrWarn(MERCHANTS_CONFIG_PATH, obj, 'merchants.json seed');
   return initial;
 }
 
@@ -2576,6 +2622,78 @@ function appendDevInternalLog(entry) {
   }
 }
 
+/** 개발 노티 전달 결과 저장값: OK=도착, SKIP=시도했으나 미도착, FAIL=전송 불가(URL 없음·예외 등) */
+const DEV_INTERNAL_DELIVER_OK = 'OK';
+const DEV_INTERNAL_DELIVER_SKIP = 'SKIP';
+const DEV_INTERNAL_DELIVER_FAIL = 'FAIL';
+
+function normalizeDevInternalDeliveryUi(raw) {
+  const s = String(raw || '').trim();
+  const u = s.toUpperCase();
+  if (u === DEV_INTERNAL_DELIVER_OK || u === DEV_INTERNAL_DELIVER_SKIP || u === DEV_INTERNAL_DELIVER_FAIL) return u;
+  const lower = s.toLowerCase();
+  if (lower === 'ok') return DEV_INTERNAL_DELIVER_OK;
+  if (lower === 'fail') return DEV_INTERNAL_DELIVER_SKIP;
+  if (lower === 'skip') return DEV_INTERNAL_DELIVER_FAIL;
+  return u || '';
+}
+
+function devInternalDeliveryLabel(locale, norm) {
+  if (norm === DEV_INTERNAL_DELIVER_OK) return t(locale, 'dev_noti_deliver_ok');
+  if (norm === DEV_INTERNAL_DELIVER_SKIP) return t(locale, 'dev_noti_deliver_skip');
+  if (norm === DEV_INTERNAL_DELIVER_FAIL) return t(locale, 'dev_noti_deliver_fail');
+  return norm || '—';
+}
+
+function devInternalDeliveryRowClass(norm) {
+  if (norm === DEV_INTERNAL_DELIVER_OK) return 'status-ok';
+  if (norm === DEV_INTERNAL_DELIVER_SKIP) return 'status-skip';
+  if (norm === DEV_INTERNAL_DELIVER_FAIL) return 'status-fail';
+  return '';
+}
+
+function devInternalHaystackAdminLog(log, locale) {
+  const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+  const payload = log.payload || {};
+  const displayPayload = jpayInternalLogDisplayPayload(log);
+  const jsonHeader = Object.keys(displayPayload).join(', ');
+  const jsonValue = JSON.stringify(displayPayload, null, 2);
+  const raw = log.internalDeliveryStatus || '';
+  const norm = normalizeDevInternalDeliveryUi(raw);
+  const internalLabel = devInternalDeliveryLabel(locale, norm);
+  const internalTargetName = getInternalTargetName(log.internalTargetId);
+  let payloadJson = '';
+  try {
+    payloadJson = JSON.stringify(payload);
+  } catch (_) {
+    payloadJson = '';
+  }
+  return [
+    dt.date,
+    dt.timeTh,
+    dt.timeJp,
+    internalTargetName,
+    internalLabel,
+    raw,
+    norm,
+    'OK',
+    'SKIP',
+    'FAIL',
+    jsonHeader,
+    jsonValue,
+    log.merchantId,
+    log.routeNo,
+    log.internalTargetId,
+    payloadJson,
+    log.upstreamResponsePreview,
+    log.upstreamHttpStatus,
+    log.deliveryAttempts,
+    log.upstreamError,
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
 /** 전산/개발 노티 로그 화면: JPAY 원문 릴레이 건에 수신 Content-Type·헤더·원문 미리보기 병합 표시 */
 function jpayInternalLogDisplayPayload(log) {
   const payload = (log && log.payload) || {};
@@ -3118,7 +3236,7 @@ function internalHaystackAdminLog(log, locale) {
     .toLowerCase();
 }
 
-function internalResultHaystackLog(log, locale, envLabel) {
+function internalResultHaystackLog(log, locale, envLabel, opt) {
   const payload = log.payload || {};
   const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
   const txId = String(payload.TransactionId != null ? payload.TransactionId : (payload.transactionId != null ? payload.transactionId : ''));
@@ -3132,14 +3250,17 @@ function internalResultHaystackLog(log, locale, envLabel) {
           ? t(locale, 'status_payment')
           : String(payStatus);
   const internalStatus = log.internalDeliveryStatus || '';
+  const norm = opt && opt.devInternal ? normalizeDevInternalDeliveryUi(internalStatus) : '';
   const deliveryLabel =
-    internalStatus === 'ok'
-      ? t(locale, 'status_ok')
-      : internalStatus === 'fail'
-        ? t(locale, 'status_fail')
-        : internalStatus === 'skip'
-          ? t(locale, 'status_skip')
-          : internalStatus;
+    opt && opt.devInternal
+      ? devInternalDeliveryLabel(locale, norm)
+      : internalStatus === 'ok'
+        ? t(locale, 'status_ok')
+        : internalStatus === 'fail'
+          ? t(locale, 'status_fail')
+          : internalStatus === 'skip'
+            ? t(locale, 'status_skip')
+            : internalStatus;
   const internalTargetName = getInternalTargetName(log.internalTargetId);
   let payloadJson = '';
   try {
@@ -3147,7 +3268,7 @@ function internalResultHaystackLog(log, locale, envLabel) {
   } catch (_) {
     payloadJson = '';
   }
-  return [
+  const bits = [
     dt.date,
     dt.timeTh,
     dt.timeJp,
@@ -3165,9 +3286,11 @@ function internalResultHaystackLog(log, locale, envLabel) {
     log.upstreamHttpStatus,
     log.deliveryAttempts,
     log.upstreamError,
-  ]
-    .join(' ')
-    .toLowerCase();
+  ];
+  if (opt && opt.devInternal) {
+    bits.push(norm, 'ok', 'skip', 'fail');
+  }
+  return bits.join(' ').toLowerCase();
 }
 
 /** 로그분석·종합거래 목록 공통 한 번에 보기 (파일 상단에 두어 모든 핸들러에서 사용) */
@@ -4713,12 +4836,12 @@ async function sendVoidOrRefundNoti(log, type, mode) {
       } else {
         internalTargetUrl = internalUrl;
         console.log('[취소 노티 → 전산] url=', internalUrl, 'PaymentStatus=', internalPayload.PaymentStatus, 'TransactionId=', internalPayload.TransactionId);
-        let internalRes = await sendToInternal(internalUrl, internalPayload);
+        let internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 1 });
         internalOk = internalRes.success;
         if (!internalOk) {
           console.warn('[취소 노티 → 전산 실패] status=', internalRes.status, ' 1회 재시도 예정');
           await new Promise((r) => setTimeout(r, 2000));
-          internalRes = await sendToInternal(internalUrl, internalPayload);
+          internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 2 });
           internalOk = internalRes.success;
           if (internalOk) console.log('[취소 노티 → 전산 재시도 성공]');
           else console.warn('[취소 노티 → 전산 재시도 실패]');
@@ -4791,7 +4914,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
         internalTargetId: merchant.internalTargetId || '',
         payload: devPayload,
         internalTargetUrl: devInternalTargetUrl,
-        internalDeliveryStatus: devInternalTargetUrl ? (devOk ? 'ok' : 'fail') : 'skip',
+        internalDeliveryStatus: devInternalTargetUrl ? (devOk ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP) : DEV_INTERNAL_DELIVER_FAIL,
         pgProvider: pgProv,
         ...(devInternalTargetUrl && devAggVr ? devInternalLogUpstreamExtras(devAggVr) : {}),
       });
@@ -4813,7 +4936,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
         internalTargetId: merchant.internalTargetId || '',
         payload: failPayload,
         internalTargetUrl: failUrl || '',
-        internalDeliveryStatus: 'fail',
+        internalDeliveryStatus: failUrl ? DEV_INTERNAL_DELIVER_SKIP : DEV_INTERNAL_DELIVER_FAIL,
         pgProvider: pgProv,
       });
     }
@@ -4846,10 +4969,10 @@ async function sendVoidOrRefundNoti(log, type, mode) {
     devInternalStatus: deliverChillpayDevInternalVr
       ? devInternalTargetUrl
         ? devOk
-          ? 'ok'
-          : 'fail'
-        : 'skip'
-      : 'skip',
+          ? DEV_INTERNAL_DELIVER_OK
+          : DEV_INTERNAL_DELIVER_SKIP
+        : DEV_INTERNAL_DELIVER_FAIL
+      : 'NA',
     devInternalSkipReason: devInternalSkipReason || undefined,
     env: log.env || 'live',
     pgProvider: pgProv,
@@ -5404,12 +5527,40 @@ function truncateInternalHttpResponsePreview(data, maxLen) {
   return s.slice(0, n) + '…';
 }
 
+/** ICOPAY 공개 pg-notify 서버-투-서버 JSON 경로 여부(브라우저 pay-result 제외 가정) */
+function isIcopayOpenPgNotifyUrl(internalUrl) {
+  return String(internalUrl || '').toLowerCase().includes('/api/open/pg-notify/');
+}
+
+/**
+ * ICOPAY NotifyIngressDeliveryKindResolver: 첫 POST LIVE, 재시도 RETRY + 시도 번호.
+ * @param {Record<string,string>} headers
+ * @param {number} httpAttemptIndex 1부터
+ */
+function applyIcopayPgNotifyIngressHeaders(headers, internalUrl, httpAttemptIndex) {
+  if (!PG_NOTIFY_DELIVERY.icopayIngressHeaders || !headers) return;
+  if (!isIcopayOpenPgNotifyUrl(internalUrl)) return;
+  const n = Number(httpAttemptIndex);
+  if (!Number.isFinite(n) || n < 1) return;
+  const ni = Math.floor(n);
+  headers['X-Icopay-Notify-Delivery'] = ni <= 1 ? 'LIVE' : 'RETRY';
+  headers['X-Noti-Attempt'] = String(ni);
+}
+
+/** pg-notify 배송 job의 다음 HTTP에 쓸 시도 번호(1=LIVE, 2+=RETRY). icopayNotifyHttpAttemptBase는 수동 재시도·재전송 시 히스토리 클리어 후에도 RETRY 유지용 */
+function nextIcopayHttpAttemptIndexForJob(job) {
+  const base = Math.max(0, Math.floor(Number(job && job.icopayNotifyHttpAttemptBase) || 0));
+  const done = job && Array.isArray(job.attemptHistory) ? job.attemptHistory.length : 0;
+  return base + done + 1;
+}
+
 /**
  * 전산/개발 노티 URL로 JSON POST
  * - HTTP 2xx 이어도 본문이 객체일 때 success·ok 가 false 이면 실패(전산·ICOPAY PG 등)
  * - ICOPAY PG(/api/open/pg-notify): processed·received 가 명시된 경우 false 이면 실패(결제내역 반영 실패 등)
  * - ICOPAY 계약: 응답 JSON의 retryable 은 재시도 판별에 전달(옵션)
  * - opts.idempotencyKey: ICOPAY 합의 시 헤더 Idempotency-Key (재전송 시 동일 값)
+ * - opts.icopayNotifyAttempt: pg-notify URL일 때 수신성격 헤더(1=LIVE, 2+=RETRY)
  */
 async function sendToInternal(internalUrl, payload, opts) {
   if (!internalUrl) return { success: false, status: 0, responsePreview: '', durationMs: 0 };
@@ -5419,6 +5570,9 @@ async function sendToInternal(internalUrl, payload, opts) {
   if (o.idempotencyKey) {
     const k = String(o.idempotencyKey).trim().slice(0, 200);
     if (k) headers['Idempotency-Key'] = k;
+  }
+  if (o.icopayNotifyAttempt != null) {
+    applyIcopayPgNotifyIngressHeaders(headers, internalUrl, o.icopayNotifyAttempt);
   }
   try {
     const res = await axios.post(internalUrl, payload, {
@@ -5459,7 +5613,8 @@ async function sendToInternal(internalUrl, payload, opts) {
   }
 }
 
-function createPgNotifyDeliveryJobRecord(internalUrl, payload, idempotencyKey) {
+function createPgNotifyDeliveryJobRecord(internalUrl, payload, idempotencyKey, opt) {
+  const o = opt || {};
   const nowIso = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
@@ -5480,6 +5635,7 @@ function createPgNotifyDeliveryJobRecord(internalUrl, payload, idempotencyKey) {
     deliveryStartedAtIso: nowIso,
     terminalReason: null,
     manualRetries: 0,
+    icopayNotifyHttpAttemptBase: Math.max(0, Math.floor(Number(o.icopayNotifyHttpAttemptBase) || 0)),
   };
 }
 
@@ -5554,9 +5710,12 @@ async function runPgNotifyDeliveryJobLifecycle(job, isResume) {
   };
   const tFirst = Date.parse(job.deliveryStartedAtIso || job.createdAtIso) || Date.now();
   inflightPgNotifyJobIds.add(job.id);
-  const postOpts = { idempotencyKey: job.idempotencyKey };
+  const postOptsBase = { idempotencyKey: job.idempotencyKey };
   try {
-    let last = await sendToInternal(job.url, job.payload, postOpts);
+    let last = await sendToInternal(job.url, job.payload, {
+      ...postOptsBase,
+      icopayNotifyAttempt: nextIcopayHttpAttemptIndexForJob(job),
+    });
     if (isResume) job.attempts = (job.attempts || 0) + 1;
     else job.attempts = 1;
     recordPgNotifyJobAttempt(job, last);
@@ -5577,7 +5736,10 @@ async function runPgNotifyDeliveryJobLifecycle(job, isResume) {
         await new Promise((res) => setTimeout(res, waitMs));
       }
       job.nextAttemptAtIso = null;
-      last = await sendToInternal(job.url, job.payload, postOpts);
+      last = await sendToInternal(job.url, job.payload, {
+        ...postOptsBase,
+        icopayNotifyAttempt: nextIcopayHttpAttemptIndexForJob(job),
+      });
       job.attempts++;
       recordPgNotifyJobAttempt(job, last);
       persistPgNotifyDeliveryJobs();
@@ -5626,7 +5788,7 @@ function tickPgNotifyDeliveryWorker() {
 /**
  * 개발 노티(ICOPAY pg-notify JSON POST): 멱등 키당 직렬 전송, 지수 백오프+지터, 상태 파일 data/pg-notify-delivery-jobs.json
  */
-async function sendDevInternalHttpNotify(internalUrl, payload) {
+async function sendDevInternalHttpNotify(internalUrl, payload, opts) {
   if (!internalUrl) {
     return {
       success: false,
@@ -5638,9 +5800,12 @@ async function sendDevInternalHttpNotify(internalUrl, payload) {
       error: 'no_url',
     };
   }
+  const o = opts || {};
   const idem = pgNotifyDelivery.buildIdempotencyKey(internalUrl, payload);
   return runSerializedPgNotify(idem, async () => {
-    const job = createPgNotifyDeliveryJobRecord(internalUrl, payload, idem);
+    const job = createPgNotifyDeliveryJobRecord(internalUrl, payload, idem, {
+      icopayNotifyHttpAttemptBase: o.icopayNotifyHttpAttemptBase != null ? o.icopayNotifyHttpAttemptBase : 0,
+    });
     PG_NOTIFY_DELIVERY_JOBS.push(job);
     persistPgNotifyDeliveryJobs();
     return runPgNotifyDeliveryJobLifecycle(job, false);
@@ -5825,11 +5990,11 @@ async function handleNotiRequest(routeKey, req, res) {
             if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
             if (internalUrl) {
               internalTargetUrl = internalUrl;
-              let internalRes = await sendToInternal(internalUrl, b);
+              let internalRes = await sendToInternal(internalUrl, b, { icopayNotifyAttempt: 1 });
               internalDeliverySuccess = internalRes.success;
               if (!internalDeliverySuccess) {
                 await new Promise((r) => setTimeout(r, 2000));
-                internalRes = await sendToInternal(internalUrl, b);
+                internalRes = await sendToInternal(internalUrl, b, { icopayNotifyAttempt: 2 });
                 internalDeliverySuccess = internalRes.success;
               }
             }
@@ -6095,14 +6260,14 @@ async function handleNotiRequest(routeKey, req, res) {
       } else {
         internalTargetUrl = internalUrl;
         console.log('[전산 전송 중] 내부 API로 가공 데이터 전송, merchant=', merchantId, 'url=', internalUrl);
-        let internalRes = await sendToInternal(internalUrl, internalPayload);
+        let internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 1 });
         internalDeliverySuccess = internalRes.success;
         if (internalDeliverySuccess) {
           console.log('[전산 전송 완료]');
         } else {
           console.warn('[전산 전송 실패] status=', internalRes.status, ' 1회 재시도 예정');
           await new Promise((r) => setTimeout(r, 2000));
-          internalRes = await sendToInternal(internalUrl, internalPayload);
+          internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 2 });
           internalDeliverySuccess = internalRes.success;
           if (internalDeliverySuccess) console.log('[전산 전송 재시도 성공]');
           else console.warn('[전산 전송 재시도 실패]');
@@ -6195,7 +6360,7 @@ async function handleNotiRequest(routeKey, req, res) {
         internalTargetId: merchant.internalTargetId || '',
         payload: devPayload,
         internalTargetUrl: devInternalTargetUrl,
-        internalDeliveryStatus: devInternalTargetUrl ? (devDeliverySuccess ? 'ok' : 'fail') : 'skip',
+        internalDeliveryStatus: devInternalTargetUrl ? (devDeliverySuccess ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP) : DEV_INTERNAL_DELIVER_FAIL,
         ...(devInternalTargetUrl && devAggResult ? devInternalLogUpstreamExtras(devAggResult) : {}),
       });
     } catch (err) {
@@ -6216,7 +6381,7 @@ async function handleNotiRequest(routeKey, req, res) {
         internalTargetId: merchant.internalTargetId || '',
         payload: failPayload,
         internalTargetUrl: failUrl || '',
-        internalDeliveryStatus: 'fail',
+        internalDeliveryStatus: failUrl ? DEV_INTERNAL_DELIVER_SKIP : DEV_INTERNAL_DELIVER_FAIL,
       });
     }
   } else {
@@ -6519,11 +6684,11 @@ async function handleJpayNotiRequest(routeKey, req, res) {
         const internalPayload = transformForInternal(body, merchant, { pgProvider: 'jpay' });
         internalTargetUrl = internalUrl;
         console.log('[JPAY 전산 전송] 가맹점 릴레이 끔·대체=전산, 노티 환경설정 가공 후 POST, merchant=', merchantId, 'url=', internalUrl);
-        let internalRes = await sendToInternal(internalUrl, internalPayload);
+        let internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 1 });
         internalDeliverySuccess = internalRes.success;
         if (!internalDeliverySuccess) {
           await new Promise((r) => setTimeout(r, 2000));
-          internalRes = await sendToInternal(internalUrl, internalPayload);
+          internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 2 });
           internalDeliverySuccess = internalRes.success;
         }
         appendInternalLog({
@@ -6597,7 +6762,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
         internalTargetId: merchant.internalTargetId || '',
         payload: body,
         internalTargetUrl: devInternalTargetUrl,
-        internalDeliveryStatus: devInternalTargetUrl ? (devDeliverySuccess ? 'ok' : 'fail') : 'skip',
+        internalDeliveryStatus: devInternalTargetUrl ? (devDeliverySuccess ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP) : DEV_INTERNAL_DELIVER_FAIL,
         jpayRawRelay: true,
         pgProvider: 'jpay',
         routeKey,
@@ -6614,7 +6779,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
         internalTargetId: merchant.internalTargetId || '',
         payload: body,
         internalTargetUrl: failUrl || '',
-        internalDeliveryStatus: 'fail',
+        internalDeliveryStatus: failUrl ? DEV_INTERNAL_DELIVER_SKIP : DEV_INTERNAL_DELIVER_FAIL,
         jpayRawRelay: true,
         pgProvider: 'jpay',
         routeKey,
@@ -6633,7 +6798,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
           internalTargetId: merchant.internalTargetId || '',
           payload: body,
           internalTargetUrl: '',
-          internalDeliveryStatus: 'skip',
+          internalDeliveryStatus: DEV_INTERNAL_DELIVER_FAIL,
           jpayRawRelay: false,
           relayOffForwardDev: true,
           pgProvider: 'jpay',
@@ -6653,7 +6818,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
           internalTargetId: merchant.internalTargetId || '',
           payload: devPayload,
           internalTargetUrl: devInternalTargetUrl,
-          internalDeliveryStatus: devDeliverySuccess ? 'ok' : 'fail',
+          internalDeliveryStatus: devDeliverySuccess ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP,
           jpayRawRelay: false,
           relayOffForwardDev: true,
           pgProvider: 'jpay',
@@ -6677,7 +6842,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
         internalTargetId: merchant.internalTargetId || '',
         payload: failPayload,
         internalTargetUrl: failUrl || '',
-        internalDeliveryStatus: 'fail',
+        internalDeliveryStatus: failUrl ? DEV_INTERNAL_DELIVER_SKIP : DEV_INTERNAL_DELIVER_FAIL,
         jpayRawRelay: false,
         relayOffForwardDev: true,
         pgProvider: 'jpay',
@@ -13707,7 +13872,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
   let intOk = true;
   if (internalUrl) {
     try {
-      const result = await sendToInternal(internalUrl, internalPayload);
+      const result = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 1 });
       intOk = result.success;
       appendInternalLog({
         storedAt: new Date().toISOString(),
@@ -13754,7 +13919,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
         internalTargetId: merchant.internalTargetId || '',
         payload: devPayload,
         internalTargetUrl: devUrl,
-        internalDeliveryStatus: devOk ? 'ok' : 'fail',
+        internalDeliveryStatus: devOk ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP,
         pgProvider: 'chillpay',
         ...devInternalLogUpstreamExtras(devResult),
       });
@@ -13767,7 +13932,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
         internalTargetId: merchant.internalTargetId || '',
         payload: devPayload,
         internalTargetUrl: devUrl,
-        internalDeliveryStatus: 'fail',
+        internalDeliveryStatus: devUrl ? DEV_INTERNAL_DELIVER_SKIP : DEV_INTERNAL_DELIVER_FAIL,
         pgProvider: 'chillpay',
       });
     }
@@ -13779,7 +13944,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
       internalTargetId: merchant.internalTargetId || '',
       payload: devPayload,
       internalTargetUrl: '',
-      internalDeliveryStatus: 'skip',
+      internalDeliveryStatus: DEV_INTERNAL_DELIVER_FAIL,
       pgProvider: 'chillpay',
     });
   }
@@ -14061,7 +14226,7 @@ app.post('/admin/cancel-refund/noti-resend-internal', requireAuth, requirePage('
     pgProvider: getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay',
   });
   try {
-    const result = await sendToInternal(internalUrl, internalPayload);
+    const result = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 2 });
     appendInternalLog({
       storedAt: new Date().toISOString(),
       merchantId: log.merchantId,
@@ -19450,11 +19615,6 @@ app.post('/admin/internal-targets/delete', requireAuth, requirePage('internal_ta
   return res.redirect('/admin/internal-targets');
 });
 
-// 헬스 체크
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
-
 // 전산 노티 수신 (자체 사용용 엔드포인트 예시)
 // INTERNAL_NOTI_URL 을 http://localhost:3000/internal/noti 로 설정하면
 // transformForInternal 결과가 이곳에도 저장됩니다.
@@ -19681,7 +19841,7 @@ app.post('/admin/internal/resend', requireAuth, requirePageAny(['internal_logs',
   }
   const resendKind = (req.body.resendKind || '').toString().toLowerCase() || (isCancelNotiBody(log.payload || {}) ? 'cancel' : 'payment');
   try {
-    const result = await sendToInternal(url, log.payload);
+    const result = await sendToInternal(url, log.payload, { icopayNotifyAttempt: 2 });
     if (result.success) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
     const reason = result.status ? 'HTTP ' + result.status : (result.error || '');
     return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
@@ -19950,7 +20110,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
   if (logSearchRawDev) {
     const kwDev = logSearchRawDev.toLowerCase();
     filteredSearchDev = filteredSearchDev.filter(
-      ({ log }) => internalHaystackAdminLog(log, locale).indexOf(kwDev) !== -1
+      ({ log }) => devInternalHaystackAdminLog(log, locale).indexOf(kwDev) !== -1
     );
   }
   const perPageDev = parseAllowedPerPage(qDev.perPage);
@@ -19968,16 +20128,9 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       const displayPayload = jpayInternalLogDisplayPayload(log);
       const jsonHeader = Object.keys(displayPayload).join(', ');
       const jsonValue = JSON.stringify(displayPayload, null, 2);
-      const internalStatus = log.internalDeliveryStatus || '-';
-      const internalLabel =
-        internalStatus === 'ok'
-          ? t(locale, 'status_ok')
-          : internalStatus === 'fail'
-          ? t(locale, 'status_fail')
-          : internalStatus === 'skip'
-          ? t(locale, 'status_skip')
-          : internalStatus;
-      const internalClass = internalStatus === 'ok' ? 'status-ok' : internalStatus === 'fail' ? 'status-fail' : '';
+      const norm = normalizeDevInternalDeliveryUi(log.internalDeliveryStatus || '');
+      const internalLabel = devInternalDeliveryLabel(locale, norm);
+      const internalClass = devInternalDeliveryRowClass(norm);
       const canResend = log.internalTargetUrl && log.payload;
       const devResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
       const devResendLabel = devResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
@@ -20042,6 +20195,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
     pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; white-space:pre-wrap; font-size:12px; text-align: left; margin:0; }
     .time-jp { color: #2563eb; }
     .status-ok { color: #059669; font-weight: 600; }
+    .status-skip { color: #b45309; font-weight: 700; }
     .status-fail { color: #dc2626; font-weight: 600; }
     .label-none { color:#b91c1c; font-weight:700; }
     .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
@@ -20058,6 +20212,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_internal_noti_log')} (${totalCountDevInternal})</h1>
       ${hubHtmlDevInternal}
       <p class="admin-page-desc">${t(locale, 'internal_logs_desc')}</p>
+      <p class="admin-page-desc">${t(locale, 'dev_internal_delivery_legend')}</p>
       <p class="admin-page-desc">${t(locale, 'dev_internal_logs_retry_hint')}</p>
       ${(() => {
         const fh =
@@ -20089,7 +20244,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
           <tr>
             <th>${t(locale, 'pg_logs_th_received_date')}</th>
             <th>${t(locale, 'pg_logs_th_received_time')}</th>
-            <th>${t(locale, 'cr_th_internal_receive')}</th>
+            <th>${t(locale, 'dev_noti_th_delivery')}</th>
             <th>${t(locale, 'dev_internal_th_upstream')}</th>
             <th>${t(locale, 'internal_logs_header')}</th>
             <th>${t(locale, 'internal_logs_value')}</th>
@@ -20128,7 +20283,7 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
   }
   const resendKind = (req.body.resendKind || '').toString().toLowerCase() || (isCancelNotiBody(log.payload || {}) ? 'cancel' : 'payment');
   try {
-    const result = await sendDevInternalHttpNotify(url, log.payload);
+    const result = await sendDevInternalHttpNotify(url, log.payload, { icopayNotifyHttpAttemptBase: 1 });
     if (result.success) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
     const reason =
       (result.attempts > 1 ? result.attempts + ' attempts, ' : '') +
@@ -20281,6 +20436,7 @@ app.post('/admin/pg-notify-delivery/retry', requireAuth, requirePage('dev_intern
   job.nextAttemptAtIso = null;
   job.attemptHistory = [];
   job.manualRetries = (job.manualRetries || 0) + 1;
+  job.icopayNotifyHttpAttemptBase = job.manualRetries;
   persistPgNotifyDeliveryJobs();
   setImmediate(() => {
     runSerializedPgNotify(job.idempotencyKey, () => runPgNotifyDeliveryJobLifecycle(job, false)).catch((e) =>
@@ -20342,7 +20498,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   if (logSearchRawDevRes) {
     const kwDr = logSearchRawDevRes.toLowerCase();
     filteredForDateDev = filteredForDateDev.filter(({ log }) =>
-      internalResultHaystackLog(log, locale, envLabel).indexOf(kwDr) !== -1
+      internalResultHaystackLog(log, locale, envLabel, { devInternal: true }).indexOf(kwDr) !== -1
     );
   }
 
@@ -20356,9 +20512,9 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   const rows = pagedLogsDev
     .map(({ log, realIndex }, i) => {
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
-      const status = log.internalDeliveryStatus || '-';
-      const label = status === 'ok' ? t(locale, 'status_ok') : status === 'fail' ? t(locale, 'status_fail') : status === 'skip' ? t(locale, 'status_skip') : status;
-      const statusClass = status === 'ok' ? 'status-ok' : status === 'fail' ? 'status-fail' : '';
+      const normRes2 = normalizeDevInternalDeliveryUi(log.internalDeliveryStatus || '');
+      const label = devInternalDeliveryLabel(locale, normRes2);
+      const statusClass = devInternalDeliveryRowClass(normRes2);
       const canResend = log.internalTargetUrl && log.payload;
       const payload = log.payload || {};
       const devResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
@@ -20401,6 +20557,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
     .status-ok { color: #059669; font-weight: 600; }
+    .status-skip { color: #b45309; font-weight: 700; }
     .status-fail { color: #dc2626; font-weight: 600; }
     .time-jp { color: #2563eb; }
     .col-fail-reason { text-align: center; word-break: break-all; max-width: 200px; }
@@ -20441,6 +20598,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_result')} (${totalCountDevResult})</h1>
       ${hubHtmlDevResult}
       <p class="admin-page-desc">${t(locale, 'dev_result_desc')}</p>
+      <p class="admin-page-desc">${t(locale, 'dev_internal_delivery_legend')}</p>
       <p class="admin-page-desc">${t(locale, 'dev_internal_logs_retry_hint')}</p>
       ${(() => {
         const fh =
@@ -20477,7 +20635,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
             <th>route</th>
             <th>${t(locale, 'common_env')}</th>
             <th>merchant id</th>
-            <th>${t(locale, 'dev_result_th_success')}</th>
+            <th>${t(locale, 'dev_noti_th_delivery')}</th>
             <th>${t(locale, 'dev_internal_th_upstream')}</th>
             <th>${t(locale, 'pg_logs_th_resend')}</th>
           </tr>
