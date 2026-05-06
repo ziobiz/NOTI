@@ -1250,6 +1250,40 @@ function resolveRelayOffDevUrl(merchant, kind) {
 }
 
 /**
+ * ChillPay 운영 전산(B형) POST URL — 릴레이 ON일 때와 동일한 우선순위로 운영 전송 대상을 정한다.
+ * - 릴레이 OFF + 대체=전산(internal): relayOffInternal* → 전산 대상 운영 URL → INTERNAL_NOTI_URL
+ * - 그 외: 전산 대상(internalTargets callbackUrl/resultUrl) → INTERNAL_NOTI_URL
+ * - 릴레이 OFF + 대체=개발(dev_internal) 인데 위 운영 URL이 비었을 때: 개발 대체 URL(resolveRelayOffDevUrl)로 폴백.
+ *   본문은 호출부에서 항상 transformForInternal(운영 B형 규칙) — 개발 노티 가공(transformForDevInternal)과는 다름.
+ */
+function resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelay, kind) {
+  if (!merchant || typeof merchant !== 'object') return null;
+  const rof = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
+  const relayOff = enableRelay === false;
+  let u = null;
+  if (relayOff && rof === 'internal') {
+    u = resolveRelayOffInternalUrl(merchant, kind);
+  } else {
+    if (merchant.internalTargetId) {
+      u = findInternalTargetUrl(merchant.internalTargetId, kind);
+    }
+    if (!u && INTERNAL_NOTI_URL) {
+      u = INTERNAL_NOTI_URL;
+    }
+  }
+  if (!u && relayOff && rof === 'dev_internal') {
+    u = resolveRelayOffDevUrl(merchant, kind);
+    if (u) {
+      console.log(
+        '[ChillPay 전산 URL] 릴레이 끔·대체=개발: 운영 전산 호스트가 비어 개발 대체 URL로 폴백(페이로드는 운영 B형 transformForInternal 동일)',
+      );
+    }
+  }
+  const s = u != null ? String(u).trim() : '';
+  return s || null;
+}
+
+/**
  * ChillPay Result: 브라우저가 미들웨어로 돌아올 때 최종 이동 URL.
  * 릴레이 ON → 가맹점 resultUrl(원문 릴레이 대상).
  * 릴레이 OFF + 대체 송부(전산/개발) → 해당 Callback/Result URL(서버 POST와 동일 목적지 우선).
@@ -4815,7 +4849,6 @@ async function sendVoidOrRefundNoti(log, type, mode) {
   const deliverChillpayInternalVr = merchantShouldDeliverChillpayInternal(merchant, enableRelayVr, enableInternalCheckedVr);
   const deliverChillpayDevInternalVr = merchantShouldDeliverChillpayDevInternal(merchant, enableRelayVr, enableDevInternalCheckedVr);
   const rofVr = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
-  const useRelayOffInternalUrlsVr = !enableRelayVr && rofVr === 'internal';
   const useRelayOffDevUrlsVr = !enableRelayVr && rofVr === 'dev_internal';
 
   const internalPayload = transformForInternal(payload, merchant, { pgProvider: pgProv });
@@ -4824,13 +4857,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
 
   if (deliverChillpayInternalVr) {
     try {
-      let internalUrl = null;
-      if (useRelayOffInternalUrlsVr) {
-        internalUrl = resolveRelayOffInternalUrl(merchant, 'callback');
-      } else {
-        if (merchant.internalTargetId) internalUrl = findInternalTargetUrl(merchant.internalTargetId, 'callback');
-        if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
-      }
+      const internalUrl = resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayVr, 'callback');
       if (!internalUrl) {
         console.log('[무효/환불 노티 → 전산 스킵] URL 미설정, merchant=', log.merchantId);
       } else {
@@ -4858,14 +4885,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
       });
     } catch (err) {
       console.error('[무효/환불 노티 → 전산 실패]', err.message);
-      let failUrl = internalTargetUrl;
-      if (!failUrl) {
-        if (useRelayOffInternalUrlsVr) failUrl = resolveRelayOffInternalUrl(merchant, 'callback') || '';
-        else {
-          if (merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, 'callback') || '';
-          if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
-        }
-      }
+      let failUrl = internalTargetUrl || resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayVr, 'callback') || '';
       let failPayload = internalPayload;
       try {
         failPayload = transformForInternal(payload, merchant, { pgProvider: pgProv });
@@ -4881,7 +4901,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
       });
     }
   } else {
-    console.log('[무효/환불 노티 → 전산 스킵] 전산 미사용·릴레이 끔 시 대체도 없음, merchant=', log.merchantId);
+    console.log('[무효/환불 노티 → 전산 스킵] 전산 노티 미사용(enableInternal 꺼짐), merchant=', log.merchantId);
   }
 
   const devPayload = transformForDevInternal(payload, merchant, { pgProvider: pgProv });
@@ -4941,7 +4961,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
       });
     }
   } else {
-    console.log('[무효/환불 노티 → 개발 전산 스킵] 개발 노티 미사용·릴레이 끔 시 대체도 없음, merchant=', log.merchantId);
+    console.log('[무효/환불 노티 → 개발 전산 스킵] 개발 노티 미사용(enableDevInternal 꺼짐), merchant=', log.merchantId);
   }
 
   const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
@@ -5213,16 +5233,28 @@ function normalizeMerchantRelayOffForwardTarget(v) {
   return '';
 }
 
-/** ChillPay: 전산(노티 환경설정 가공) 전송 — 「전산 노티 사용」 또는 릴레이 끔+대체=전산 */
+/** ChillPay/JPAY 공통: 「전산 노티 사용」이 켜진 경우에만 운영 전산 전송(가공·URL 모두 일반 설정과 동일). 릴레이 OFF·대체 송부만으로 전산을 켜지 않음. */
 function merchantShouldDeliverChillpayInternal(merchant, enableRelay, enableInternalChecked) {
-  if (enableInternalChecked !== false) return true;
-  return !enableRelay && normalizeMerchantRelayOffForwardTarget(merchant && merchant.relayOffForwardTarget) === 'internal';
+  return enableInternalChecked !== false;
 }
 
-/** ChillPay: 개발 환경설정 가공 전송 — 「개발 노티 사용」 또는 릴레이 끔+대체=개발 */
+/** ChillPay/JPAY 공통: 「개발 노티 사용」이 켜진 경우에만 개발 전산 전송. 릴레이 OFF·대체=개발만으로 개발 전송을 켜지 않음. */
 function merchantShouldDeliverChillpayDevInternal(merchant, enableRelay, enableDevInternalChecked) {
-  if (enableDevInternalChecked === true) return true;
-  return !enableRelay && normalizeMerchantRelayOffForwardTarget(merchant && merchant.relayOffForwardTarget) === 'dev_internal';
+  return enableDevInternalChecked === true;
+}
+
+/** JPAY: 릴레이 OFF이고 대체가 전산 또는 개발(dev_internal)일 때 「전산 노티」용 운영 전산 URL. 대체=개발이어도 전산은 운영 전산 대상(전산 노티와 동일 경로). */
+function resolveJpayRelayOffInternalProcessedUrl(merchant, kind, rof) {
+  const r = normalizeMerchantRelayOffForwardTarget(rof);
+  if (r === 'internal') return resolveRelayOffInternalUrl(merchant, kind);
+  if (r === 'dev_internal') {
+    if (merchant && merchant.internalTargetId) {
+      const u = findInternalTargetUrl(merchant.internalTargetId, kind);
+      if (u) return u;
+    }
+    return INTERNAL_NOTI_URL ? String(INTERNAL_NOTI_URL).trim() : null;
+  }
+  return null;
 }
 
 /** RESULT: 브라우저 POST 시 302 리다이렉트 생략(가맹점으로 POST 릴레이만). PG 서버 노티·GET 리다이렉트 경로는 영향 없음. */
@@ -5982,19 +6014,24 @@ async function handleNotiRequest(routeKey, req, res) {
         const kind = matchRecurring.kind || 'callback';
         const enableInternal = merchant.enableInternal !== false;
         if (enableInternal) {
+          const enableRelayRec = merchant.enableRelay !== false;
           let internalDeliverySuccess = false;
           let internalTargetUrl = '';
           try {
-            let internalUrl = null;
-            if (merchant.internalTargetId) internalUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
-            if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
+            let internalPayloadRec = b;
+            try {
+              internalPayloadRec = transformForInternal(b, merchant);
+            } catch (_) {
+              internalPayloadRec = b;
+            }
+            const internalUrl = resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayRec, kind);
             if (internalUrl) {
               internalTargetUrl = internalUrl;
-              let internalRes = await sendToInternal(internalUrl, b, { icopayNotifyAttempt: 1 });
+              let internalRes = await sendToInternal(internalUrl, internalPayloadRec, { icopayNotifyAttempt: 1 });
               internalDeliverySuccess = internalRes.success;
               if (!internalDeliverySuccess) {
                 await new Promise((r) => setTimeout(r, 2000));
-                internalRes = await sendToInternal(internalUrl, b, { icopayNotifyAttempt: 2 });
+                internalRes = await sendToInternal(internalUrl, internalPayloadRec, { icopayNotifyAttempt: 2 });
                 internalDeliverySuccess = internalRes.success;
               }
             }
@@ -6003,22 +6040,24 @@ async function handleNotiRequest(routeKey, req, res) {
               merchantId,
               routeNo: merchant.routeNo || routeNo || '',
               internalTargetId: merchant.internalTargetId || '',
-              payload: b,
+              payload: internalPayloadRec,
               internalTargetUrl,
               internalDeliveryStatus: internalTargetUrl ? (internalDeliverySuccess ? 'ok' : 'fail') : 'skip',
               recurringScheduleId: String(recurringScheduleId),
               recurring: true,
             });
           } catch (err) {
-            let failUrl = internalTargetUrl;
-            if (!failUrl && merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
-            if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
+            let failUrl = internalTargetUrl || resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayRec, kind) || '';
+            let failPayload = b;
+            try {
+              failPayload = transformForInternal(b, merchant);
+            } catch (_) {}
             appendInternalLog({
               storedAt: new Date().toISOString(),
               merchantId,
               routeNo: merchant.routeNo || routeNo || '',
               internalTargetId: merchant.internalTargetId || '',
-              payload: b,
+              payload: failPayload,
               internalTargetUrl: failUrl || '',
               internalDeliveryStatus: 'fail',
               recurringScheduleId: String(recurringScheduleId),
@@ -6236,27 +6275,16 @@ async function handleNotiRequest(routeKey, req, res) {
   let internalDeliverySuccess = false;
   let internalTargetUrl = '';
   const rofChill = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
-  const useRelayOffInternalUrls = !enableRelay && rofChill === 'internal';
   const useRelayOffDevUrls = !enableRelay && rofChill === 'dev_internal';
 
   // 전산 전송 (실패해도 PG 응답에는 영향 없음) — 릴레이 끔+대체=전산 인 경우에도 동일 가공(transformForInternal)
   if (deliverChillpayInternal) {
     try {
       const internalPayload = transformForInternal(body, merchant);
-      let internalUrl = null;
-      if (useRelayOffInternalUrls) {
-        internalUrl = resolveRelayOffInternalUrl(merchant, kind);
-      } else {
-        if (merchant.internalTargetId) {
-          internalUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
-        }
-        if (!internalUrl && INTERNAL_NOTI_URL) {
-          internalUrl = INTERNAL_NOTI_URL;
-        }
-      }
+      const internalUrl = resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelay, kind);
 
       if (!internalUrl) {
-        console.log('[전산 전송 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
+        console.log('[전산 전송 스킵] ChillPay 운영 전산 URL 없음(전산 대상·INTERNAL_NOTI_URL·릴레이끔·개발대체 URL 확인), merchant=', merchantId);
       } else {
         internalTargetUrl = internalUrl;
         console.log('[전산 전송 중] 내부 API로 가공 데이터 전송, merchant=', merchantId, 'url=', internalUrl);
@@ -6284,14 +6312,7 @@ async function handleNotiRequest(routeKey, req, res) {
       });
     } catch (err) {
       console.error('[전산 전송 실패]', err.message);
-      let failUrl = internalTargetUrl;
-      if (!failUrl) {
-        if (useRelayOffInternalUrls) failUrl = resolveRelayOffInternalUrl(merchant, kind) || '';
-        else {
-          if (merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
-          if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
-        }
-      }
+      let failUrl = internalTargetUrl || resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelay, kind) || '';
       let failPayload = body;
       try {
         failPayload = transformForInternal(body, merchant);
@@ -6307,7 +6328,7 @@ async function handleNotiRequest(routeKey, req, res) {
       });
     }
   } else {
-    console.log('[전산 전송 스킵] 전산 미사용·릴레이 끔 시 대체도 없음');
+    console.log('[전산 전송 스킵] 전산 노티 미사용(enableInternal 꺼짐), merchant=', merchantId);
   }
 
   // ChillPay 환불/취소/무효 PG 노티 수신 시 void-refund 로그에 기록 (무효내역·거래노티 구분용)
@@ -6385,7 +6406,7 @@ async function handleNotiRequest(routeKey, req, res) {
       });
     }
   } else {
-    console.log('[개발 전산 전송 스킵] 개발 전산 미사용·릴레이 끔 시 대체도 없음');
+    console.log('[개발 전산 전송 스킵] 개발 노티 미사용(enableDevInternal 꺼짐), merchant=', merchantId);
   }
 
   const shouldRedirectResultBrowser =
@@ -6537,8 +6558,8 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   const enableInternalChecked = merchant.enableInternal !== false;
   const enableDevInternalChecked = merchant.enableDevInternal === true;
   const rofJpay = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
-  const deliverJpayInternalProcessed = !enableRelay && rofJpay === 'internal';
-  const deliverJpayDevProcessed = !enableRelay && rofJpay === 'dev_internal';
+  const jpayRelayOffUsesProcessedInternal =
+    !enableRelay && (rofJpay === 'internal' || rofJpay === 'dev_internal');
 
   let relaySuccess = false;
   let relayFailReason = '';
@@ -6610,62 +6631,18 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   if (enableInternalChecked) {
     try {
       let internalUrl = null;
-      if (merchant.internalTargetId) {
-        internalUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
-      }
-      if (!internalUrl && INTERNAL_NOTI_URL) {
-        internalUrl = INTERNAL_NOTI_URL;
+      if (jpayRelayOffUsesProcessedInternal) {
+        internalUrl = resolveJpayRelayOffInternalProcessedUrl(merchant, kind, rofJpay);
+      } else {
+        if (merchant.internalTargetId) {
+          internalUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
+        }
+        if (!internalUrl && INTERNAL_NOTI_URL) {
+          internalUrl = INTERNAL_NOTI_URL;
+        }
       }
       if (!internalUrl) {
         console.log('[JPAY 전산 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
-      } else {
-        internalTargetUrl = internalUrl;
-        console.log('[JPAY 전산 전송] 원문 POST, merchant=', merchantId, 'url=', internalUrl);
-        let internalRes = await relayToMerchant(internalUrl, body, { contentType: ctForRelay, rawBody: jpayRelayRaw });
-        internalDeliverySuccess = internalRes.status >= 200 && internalRes.status < 400;
-        if (!internalDeliverySuccess) {
-          await new Promise((r) => setTimeout(r, 2000));
-          internalRes = await relayToMerchant(internalUrl, body, { contentType: ctForRelay, rawBody: jpayRelayRaw });
-          internalDeliverySuccess = internalRes.status >= 200 && internalRes.status < 400;
-        }
-      }
-      appendInternalLog({
-        storedAt: new Date().toISOString(),
-        merchantId,
-        routeNo: merchant.routeNo || '',
-        internalTargetId: merchant.internalTargetId || '',
-        payload: body,
-        internalTargetUrl,
-        internalDeliveryStatus: internalTargetUrl ? (internalDeliverySuccess ? 'ok' : 'fail') : 'skip',
-        jpayRawRelay: true,
-        pgProvider: 'jpay',
-        routeKey,
-        ...jpayInternalLogExtras(),
-      });
-    } catch (err) {
-      console.error('[JPAY 전산 전송 실패]', err.message);
-      let failUrl = internalTargetUrl;
-      if (!failUrl && merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
-      if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
-      appendInternalLog({
-        storedAt: new Date().toISOString(),
-        merchantId,
-        routeNo: merchant.routeNo || '',
-        internalTargetId: merchant.internalTargetId || '',
-        payload: body,
-        internalTargetUrl: failUrl || '',
-        internalDeliveryStatus: 'fail',
-        jpayRawRelay: true,
-        pgProvider: 'jpay',
-        routeKey,
-        ...jpayInternalLogExtras(),
-      });
-    }
-  } else if (deliverJpayInternalProcessed) {
-    try {
-      const internalUrl = resolveRelayOffInternalUrl(merchant, kind);
-      if (!internalUrl) {
-        console.log('[JPAY 전산(가공) 스킵] URL 미설정, merchant=', merchantId);
         appendInternalLog({
           storedAt: new Date().toISOString(),
           merchantId,
@@ -6674,16 +6651,21 @@ async function handleJpayNotiRequest(routeKey, req, res) {
           payload: body,
           internalTargetUrl: '',
           internalDeliveryStatus: 'skip',
-          jpayRawRelay: false,
-          relayOffForwardInternal: true,
+          jpayRawRelay: !jpayRelayOffUsesProcessedInternal,
+          relayOffForwardInternal: jpayRelayOffUsesProcessedInternal,
           pgProvider: 'jpay',
           routeKey,
           ...jpayInternalLogExtras(),
         });
-      } else {
+      } else if (jpayRelayOffUsesProcessedInternal) {
         const internalPayload = transformForInternal(body, merchant, { pgProvider: 'jpay' });
         internalTargetUrl = internalUrl;
-        console.log('[JPAY 전산 전송] 가맹점 릴레이 끔·대체=전산, 노티 환경설정 가공 후 POST, merchant=', merchantId, 'url=', internalUrl);
+        console.log(
+          '[JPAY 전산 전송] 릴레이 끔·대체 송부(전산/개발), 노티 환경설정 가공 후 운영 전산으로 POST, merchant=',
+          merchantId,
+          'url=',
+          internalUrl,
+        );
         let internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 1 });
         internalDeliverySuccess = internalRes.success;
         if (!internalDeliverySuccess) {
@@ -6705,14 +6687,41 @@ async function handleJpayNotiRequest(routeKey, req, res) {
           routeKey,
           ...jpayInternalLogExtras(),
         });
+      } else {
+        internalTargetUrl = internalUrl;
+        console.log('[JPAY 전산 전송] 원문 POST, merchant=', merchantId, 'url=', internalUrl);
+        let internalRes = await relayToMerchant(internalUrl, body, { contentType: ctForRelay, rawBody: jpayRelayRaw });
+        internalDeliverySuccess = internalRes.status >= 200 && internalRes.status < 400;
+        if (!internalDeliverySuccess) {
+          await new Promise((r) => setTimeout(r, 2000));
+          internalRes = await relayToMerchant(internalUrl, body, { contentType: ctForRelay, rawBody: jpayRelayRaw });
+          internalDeliverySuccess = internalRes.status >= 200 && internalRes.status < 400;
+        }
+        appendInternalLog({
+          storedAt: new Date().toISOString(),
+          merchantId,
+          routeNo: merchant.routeNo || '',
+          internalTargetId: merchant.internalTargetId || '',
+          payload: body,
+          internalTargetUrl,
+          internalDeliveryStatus: internalDeliverySuccess ? 'ok' : 'fail',
+          jpayRawRelay: true,
+          pgProvider: 'jpay',
+          routeKey,
+          ...jpayInternalLogExtras(),
+        });
       }
     } catch (err) {
-      console.error('[JPAY 전산(가공) 전송 실패]', err.message);
+      console.error('[JPAY 전산 전송 실패]', err.message);
       let failUrl = internalTargetUrl;
-      if (!failUrl) failUrl = resolveRelayOffInternalUrl(merchant, kind) || '';
+      if (!failUrl && jpayRelayOffUsesProcessedInternal) failUrl = resolveJpayRelayOffInternalProcessedUrl(merchant, kind, rofJpay) || '';
+      if (!failUrl && merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
+      if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
       let failPayload = body;
       try {
-        failPayload = transformForInternal(body, merchant, { pgProvider: 'jpay' });
+        failPayload = jpayRelayOffUsesProcessedInternal
+          ? transformForInternal(body, merchant, { pgProvider: 'jpay' })
+          : body;
       } catch (_) {}
       appendInternalLog({
         storedAt: new Date().toISOString(),
@@ -6722,22 +6731,23 @@ async function handleJpayNotiRequest(routeKey, req, res) {
         payload: failPayload,
         internalTargetUrl: failUrl || '',
         internalDeliveryStatus: 'fail',
-        jpayRawRelay: false,
-        relayOffForwardInternal: true,
+        jpayRawRelay: !jpayRelayOffUsesProcessedInternal,
+        relayOffForwardInternal: jpayRelayOffUsesProcessedInternal,
         pgProvider: 'jpay',
         routeKey,
         ...jpayInternalLogExtras(),
       });
     }
   } else {
-    console.log('[JPAY 전산 스킵] 전산 미사용·릴레이 끔 시 대체도 없음');
+    console.log('[JPAY 전산 스킵] 전산 노티 미사용(enableInternal 꺼짐), merchant=', merchantId);
   }
 
   let devDeliverySuccess = false;
   let devInternalTargetUrl = '';
   if (enableDevInternalChecked) {
     try {
-      const devUrl = resolveMerchantDevInternalUrl(merchant, kind);
+      const useRelayOffDevUrlsJpay = !enableRelay && rofJpay === 'dev_internal';
+      const devUrl = useRelayOffDevUrlsJpay ? resolveRelayOffDevUrl(merchant, kind) : resolveMerchantDevInternalUrl(merchant, kind);
       if (!devUrl) {
         console.log('[JPAY 개발 전산 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
       } else if (sameJpayNotifyUrl(devUrl, internalTargetUrl)) {
@@ -6771,7 +6781,11 @@ async function handleJpayNotiRequest(routeKey, req, res) {
     } catch (err) {
       console.error('[JPAY 개발 전산 전송 실패]', err.message);
       let failUrl = devInternalTargetUrl;
-      if (!failUrl) failUrl = resolveMerchantDevInternalUrl(merchant, kind) || '';
+      if (!failUrl) {
+        const useRelayOffDevUrlsJpay = !enableRelay && rofJpay === 'dev_internal';
+        failUrl =
+          (useRelayOffDevUrlsJpay ? resolveRelayOffDevUrl(merchant, kind) : resolveMerchantDevInternalUrl(merchant, kind)) || '';
+      }
       appendDevInternalLog({
         storedAt: new Date().toISOString(),
         merchantId,
@@ -6786,72 +6800,8 @@ async function handleJpayNotiRequest(routeKey, req, res) {
         ...jpayInternalLogExtras(),
       });
     }
-  } else if (deliverJpayDevProcessed) {
-    try {
-      const devUrl = resolveRelayOffDevUrl(merchant, kind);
-      if (!devUrl) {
-        console.log('[JPAY 개발(가공) 스킵] URL 미설정, merchant=', merchantId);
-        appendDevInternalLog({
-          storedAt: new Date().toISOString(),
-          merchantId,
-          routeNo: merchant.routeNo || '',
-          internalTargetId: merchant.internalTargetId || '',
-          payload: body,
-          internalTargetUrl: '',
-          internalDeliveryStatus: DEV_INTERNAL_DELIVER_FAIL,
-          jpayRawRelay: false,
-          relayOffForwardDev: true,
-          pgProvider: 'jpay',
-          routeKey,
-          ...jpayInternalLogExtras(),
-        });
-      } else {
-        const devPayload = transformForDevInternal(body, merchant, { pgProvider: 'jpay' });
-        devInternalTargetUrl = devUrl;
-        console.log('[JPAY 개발 전산 전송] 가맹점 릴레이 끔·대체=개발, 개발 환경설정 가공 후 POST, merchant=', merchantId, 'url=', devUrl);
-        const devAggJpay = await sendDevInternalHttpNotify(devUrl, devPayload);
-        devDeliverySuccess = devAggJpay.success;
-        appendDevInternalLog({
-          storedAt: new Date().toISOString(),
-          merchantId,
-          routeNo: merchant.routeNo || '',
-          internalTargetId: merchant.internalTargetId || '',
-          payload: devPayload,
-          internalTargetUrl: devInternalTargetUrl,
-          internalDeliveryStatus: devDeliverySuccess ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP,
-          jpayRawRelay: false,
-          relayOffForwardDev: true,
-          pgProvider: 'jpay',
-          routeKey,
-          ...jpayInternalLogExtras(),
-          ...devInternalLogUpstreamExtras(devAggJpay),
-        });
-      }
-    } catch (err) {
-      console.error('[JPAY 개발(가공) 전송 실패]', err.message);
-      let failUrl = devInternalTargetUrl;
-      if (!failUrl) failUrl = resolveRelayOffDevUrl(merchant, kind) || '';
-      let failPayload = body;
-      try {
-        failPayload = transformForDevInternal(body, merchant, { pgProvider: 'jpay' });
-      } catch (_) {}
-      appendDevInternalLog({
-        storedAt: new Date().toISOString(),
-        merchantId,
-        routeNo: merchant.routeNo || '',
-        internalTargetId: merchant.internalTargetId || '',
-        payload: failPayload,
-        internalTargetUrl: failUrl || '',
-        internalDeliveryStatus: failUrl ? DEV_INTERNAL_DELIVER_SKIP : DEV_INTERNAL_DELIVER_FAIL,
-        jpayRawRelay: false,
-        relayOffForwardDev: true,
-        pgProvider: 'jpay',
-        routeKey,
-        ...jpayInternalLogExtras(),
-      });
-    }
   } else {
-    console.log('[JPAY 개발 전산 스킵] 개발 전산 미사용·릴레이 끔 시 대체도 없음');
+    console.log('[JPAY 개발 전산 스킵] 개발 노티 미사용(enableDevInternal 꺼짐), merchant=', merchantId);
   }
 
   const shouldRedirectResultBrowserJpay =
@@ -13844,16 +13794,11 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
   const deliverInternalCr = merchantShouldDeliverChillpayInternal(merchant, enableRelayCr, enableInternalCheckedCr);
   const deliverDevCr = merchantShouldDeliverChillpayDevInternal(merchant, enableRelayCr, enableDevInternalCheckedCr);
   const rofCr = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
-  const useRelayOffIntCr = !enableRelayCr && rofCr === 'internal';
   const useRelayOffDevCr = !enableRelayCr && rofCr === 'dev_internal';
 
   let internalUrl = null;
   if (deliverInternalCr) {
-    if (useRelayOffIntCr) internalUrl = resolveRelayOffInternalUrl(merchant, 'callback');
-    else {
-      if (merchant.internalTargetId) internalUrl = findInternalTargetUrl(merchant.internalTargetId, 'callback');
-      if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
-    }
+    internalUrl = resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayCr, 'callback');
   }
   let devUrl = null;
   if (deliverDevCr) {
@@ -14205,11 +14150,6 @@ app.post('/admin/cancel-refund/noti-resend-internal', requireAuth, requirePage('
   if (!merchant) {
     return res.redirect(baseRedirect + '&resend=fail&reason=' + encodeURIComponent('가맹점 없음'));
   }
-  let internalUrl = merchant.internalTargetId ? findInternalTargetUrl(merchant.internalTargetId, 'callback') : null;
-  if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
-  if (!internalUrl) {
-    return res.redirect(baseRedirect + '&resend=fail&reason=' + encodeURIComponent('전산 URL 미설정'));
-  }
   const paymentStatus = notiType === 'refund' ? '9' : '2';
   const log = NOTI_LOGS.find((l) => {
     const body = l.body && typeof l.body === 'object' ? l.body : (typeof l.body === 'string' ? (() => { try { return JSON.parse(l.body || '{}'); } catch { return {}; } })() : {});
@@ -14219,6 +14159,17 @@ app.post('/admin/cancel-refund/noti-resend-internal', requireAuth, requirePage('
   });
   if (!log || !log.body) {
     return res.redirect(baseRedirect + '&resend=fail&reason=' + encodeURIComponent('해당 결제 건을 찾을 수 없음 (NOTI_LOGS)'));
+  }
+  const enableRelayResend = merchant.enableRelay !== false;
+  let internalUrl = null;
+  if (resolveMerchantListPgAcquirer(merchant) === 'jpay') {
+    if (merchant.internalTargetId) internalUrl = findInternalTargetUrl(merchant.internalTargetId, 'callback');
+    if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
+  } else {
+    internalUrl = resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayResend, 'callback');
+  }
+  if (!internalUrl) {
+    return res.redirect(baseRedirect + '&resend=fail&reason=' + encodeURIComponent('전산 URL 미설정'));
   }
   const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body || '{}'); } catch { return {}; } })() : {});
   const payload = enrichPayloadForVoidRefundNoti(log, body, paymentStatus);
