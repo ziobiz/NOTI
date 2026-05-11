@@ -2462,8 +2462,125 @@ function loadJsonLogFile(filePath, isoKey) {
   }
 }
 
+/** PG 노티 로그 본문 객체 (문자열이면 파싱) */
+function pgNotiBodyForDedupe(log) {
+  const b = log && log.body;
+  if (!b) return null;
+  if (typeof b === 'string') {
+    try {
+      return JSON.parse(b);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof b === 'object') return b;
+  return null;
+}
+
+/**
+ * 동일 PG 노티(환경 + 가맹점 + PG + TransactionId) 중복 판별 키. 본문에 거래 ID가 없으면 빈 문자열 → 중복 제거 대상 아님.
+ */
+function pgNotiLogDedupeKey(log) {
+  if (!log || typeof log !== 'object') return '';
+  const body = pgNotiBodyForDedupe(log);
+  const txId = body ? notifBodyTxId(body) : '';
+  if (!txId) return '';
+  const env = String(log.env != null ? log.env : 'live').trim().toLowerCase() || 'live';
+  const mid = String(log.merchantId || '').trim();
+  const pg = getNotiLogPgAcquirer(log);
+  return `${env}\x1f${mid}\x1f${pg}\x1f${txId}`;
+}
+
+/** 디스크/메모리 적재용: 동일 키는 receivedAtIso가 가장 늦은 한 건만 유지 */
+function dedupePgNotiLogObjectsByTransaction(objs) {
+  const byKey = new Map();
+  const noKey = [];
+  for (let i = 0; i < objs.length; i++) {
+    const obj = objs[i];
+    const key = pgNotiLogDedupeKey(obj);
+    if (!key) {
+      noKey.push(obj);
+      continue;
+    }
+    const t = Date.parse(obj.receivedAtIso || obj.receivedAt || '');
+    const prev = byKey.get(key);
+    const pt = prev ? Date.parse(prev.receivedAtIso || prev.receivedAt || '') : Number.NaN;
+    if (!prev || (!Number.isNaN(t) && (Number.isNaN(pt) || t >= pt))) {
+      byKey.set(key, obj);
+    }
+  }
+  return noKey.concat(Array.from(byKey.values()));
+}
+
+/** PG 노티 로그 전용 로더: 보관 일수 필터 + TransactionId 기준 중복 제거 후 파일 재기록 */
+function loadPgNotiJsonLogFile() {
+  try {
+    if (!fs.existsSync(PG_NOTI_LOG_PATH)) return [];
+    const raw = fs.readFileSync(PG_NOTI_LOG_PATH, 'utf8');
+    if (!raw.trim()) return [];
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    const now = Date.now();
+    const cfg = loadChillPayTransactionConfig();
+    const memDays = Number(cfg.logKeepDaysMem) > 0 ? cfg.logKeepDaysMem : DEFAULT_LOG_KEEP_DAYS_MEM;
+    const diskDays = Number(cfg.logKeepDaysDisk) > 0 ? cfg.logKeepDaysDisk : DEFAULT_LOG_KEEP_DAYS_DISK;
+    const memCutoff = now - memDays * 24 * 60 * 60 * 1000;
+    const diskCutoff = now - diskDays * 24 * 60 * 60 * 1000;
+    const corruptOrNoTimeLines = [];
+    const diskObjs = [];
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      let obj;
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        corruptOrNoTimeLines.push(line);
+        continue;
+      }
+      const iso =
+        (obj && obj.receivedAtIso) ||
+        (obj && obj.receivedAt) ||
+        null;
+      let t = Number.NaN;
+      if (iso) t = Date.parse(iso);
+      if (Number.isNaN(t)) {
+        corruptOrNoTimeLines.push(JSON.stringify(obj));
+        continue;
+      }
+      if (t >= diskCutoff) diskObjs.push(obj);
+    }
+    const beforeCt = diskObjs.length;
+    const deduped = dedupePgNotiLogObjectsByTransaction(diskObjs);
+    const removed = beforeCt - deduped.length;
+    if (removed > 0) {
+      console.log('[pg-noti.log] TransactionId 중복', removed, '건 제거(디스크 보관 구간), 유지', deduped.length, '건');
+    }
+    deduped.sort((a, b) => {
+      const ta = Date.parse(a.receivedAtIso || a.receivedAt || '') || 0;
+      const tb = Date.parse(b.receivedAtIso || b.receivedAt || '') || 0;
+      return ta - tb;
+    });
+    const memEntries = deduped.filter((e) => {
+      const t = Date.parse(e.receivedAtIso || e.receivedAt);
+      return !Number.isNaN(t) && t >= memCutoff;
+    });
+    const keptLines = deduped.map((o) => JSON.stringify(o));
+    for (let ci = 0; ci < corruptOrNoTimeLines.length; ci++) {
+      keptLines.push(corruptOrNoTimeLines[ci]);
+    }
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(PG_NOTI_LOG_PATH, keptLines.join('\n') + (keptLines.length ? '\n' : ''), 'utf8');
+    } catch {
+      // 파일 정리는 실패해도 서비스에는 영향 없음
+    }
+    return memEntries;
+  } catch {
+    return [];
+  }
+}
+
 // ===== PG 노티 로그 (메모리=logKeepDaysMem일, 파일=logKeepDaysDisk일) =====
-let NOTI_LOGS = loadJsonLogFile(PG_NOTI_LOG_PATH, 'receivedAtIso');
+let NOTI_LOGS = loadPgNotiJsonLogFile();
 
 function loadPgNotiLogsSafe() {
   try {
@@ -2480,6 +2597,15 @@ function appendPgNotiLog(entry) {
     receivedAtIso: entry.receivedAtIso || nowIso,
     ...entry,
   };
+  const dedupeKey = pgNotiLogDedupeKey(log);
+  if (dedupeKey) {
+    const arr = loadPgNotiLogsSafe();
+    for (let i = 0; i < arr.length; i++) {
+      if (pgNotiLogDedupeKey(arr[i]) === dedupeKey) {
+        return;
+      }
+    }
+  }
   NOTI_LOGS.push(log);
   // 메모리: 환경설정 logKeepDaysMem 일만 유지
   const cutoff = getLogKeepMemCutoffMs();
@@ -2957,7 +3083,7 @@ function appendRecurringCallbackLog(entry) {
 
 /** 메모리 보관 일수·파일 보관 일수 저장 직후: 디스크에 남은 기간만큼 다시 적재해 노티거래내역 등에 반영 */
 function reloadMemLogsFromDisk() {
-  NOTI_LOGS = loadJsonLogFile(PG_NOTI_LOG_PATH, 'receivedAtIso');
+  NOTI_LOGS = loadPgNotiJsonLogFile();
   INTERNAL_LOGS = loadJsonLogFile(INTERNAL_LOG_PATH, 'storedAtIso');
   DEV_INTERNAL_LOGS = loadJsonLogFile(DEV_INTERNAL_LOG_PATH, 'storedAtIso');
   TEST_LOGS = loadJsonLogFile(TEST_LOG_PATH, 'loggedAtIso');
