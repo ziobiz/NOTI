@@ -825,10 +825,10 @@ function getMemberPermissions(userId) {
   return OPERATOR_PERMISSIONS[userId] || [];
 }
 
-/** 전산 대상 접근: SUPER_ADMIN이면 null(전체), 아니면 해당 계정에 부여된 전산 대상 ID 배열 */
+/** 전산 대상 접근: SUPER_ADMIN·ADMIN이면 null(전체), OPERATOR만 해당 계정에 부여된 전산 대상 ID 배열 */
 function getMemberInternalTargetIds(member) {
   if (!member) return null;
-  if (member.role === ROLES.SUPER_ADMIN) return null;
+  if (member.role === ROLES.SUPER_ADMIN || member.role === ROLES.ADMIN) return null;
   const ids = member.internalTargetIds;
   return Array.isArray(ids) ? ids.filter((id) => id != null && String(id).trim() !== '') : [];
 }
@@ -843,9 +843,9 @@ function canAccessInternalTarget(member, internalTargetId) {
 
 /** NOTI_LOGS 항목이 현재 멤버의 전산 대상 권한에 포함되는지 (merchant.internalTargetId 기준) */
 function filterLogByMemberInternalTarget(log, member) {
-  if (!member || member.role === ROLES.SUPER_ADMIN) return true;
+  if (!member || member.role === ROLES.SUPER_ADMIN || member.role === ROLES.ADMIN) return true;
   const allowed = getMemberInternalTargetIds(member);
-  if (allowed === null || allowed.length === 0) return false;
+  if (!allowed || allowed.length === 0) return false;
   const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
   if (merchant && merchant.internalTargetId) {
     const tid = String(merchant.internalTargetId).trim();
@@ -7416,10 +7416,10 @@ app.get('/admin/login', (req, res) => {
     <div class="card">
       <h1>${t(locale, 'login_title')}</h1>
       ${errMsg ? `<div class="error">${escAttr(errMsg)}</div>` : ''}
-      <form method="post" action="/admin/login">
-        <label>${t(locale, 'login_username')}<input type="text" name="username" value="${escAttr(u)}" required /></label>
-        <label>${t(locale, 'login_password')}<input type="password" name="password" required /></label>
-        <label>${t(locale, 'login_otp')}<input type="text" name="otp" maxlength="6" placeholder="000000" /></label>
+      <form id="admin-login-form" method="post" action="/admin/login">
+        <label>${t(locale, 'login_username')}<input type="text" name="username" value="${escAttr(u)}" required autocomplete="username" /></label>
+        <label>${t(locale, 'login_password')}<input type="password" name="password" required autocomplete="current-password" /></label>
+        <label>${t(locale, 'login_otp')}<input id="admin-login-otp" type="text" name="otp" maxlength="6" placeholder="000000" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" /></label>
         <div class="hint">${t(locale, 'login_otp_hint')}</div>
         <button type="submit">${t(locale, 'login_submit')}</button>
       </form>
@@ -7427,6 +7427,39 @@ app.get('/admin/login', (req, res) => {
     </div>
   </div>
   ${alertScript}
+  <script>
+    (function () {
+      var form = document.getElementById('admin-login-form');
+      var otpEl = document.getElementById('admin-login-otp');
+      if (!form || !otpEl) return;
+      var autoSubmitting = false;
+      function digitsOnly(v) {
+        return String(v || '').replace(/\\D/g, '');
+      }
+      function tryAutoSubmit() {
+        var d = digitsOnly(otpEl.value);
+        if (d.length !== 6) {
+          autoSubmitting = false;
+          return;
+        }
+        if (autoSubmitting) return;
+        otpEl.value = d;
+        if (!form.checkValidity()) {
+          form.reportValidity();
+          return;
+        }
+        autoSubmitting = true;
+        if (typeof form.requestSubmit === 'function') form.requestSubmit();
+        else form.submit();
+      }
+      otpEl.addEventListener('input', tryAutoSubmit);
+      otpEl.addEventListener('paste', function () { setTimeout(tryAutoSubmit, 0); });
+      var userEl = form.querySelector('input[name="username"]');
+      var passEl = form.querySelector('input[name="password"]');
+      if (userEl) userEl.addEventListener('input', tryAutoSubmit);
+      if (passEl) passEl.addEventListener('input', tryAutoSubmit);
+    })();
+  </script>
 </body>
 </html>`);
 });
@@ -8683,6 +8716,14 @@ function getRoleLabel(role, locale) {
   return role || '';
 }
 
+/** 회원 수정 폼에 넣을 페이지 권한 배열: ADMIN·SUPER_ADMIN은 requirePage상 전체 접근이나 operator-permissions에 없어 표시용으로 전체 키를 쓴다 */
+function getMemberFormDisplayPerms(mem) {
+  if (!mem || !mem.role) return [];
+  if (mem.role === ROLES.OPERATOR) return OPERATOR_PERMISSIONS[mem.userId] || [];
+  if (mem.role === ROLES.ADMIN || mem.role === ROLES.SUPER_ADMIN) return [...PAGE_KEYS];
+  return [];
+}
+
 // 페이지 번호(1~18) 설명 문구 (상단 안내용) - 컴팩트 그리드
 function getPageNumLegend(locale) {
   return PAGE_KEYS.map((k, i) => `${i + 1}:${(t(locale, PAGE_KEY_TO_LABEL[k] || k) || k).replace(/\s+/g, '')}`).join(' ');
@@ -8755,7 +8796,19 @@ app.get('/admin/members', requireMemberManage[0], requireMemberManage[1], (req, 
       const targetLabels = mem.role === ROLES.SUPER_ADMIN ? (t(locale, 'members_perm_full') || '전체') : (targetIds.length ? targetIds.map((tid) => getInternalTargetName(tid)).filter((n) => n && n !== '-').join(', ') || targetIds.join(', ') : '-');
       const internalTargetCell = `<td class="internal-target-cell" style="font-size:12px;text-align:center;vertical-align:middle;max-width:180px;">${(targetLabels || '-').replace(/</g, '&lt;').replace(/&/g, '&amp;')}</td>`;
       const memberDataAttr = canEditInfo ? (() => {
-        const o = { id: mem.id, name: mem.name || '', country: mem.country || '', userId: mem.userId || '', email: mem.email || '', birthDate: mem.birthDate || '', role: mem.role || '', perms: mem.role === ROLES.OPERATOR ? (OPERATOR_PERMISSIONS[mem.userId] || []) : [], otpRequired: !!mem.otpRequired, canAssignPermission: !!mem.canAssignPermission, internalTargetIds: mem.internalTargetIds || [] };
+        const o = {
+          id: mem.id,
+          name: mem.name || '',
+          country: mem.country || '',
+          userId: mem.userId || '',
+          email: mem.email || '',
+          birthDate: mem.birthDate || '',
+          role: mem.role || '',
+          perms: getMemberFormDisplayPerms(mem),
+          otpRequired: !!mem.otpRequired,
+          canAssignPermission: !!mem.canAssignPermission,
+          internalTargetIds: mem.internalTargetIds || [],
+        };
         return JSON.stringify(o).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       })() : '';
       const permForm = mem.role === ROLES.OPERATOR && canEditPerm
@@ -11715,7 +11768,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   }
   // 요약: 성공/실패/무효/환불/기타 건수·금액 (색상 블록용) — slice 전 전체 목록 기준
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const notiSummary = { success: { count: 0, byCurr: {} }, fail: { count: 0, byCurr: {} }, void: { count: 0, byCurr: {} }, refund: { count: 0, byCurr: {} }, other: { count: 0, byCurr: {} } };
+  const notiSummary = { success: { count: 0, byCurr: {} }, fail: { count: 0, byCurr: {} }, cancel: { count: 0, byCurr: {} }, void: { count: 0, byCurr: {} }, refund: { count: 0, byCurr: {} }, other: { count: 0, byCurr: {} } };
   const getNotiStatusKind = (log) => {
     const body = parseNotiBody(log);
     if (isJpaySaleAsyncNotifyBody(body)) {
@@ -11732,7 +11785,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       if ((txId && hasRefundNotiSent(txId)) || (e && e.type === 'refund')) return 'refund';
       return 'success';
     }
-    if (isDefinitelyCancelPaymentStatus(ps)) return 'other';
+    if (isDefinitelyCancelPaymentStatus(ps)) return 'cancel';
     return 'fail';
   };
   for (const log of list) {
@@ -11755,12 +11808,13 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   const notiFmtByCurrency = (getVal) => notiCurrencyKeys.length ? notiCurrencyKeys.map((c) => c + ' ' + notiFmtIco(getVal(c))).join(' | ') : '0';
   const notiTotalByCurr = {};
   for (const c of notiCurrencyKeys) notiTotalByCurr[c] = Object.values(notiSummary).reduce((sum, b) => sum + (b.byCurr[c] || 0), 0);
-  const notiSummaryStyles = { total: 'color:#374151;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;background:#f3f4f6;', success: 'background:#dcfce7;color:#166534;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', fail: 'background:#fecaca;color:#991b1b;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', void: 'background:#fed7aa;color:#9a3412;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', refund: 'background:#bfdbfe;color:#1e40af;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', other: 'background:#e5e7eb;color:#4b5563;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;' };
+  const notiSummaryStyles = { total: 'color:#374151;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;background:#f3f4f6;', success: 'background:#dcfce7;color:#166534;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', fail: 'background:#fecaca;color:#991b1b;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', cancel: 'background:#cffafe;color:#0e7490;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', void: 'background:#fed7aa;color:#9a3412;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', refund: 'background:#bfdbfe;color:#1e40af;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;', other: 'background:#e5e7eb;color:#4b5563;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;' };
   const notiStyleEmpty = 'background:#e5e7eb;color:#6b7280;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;';
   const notiCount = list.length;
   const nStyle = (notiCount === 0) ? notiStyleEmpty : notiSummaryStyles.total;
   const nStyleS = (notiSummary.success.count === 0) ? notiStyleEmpty : notiSummaryStyles.success;
   const nStyleF = (notiSummary.fail.count === 0) ? notiStyleEmpty : notiSummaryStyles.fail;
+  const nStyleC = (notiSummary.cancel.count === 0) ? notiStyleEmpty : notiSummaryStyles.cancel;
   const nStyleV = (notiSummary.void.count === 0) ? notiStyleEmpty : notiSummaryStyles.void;
   const nStyleR = (notiSummary.refund.count === 0) ? notiStyleEmpty : notiSummaryStyles.refund;
   const nStyleO = (notiSummary.other.count === 0) ? notiStyleEmpty : notiSummaryStyles.other;
@@ -11777,6 +11831,9 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
         .replace('{{styleFail}}', nStyleF)
         .replace('{{failCount}}', String(notiSummary.fail.count))
         .replace('{{failAmount}}', esc(notiFmtByCurrency((c) => notiSummary.fail.byCurr[c] || 0)))
+        .replace('{{styleCancel}}', nStyleC)
+        .replace('{{cancelCount}}', String(notiSummary.cancel.count))
+        .replace('{{cancelAmount}}', esc(notiFmtByCurrency((c) => notiSummary.cancel.byCurr[c] || 0)))
         .replace('{{styleVoid}}', nStyleV)
         .replace('{{voidCount}}', String(notiSummary.void.count))
         .replace('{{voidAmount}}', esc(notiFmtByCurrency((c) => notiSummary.void.byCurr[c] || 0)))
@@ -12866,7 +12923,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
     if (b === 'USD') return 1;
     return String(a).localeCompare(b);
   });
-  const emptyBucket = () => ({ totalIcopay: 0, success: { count: 0, icopay: 0 }, fail: { count: 0, icopay: 0 }, void: { count: 0, icopay: 0 }, refund: { count: 0, icopay: 0 }, other: { count: 0, icopay: 0 } });
+  const emptyBucket = () => ({ totalIcopay: 0, success: { count: 0, icopay: 0 }, fail: { count: 0, icopay: 0 }, cancel: { count: 0, icopay: 0 }, void: { count: 0, icopay: 0 }, refund: { count: 0, icopay: 0 }, other: { count: 0, icopay: 0 } });
   const summaryByCurrency = {};
   for (const c of currencyKeys) summaryByCurrency[c] = emptyBucket();
   for (const row of flatList) {
@@ -12878,10 +12935,12 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
     bucket.totalIcopay += amt;
     const isSuccess = kind === 'success';
     const isFail = kind === 'fail';
+    const isCancel = kind === 'cancel';
     const isVoid = kind === 'voided' || kind === 'voidrequested';
     const isRefund = kind === 'refunded' || kind === 'refundrequested' || kind === 'partialrefunded';
     if (isSuccess) { bucket.success.count++; bucket.success.icopay += amt; }
     else if (isFail) { bucket.fail.count++; bucket.fail.icopay += amt; }
+    else if (isCancel) { bucket.cancel.count++; bucket.cancel.icopay += amt; }
     else if (isVoid) { bucket.void.count++; bucket.void.icopay += amt; }
     else if (isRefund) { bucket.refund.count++; bucket.refund.icopay += amt; }
     else { bucket.other.count++; bucket.other.icopay += amt; }
@@ -12890,6 +12949,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
   const fmtByCurrency = (getVal) => currencyKeys.map((c) => c + ' ' + fmtIco(getVal(summaryByCurrency[c]))).join(' | ');
   const totalSuccessCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].success.count, 0);
   const totalFailCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].fail.count, 0);
+  const totalCancelCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].cancel.count, 0);
   const totalVoidCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].void.count, 0);
   const totalRefundCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].refund.count, 0);
   const totalOtherCount = currencyKeys.reduce((sum, c) => sum + summaryByCurrency[c].other.count, 0);
@@ -12897,6 +12957,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
     total: 'color:#374151;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;background:#f3f4f6;',
     success: 'background:#dcfce7;color:#166534;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
     fail: 'background:#fecaca;color:#991b1b;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
+    cancel: 'background:#cffafe;color:#0e7490;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
     void: 'background:#fed7aa;color:#9a3412;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
     refund: 'background:#bfdbfe;color:#1e40af;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
     other: 'background:#e5e7eb;color:#4b5563;font-weight:600;padding:2px 6px;border-radius:4px;margin:0 2px;',
@@ -12905,6 +12966,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
   const pgStyle = (totalCount === 0) ? summaryStyleEmpty : summaryStyles.total;
   const pgStyleS = (totalSuccessCount === 0) ? summaryStyleEmpty : summaryStyles.success;
   const pgStyleF = (totalFailCount === 0) ? summaryStyleEmpty : summaryStyles.fail;
+  const pgStyleC = (totalCancelCount === 0) ? summaryStyleEmpty : summaryStyles.cancel;
   const pgStyleV = (totalVoidCount === 0) ? summaryStyleEmpty : summaryStyles.void;
   const pgStyleR = (totalRefundCount === 0) ? summaryStyleEmpty : summaryStyles.refund;
   const pgStyleO = (totalOtherCount === 0) ? summaryStyleEmpty : summaryStyles.other;
@@ -12921,6 +12983,9 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
       .replace('{{styleFail}}', pgStyleF)
       .replace('{{failCount}}', String(totalFailCount))
       .replace('{{failAmount}}', esc(fmtByCurrency((b) => b.fail.icopay)))
+      .replace('{{styleCancel}}', pgStyleC)
+      .replace('{{cancelCount}}', String(totalCancelCount))
+      .replace('{{cancelAmount}}', esc(fmtByCurrency((b) => b.cancel.icopay)))
       .replace('{{styleVoid}}', pgStyleV)
       .replace('{{voidCount}}', String(totalVoidCount))
       .replace('{{voidAmount}}', esc(fmtByCurrency((b) => b.void.icopay)))
