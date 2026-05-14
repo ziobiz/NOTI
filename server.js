@@ -453,9 +453,18 @@ const PAGE_KEY_TO_DEFAULT_URL = {
 };
 function getFirstAllowedRedirectUrl(permissions) {
   if (!Array.isArray(permissions) || permissions.length === 0) return '/admin/merchants';
-  if (permissions.includes('cancel_refund')) return '/admin/transactions';
+  if (permissions.includes('cancel_refund')) {
+    const otl = otlIcopayNotiDefaultTransactionsUrl();
+    return otl || '/admin/transactions';
+  }
   for (const key of PAGE_KEYS) {
-    if (permissions.includes(key) && PAGE_KEY_TO_DEFAULT_URL[key]) return PAGE_KEY_TO_DEFAULT_URL[key];
+    if (permissions.includes(key) && PAGE_KEY_TO_DEFAULT_URL[key]) {
+      if (key === 'cr_transactions') {
+        const otl = otlIcopayNotiDefaultTransactionsUrl();
+        if (otl) return otl;
+      }
+      return PAGE_KEY_TO_DEFAULT_URL[key];
+    }
   }
   return '/admin/merchants';
 }
@@ -498,6 +507,18 @@ function saveSiteSettings(o) {
   };
   fs.writeFileSync(SITE_SETTINGS_PATH, JSON.stringify(toSave, null, 2));
   return toSave;
+}
+
+/** OTL ICOPAY NOTI 브랜딩(사이드바 제목/부제)일 때 로그인 후 기본: 노티거래내역·당일·시간 내림차순 */
+function otlIcopayNotiDefaultTransactionsUrl() {
+  try {
+    const site = loadSiteSettings();
+    const bundle = ((site.sidebarTitle || '') + ' ' + (site.sidebarSub || '')).toUpperCase();
+    if (bundle.includes('OTL') && bundle.includes('ICOPAY')) {
+      return '/admin/transactions?period=today&sort=time&sortDir=desc';
+    }
+  } catch (_) {}
+  return null;
 }
 
 // ========== ChillPay Transaction API (무효/환불). 취소는 노티 수신만, 무효/환불만 API 요청 가능 ==========
@@ -2590,6 +2611,11 @@ function loadPgNotiLogsSafe() {
   }
 }
 
+/**
+ * PG 노티 수신 1건을 메모리·pg-noti.log에 반영한다.
+ * - 노티거래내역은 「실제 수신 노티」가 곧 가맹점·전산·개발노티로 나가는 근거이므로, ChillPay 피지 동기화(Search Payment) 결과로 행을 덮어쓰지 않는다.
+ * - 동일 거래(환경+가맹점+PG+TransactionId)에 대해 이후 수신분이 더 최신이면 메모리 행만 교체하고, 매 수신은 디스크에 한 줄 append 한다(재적재 시 시각 기준 최신 1건 dedupe).
+ */
 function appendPgNotiLog(entry) {
   const nowIso = new Date().toISOString();
   const log = {
@@ -2597,29 +2623,40 @@ function appendPgNotiLog(entry) {
     receivedAtIso: entry.receivedAtIso || nowIso,
     ...entry,
   };
-  const dedupeKey = pgNotiLogDedupeKey(log);
-  if (dedupeKey) {
-    const arr = loadPgNotiLogsSafe();
-    for (let i = 0; i < arr.length; i++) {
-      if (pgNotiLogDedupeKey(arr[i]) === dedupeKey) {
-        return;
-      }
-    }
-  }
-  NOTI_LOGS.push(log);
-  // 메모리: 환경설정 logKeepDaysMem 일만 유지
-  const cutoff = getLogKeepMemCutoffMs();
-  NOTI_LOGS = NOTI_LOGS.filter((e) => {
-    const t = Date.parse(e.receivedAtIso || e.receivedAt);
-    return !Number.isNaN(t) && t >= cutoff;
-  });
-  // 파일에도 기록
+  // 디스크: 동일 TransactionId라도 webhook마다 한 줄씩 남겨, 재적재 시 dedupePgNotiLogObjectsByTransaction 로 최신 상태 복원 가능
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.appendFile(PG_NOTI_LOG_PATH, JSON.stringify(log) + '\n', () => {});
   } catch {
     // 로그 기록 실패는 서비스에 영향 없음
   }
+  const dedupeKey = pgNotiLogDedupeKey(log);
+  if (!dedupeKey) {
+    NOTI_LOGS.push(log);
+  } else {
+    const arr = loadPgNotiLogsSafe();
+    let idx = -1;
+    for (let i = 0; i < arr.length; i++) {
+      if (pgNotiLogDedupeKey(arr[i]) === dedupeKey) {
+        idx = i;
+        break;
+      }
+    }
+    const tNew = Date.parse(log.receivedAtIso || log.receivedAt || '');
+    if (idx < 0) {
+      NOTI_LOGS.push(log);
+    } else {
+      const tOld = Date.parse(arr[idx].receivedAtIso || arr[idx].receivedAt || '');
+      if (Number.isNaN(tNew) || Number.isNaN(tOld) || tNew >= tOld) {
+        arr[idx] = log;
+      }
+    }
+  }
+  const cutoff = getLogKeepMemCutoffMs();
+  NOTI_LOGS = NOTI_LOGS.filter((e) => {
+    const t = Date.parse(e.receivedAtIso || e.receivedAt);
+    return !Number.isNaN(t) && t >= cutoff;
+  });
 }
 
 /** 노티 로그 행의 PG(대행사): 명시 필드 또는 routeKey(jpay/…) */
@@ -7263,11 +7300,13 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
   if (crAny) {
     const crCfg = loadChillPayTransactionConfig();
     const forceRefundDaysNav = Number(crCfg.forceRefundWindowDays) >= 0 ? crCfg.forceRefundWindowDays : 0;
-    const crPaths = ['/admin/transactions', '/admin/pg-transactions', '/admin/cancel-refund/cancel', '/admin/cancel-refund/void', '/admin/cancel-refund/void-summary', '/admin/cancel-refund/refund', '/admin/cancel-refund/force-refund', '/admin/cancel-refund/noti', '/admin/cancel-refund/void-deleted-list'];
+    const crPaths = ['/admin/transactions', '/admin/daily-noti-summary', '/admin/daily-noti-summary/export', '/admin/pg-transactions', '/admin/daily-pg-summary', '/admin/daily-pg-summary/export', '/admin/cancel-refund/cancel', '/admin/cancel-refund/void', '/admin/cancel-refund/void-summary', '/admin/cancel-refund/refund', '/admin/cancel-refund/force-refund', '/admin/cancel-refund/noti', '/admin/cancel-refund/void-deleted-list'];
     const crLabel = t(locale, 'nav_cancel_refund');
     const crItems = [];
     if (can('cr_transactions')) crItems.push(link('/admin/transactions', t(locale, 'nav_transaction_list')));
+    if (can('cr_transactions')) crItems.push(link('/admin/daily-noti-summary?period=thisMonth&dateSort=desc', t(locale, 'nav_daily_noti_summary')));
     if (can('cr_pg_transactions')) crItems.push(link('/admin/pg-transactions?sort=today', t(locale, 'nav_pg_transaction_list')));
+    if (can('cr_pg_transactions')) crItems.push(link('/admin/daily-pg-summary?sort=thisMonth&dateSort=desc', t(locale, 'nav_daily_pg_summary')));
     if (can('cr_cancel')) crItems.push(link('/admin/cancel-refund/cancel', t(locale, 'nav_cancel_refund_cancel')));
     if (can('cr_void')) crItems.push(link('/admin/cancel-refund/void', t(locale, 'nav_cancel_refund_void')));
     if (can('cr_void_summary')) crItems.push(link('/admin/cancel-refund/void-summary', t(locale, 'nav_cancel_refund_void_summary')));
@@ -12255,6 +12294,1144 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       { hubToolbarHtml: hubHtmlTx },
     ),
   );
+});
+
+// ----- 종합거래 > 일일 노티 집계 / 일일 피지 집계 (일자별 합산, 더블클릭 시 상세) -----
+const DAILY_DETAIL_ROW_CAP = 8000;
+
+function dailyNotiChillTz() {
+  const cfgTx = loadChillPayTransactionConfig();
+  return (cfgTx && cfgTx.timezone) ? String(cfgTx.timezone).trim() : 'Asia/Bangkok';
+}
+
+function dailyNotiIsoToYmd(iso, chillTz) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: chillTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+  } catch {
+    return '';
+  }
+}
+
+function dailyNotiCalcPresetRange(period, chillTz) {
+  const toYmd = (dObj) => {
+    try {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: chillTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(dObj);
+    } catch {
+      return '';
+    }
+  };
+  const parseYmd = (s) => {
+    const m = String(s || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const da = Number(m[3]);
+    if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(da)) return null;
+    return new Date(Date.UTC(y, mo - 1, da));
+  };
+  const addDaysYmd = (ymdStr, deltaDays) => {
+    const base = parseYmd(ymdStr);
+    if (!base) return '';
+    base.setUTCDate(base.getUTCDate() + (Number(deltaDays) || 0));
+    const y = base.getUTCFullYear();
+    const m = String(base.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(base.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+  const getTzDow = (d) => {
+    try {
+      const w = new Intl.DateTimeFormat('en-US', { timeZone: chillTz, weekday: 'short' }).format(d);
+      const map = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+      return map[w] != null ? map[w] : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const now = new Date();
+  const todayYmd = toYmd(now);
+  if (!todayYmd) return null;
+  if (period === 'today') return { startDate: todayYmd, endDate: todayYmd };
+  if (period === 'yesterday') {
+    const y = addDaysYmd(todayYmd, -1);
+    return y ? { startDate: y, endDate: y } : null;
+  }
+  if (period === 'thisWeek' || period === 'lastWeek') {
+    const dow = getTzDow(now);
+    const mondayDiff = dow === 0 ? -6 : 1 - dow;
+    const thisMon = addDaysYmd(todayYmd, mondayDiff);
+    if (!thisMon) return null;
+    if (period === 'thisWeek') return { startDate: thisMon, endDate: addDaysYmd(thisMon, 6) };
+    const lastSun = addDaysYmd(thisMon, -1);
+    if (!lastSun) return null;
+    return { startDate: addDaysYmd(lastSun, -6), endDate: lastSun };
+  }
+  if (period === 'thisMonth' || period === 'lastMonth') {
+    const base = parseYmd(todayYmd);
+    if (!base) return null;
+    let y = base.getUTCFullYear();
+    let m = base.getUTCMonth();
+    if (period === 'lastMonth') {
+      m -= 1;
+      if (m < 0) {
+        m = 11;
+        y -= 1;
+      }
+    }
+    const start = new Date(Date.UTC(y, m, 1));
+    const end = new Date(Date.UTC(y, m + 1, 0));
+    const startYmd = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}`;
+    const endYmd = `${end.getUTCFullYear()}-${String(end.getUTCMonth() + 1).padStart(2, '0')}-${String(end.getUTCDate()).padStart(2, '0')}`;
+    return { startDate: startYmd, endDate: endYmd };
+  }
+  return null;
+}
+
+function classifyNotiLogForDailyKind(log, voidRefundByTxId, voidRefundByOrderNo) {
+  const body = parseNotiBody(log);
+  if (isJpaySaleAsyncNotifyBody(body)) {
+    const rc = String(body.returncode).trim();
+    if (rc !== '00' && rc !== '0') return 'fail';
+  }
+  const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+  const isSuccess = isSuccessPaymentBody(body);
+  const txId = body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '';
+  const orderNo = body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID ?? '';
+  const e =
+    (txId && voidRefundByTxId[txId]) || (orderNo && voidRefundByOrderNo[String(orderNo).trim()]) || null;
+  if (isSuccess) {
+    if ((txId && hasVoidNotiSent(txId)) || (e && (e.type === 'void' || e.type === 'void_manual_email'))) return 'void';
+    if ((txId && hasRefundNotiSent(txId)) || (e && e.type === 'refund')) return 'refund';
+    return 'success';
+  }
+  if (isDefinitelyCancelPaymentStatus(ps)) return 'cancel';
+  return 'fail';
+}
+
+function getFilteredNotiLogsForDailySummary(req) {
+  const q = req.query || {};
+  const notiKindFilter = parseTxNotiKindFilter(req);
+  let list = filterTransactionLogsByNotiKind([...getTransactionListLogs(req)].slice().reverse(), notiKindFilter);
+  const chillTz = dailyNotiChillTz();
+  let dateFrom = (q.dateFrom || '').toString().trim();
+  let dateTo = (q.dateTo || '').toString().trim();
+  const period = (q.period || 'thisMonth').toString();
+  const statusFilter = (q.statusFilter || '').toString();
+  const searchKw = (q.search || '').toString().trim();
+  const searchField = (q.searchField || 'all').toString();
+  const dateSort = (q.dateSort || 'desc').toString().toLowerCase() === 'asc' ? 'asc' : 'desc';
+  if (!dateFrom && !dateTo && period && period !== 'all') {
+    const r = dailyNotiCalcPresetRange(period, chillTz);
+    if (r && r.startDate && r.endDate) {
+      dateFrom = r.startDate;
+      dateTo = r.endDate;
+    }
+  }
+  if (dateFrom || dateTo) {
+    list = list.filter((log) => {
+      const ymd = dailyNotiIsoToYmd(log.receivedAtIso || log.receivedAt, chillTz);
+      if (!ymd) return false;
+      if (dateFrom && ymd < dateFrom) return false;
+      if (dateTo && ymd > dateTo) return false;
+      return true;
+    });
+  }
+  const voidRefundByTxIdForFilter = buildVoidRefundNotiMap(30);
+  const voidRefundByOrderNoForFilter = buildVoidRefundNotiOrderNoMap(30);
+  function getNotiFilterKind(log) {
+    const body = parseNotiBody(log);
+    if (isJpaySaleAsyncNotifyBody(body)) {
+      const rc = String(body.returncode).trim();
+      if (rc !== '00' && rc !== '0') return 'fail';
+    }
+    const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+    const isSuccess = isSuccessPaymentBody(body);
+    const isCancel = isDefinitelyCancelPaymentStatus(ps);
+    const txId = body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '';
+    const orderNo = body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID ?? '';
+    const entry =
+      (txId && voidRefundByTxIdForFilter[txId]) || (orderNo && voidRefundByOrderNoForFilter[String(orderNo).trim()]) || null;
+    const hasVoid = !!((txId && hasVoidNotiSent(txId)) || (entry && (entry.type === 'void' || entry.type === 'void_manual_email')));
+    const hasRefund = !!((txId && hasRefundNotiSent(txId)) || (entry && entry.type === 'refund'));
+    if (!isSuccess && !isCancel) return 'fail';
+    if (isCancel) return 'cancel';
+    if (isSuccess && !hasVoid && !hasRefund) return 'paid';
+    if (hasVoid) {
+      if (entry && entry.type === 'void_manual_email') return 'force_void';
+      const baseDate = body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
+      const window = entry && entry.sentAtIso ? getVoidRefundWindow(baseDate, entry.sentAtIso) : getVoidRefundWindow(baseDate);
+      if (window === 'void_auto') return 'void_auto';
+      if (window === 'void_manual') return 'void_manual';
+      return 'void_manual';
+    }
+    if (hasRefund) {
+      if (entry && entry.mode === 'manual') return 'refund_manual';
+      return 'refund_auto';
+    }
+    return 'paid';
+  }
+  if (statusFilter) {
+    list = list.filter((log) => {
+      const kind = getNotiFilterKind(log);
+      if (statusFilter === 'fail') return kind === 'fail';
+      if (statusFilter === 'paid') return kind === 'paid';
+      if (statusFilter === 'cancel') return kind === 'cancel';
+      if (statusFilter === 'void_all') return kind === 'void_auto' || kind === 'void_manual' || kind === 'force_void';
+      if (statusFilter === 'void_auto') return kind === 'void_auto';
+      if (statusFilter === 'void_manual') return kind === 'void_manual';
+      if (statusFilter === 'force_void') return kind === 'force_void';
+      if (statusFilter === 'refund_all') return kind === 'refund_auto' || kind === 'refund_manual' || kind === 'force_refund';
+      if (statusFilter === 'refund_auto') return kind === 'refund_auto';
+      if (statusFilter === 'refund_manual') return kind === 'refund_manual';
+      if (statusFilter === 'force_refund') return kind === 'refund_auto' || kind === 'refund_manual';
+      if (statusFilter === 'exclude_paid') return kind !== 'paid';
+      return true;
+    });
+  }
+  if (searchKw) {
+    const kw = searchKw.toLowerCase();
+    list = list.filter((log) => {
+      const body = parseNotiBody(log);
+      const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+      const routeNo = notiTransactionRouteNoForSearch(log, body, merchant);
+      if (searchField === 'all') {
+        const str = [
+          log.receivedAtIso || log.receivedAt,
+          body.TransactionId,
+          body.transactionId,
+          body.transaction_id,
+          body.OrderNo,
+          body.orderNo,
+          body.orderid,
+          body.orderID,
+          body.Amount,
+          body.amount,
+          body.true_amount,
+          body.trueAmount,
+          body.PaymentStatus,
+          body.paymentStatus,
+          body.status,
+          body.returncode,
+          body.PaymentDate,
+          body.paymentDate,
+          body.datetime,
+          formatCurrencyForDisplay(body.Currency || body.currency),
+          body.Currency,
+          body.currency,
+          body.CustomerId,
+          body.customerId,
+          body.PaymentDescription,
+          body.paymentDescription,
+          body.Description,
+          body.description,
+          body.memberid,
+          body.memberId,
+          body.attach,
+          log.merchantId || '',
+          routeNo,
+          jpayMidLabelForLog(log),
+          log.jpayRouteToken || '',
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return str.indexOf(kw) !== -1;
+      }
+      if (searchField === 'Route' || searchField === 'RouteNo') return routeNoSearchExactMatch(routeNo, searchKw);
+      let val = '';
+      if (searchField === 'OrderNo') val = (body.OrderNo || body.orderNo || body.orderid || body.orderID || '') + '';
+      else if (searchField === 'CustomerId') val = (body.CustomerId || body.customerId || '') + '';
+      else if (searchField === 'TransactionId') val = (body.TransactionId || body.transactionId || body.transaction_id || '') + '';
+      else if (searchField === 'Amount') val = (body.Amount || body.amount || '') + '';
+      else if (searchField === 'merchant') val = (log.merchantId || '') + '';
+      else if (searchField === 'Currency')
+        val = (formatCurrencyForDisplay(body.Currency || body.currency) || body.Currency || body.currency || '') + '';
+      else if (searchField === 'Description')
+        val = (body.PaymentDescription || body.paymentDescription || body.Description || body.description || '') + '';
+      return val.toLowerCase().indexOf(kw) !== -1;
+    });
+  }
+  return { list, chillTz, dateFrom, dateTo, period, notiKindFilter, statusFilter, searchKw, searchField, dateSort };
+}
+
+function aggregateNotiLogsByDay(list, chillTz, dateSort) {
+  const voidRefundByTxId = buildVoidRefundNotiMap(30);
+  const voidRefundByOrderNo = buildVoidRefundNotiOrderNoMap(30);
+  const byDay = {};
+  for (const log of list) {
+    const ymd = dailyNotiIsoToYmd(log.receivedAtIso || log.receivedAt, chillTz);
+    if (!ymd) continue;
+    if (!byDay[ymd]) {
+      byDay[ymd] = {
+        date: ymd,
+        count: 0,
+        success: 0,
+        fail: 0,
+        cancel: 0,
+        void: 0,
+        refund: 0,
+        byCurr: {},
+      };
+    }
+    const bucket = byDay[ymd];
+    bucket.count++;
+    const body = parseNotiBody(log);
+    const pgK = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+    const rawIco = getNotiBodyAmountRawForIcopay(body, pgK);
+    let amt = 0;
+    if (rawIco !== '' && rawIco != null) {
+      const n = computeIcopayAmount(rawIco, body.Currency ?? body.currency, pgK);
+      if (Number.isFinite(n)) amt = n;
+    }
+    const curr = formatCurrencyForDisplay(body.Currency || body.currency) || '(기타)';
+    const kind = classifyNotiLogForDailyKind(log, voidRefundByTxId, voidRefundByOrderNo);
+    if (kind === 'success') bucket.success++;
+    else if (kind === 'fail') bucket.fail++;
+    else if (kind === 'cancel') bucket.cancel++;
+    else if (kind === 'void') bucket.void++;
+    else if (kind === 'refund') bucket.refund++;
+    if (!bucket.byCurr[curr]) bucket.byCurr[curr] = 0;
+    bucket.byCurr[curr] += amt;
+  }
+  const desc = (dateSort || 'desc') !== 'asc';
+  const keys = Object.keys(byDay).sort((a, b) => (desc ? b.localeCompare(a) : a.localeCompare(b)));
+  return keys.map((k) => byDay[k]);
+}
+
+function dailyPgRowStatusKind(row) {
+  const s = String(row && row.status != null ? row.status : '').trim().toLowerCase();
+  if (!s) return 'other';
+  if (s === 'success') return 'success';
+  if (s === 'fail') return 'fail';
+  if (s === 'cancel') return 'cancel';
+  if (s === 'error') return 'error';
+  if (s === 'timeout') return 'timeout';
+  if (s === 'request') return 'request';
+  if (s === 'voided') return 'voided';
+  if (s === 'refunded') return 'refunded';
+  if (s === 'refundrequested') return 'refundrequested';
+  if (s === 'settlemented') return 'settlemented';
+  if (s === 'partialrefunded') return 'partialrefunded';
+  if (s === 'voidrequested') return 'voidrequested';
+  return 'other';
+}
+
+function aggregatePgDayRows(rows, toIcopay) {
+  const out = {
+    count: rows.length,
+    success: 0,
+    fail: 0,
+    cancel: 0,
+    void: 0,
+    refund: 0,
+    other: 0,
+    byCurr: {},
+  };
+  for (const row of rows) {
+    const kind = dailyPgRowStatusKind(row);
+    if (kind === 'success') out.success++;
+    else if (kind === 'fail') out.fail++;
+    else if (kind === 'cancel') out.cancel++;
+    else if (kind === 'voided' || kind === 'voidrequested') out.void++;
+    else if (kind === 'refunded' || kind === 'refundrequested' || kind === 'partialrefunded') out.refund++;
+    else out.other++;
+    const currency = (row.currency && String(row.currency).trim()) || '(기타)';
+    const amt = toIcopay(row.amount, row.currency);
+    if (!out.byCurr[currency]) out.byCurr[currency] = 0;
+    out.byCurr[currency] += Number.isFinite(amt) ? amt : 0;
+  }
+  return out;
+}
+
+function formatDailyByCurr(byCurr) {
+  const keys = Object.keys(byCurr || {}).sort((a, b) => {
+    if (a === 'JPY') return -1;
+    if (b === 'JPY') return 1;
+    if (a === 'USD') return -1;
+    if (b === 'USD') return 1;
+    return String(a).localeCompare(b);
+  });
+  if (!keys.length) return '—';
+  return keys.map((c) => `${c} ${formatAmountWithSeparator(byCurr[c])}`).join(' | ');
+}
+
+function csvEscapeCell(v) {
+  const s = String(v ?? '');
+  if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+/** 일일 PG 집계: 화면·Excel export 공통 */
+function computeDailyPgSummaryDayRows(req) {
+  const env = getPgEnvFromReq(req);
+  const q = req.query || {};
+  const periodSort = (q.sort || 'thisMonth').toString();
+  const dateSort = (q.dateSort || 'desc').toString().toLowerCase() === 'asc' ? 'asc' : 'desc';
+  let dateFrom = (q.dateFrom || '').toString().trim();
+  let dateTo = (q.dateTo || '').toString().trim();
+  const store = loadPgTransactionStore();
+  const block = env === 'sandbox' ? store.sandbox : store.production;
+  const byDate = block.byDate || {};
+  const cfg = loadChillPayTransactionConfig();
+  const chillTz = (cfg && cfg.timezone) ? String(cfg.timezone).trim() : 'Asia/Bangkok';
+  const toYmdTz = (dObj) => {
+    try {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: chillTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(dObj);
+    } catch {
+      return '';
+    }
+  };
+  const parseYmd = (s) => {
+    const m = String(s || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const da = Number(m[3]);
+    if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(da)) return null;
+    return new Date(Date.UTC(y, mo - 1, da));
+  };
+  const addDaysYmd = (ymdStr, deltaDays) => {
+    const base = parseYmd(ymdStr);
+    if (!base) return '';
+    base.setUTCDate(base.getUTCDate() + (Number(deltaDays) || 0));
+    const y = base.getUTCFullYear();
+    const m = String(base.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(base.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+  const getTzDow = (dObj) => {
+    try {
+      const w = new Intl.DateTimeFormat('en-US', { timeZone: chillTz, weekday: 'short' }).format(dObj);
+      const map = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+      return map[w] != null ? map[w] : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const now = new Date();
+  const todayKey = toYmdTz(now);
+  const yesterdayKey = todayKey ? addDaysYmd(todayKey, -1) : '';
+  const dayOfWeek = getTzDow(now);
+  const monOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  const thisWeekMonKey = todayKey ? addDaysYmd(todayKey, monOffset) : '';
+  const thisWeekSunKey = thisWeekMonKey ? addDaysYmd(thisWeekMonKey, 6) : '';
+  const lastWeekSunKey = thisWeekMonKey ? addDaysYmd(thisWeekMonKey, -1) : '';
+  const lastWeekMonKey = lastWeekSunKey ? addDaysYmd(lastWeekSunKey, -6) : '';
+  if (!dateFrom && !dateTo && periodSort && periodSort !== 'all') {
+    if (periodSort === 'today') {
+      dateFrom = todayKey;
+      dateTo = todayKey;
+    } else if (periodSort === 'yesterday') {
+      dateFrom = yesterdayKey;
+      dateTo = yesterdayKey;
+    } else if (periodSort === 'thisWeek') {
+      dateFrom = thisWeekMonKey;
+      dateTo = thisWeekSunKey;
+    } else if (periodSort === 'lastWeek') {
+      dateFrom = lastWeekMonKey;
+      dateTo = lastWeekSunKey;
+    } else if (periodSort === 'thisMonth') {
+      const base = parseYmd(todayKey);
+      if (base) {
+        const y = base.getUTCFullYear();
+        const m = base.getUTCMonth();
+        const start = new Date(Date.UTC(y, m, 1));
+        const end = new Date(Date.UTC(y, m + 1, 0));
+        dateFrom = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}`;
+        dateTo = `${end.getUTCFullYear()}-${String(end.getUTCMonth() + 1).padStart(2, '0')}-${String(end.getUTCDate()).padStart(2, '0')}`;
+      }
+    } else if (periodSort === 'lastMonth') {
+      const base = parseYmd(todayKey);
+      if (base) {
+        let y = base.getUTCFullYear();
+        let m = base.getUTCMonth() - 1;
+        if (m < 0) {
+          m = 11;
+          y -= 1;
+        }
+        const start = new Date(Date.UTC(y, m, 1));
+        const end = new Date(Date.UTC(y, m + 1, 0));
+        dateFrom = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}`;
+        dateTo = `${end.getUTCFullYear()}-${String(end.getUTCMonth() + 1).padStart(2, '0')}-${String(end.getUTCDate()).padStart(2, '0')}`;
+      }
+    }
+  }
+  const allKeys = Object.keys(byDate).sort((a, b) => b.localeCompare(a));
+  let periodDateKeys = allKeys;
+  if (dateFrom || dateTo) {
+    periodDateKeys = allKeys.filter((k) => (!dateFrom || k >= dateFrom) && (!dateTo || k <= dateTo));
+  }
+  if (dateSort === 'asc') periodDateKeys = periodDateKeys.slice().reverse();
+  const toIcopay = (amountRaw, currencyRaw) =>
+    computeIcopayAmount(amountRaw, currencyRaw, 'chillpay', { pgTxChillpayUsdThbDisplay: true });
+  const dayRows = periodDateKeys.map((dateKey) => {
+    const rows = byDate[dateKey] || [];
+    const agg = aggregatePgDayRows(rows, toIcopay);
+    return { date: dateKey, ...agg };
+  });
+  return { dayRows, chillTz, env, periodSort, dateSort, dateFrom, dateTo };
+}
+
+app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const q = req.query || {};
+  const f = getFilteredNotiLogsForDailySummary(req);
+  const dayRows = aggregateNotiLogsByDay(f.list, f.chillTz, f.dateSort);
+  const baseUrl = '/admin/daily-noti-summary';
+  const txSource = parseTxSourceFromReq(req);
+  const env = getEnvFromReq(req);
+  const qs = (overrides) => {
+    const o = {
+      period: f.period,
+      dateFrom: f.dateFrom,
+      dateTo: f.dateTo,
+      statusFilter: f.statusFilter,
+      search: f.searchKw,
+      searchField: f.searchField,
+      notiKind: f.notiKindFilter,
+      dateSort: f.dateSort,
+      env,
+      source: txSource,
+      ...overrides,
+    };
+    const parts = [];
+    if (o.period && o.period !== 'thisMonth') parts.push('period=' + encodeURIComponent(o.period));
+    if (o.dateFrom) parts.push('dateFrom=' + encodeURIComponent(o.dateFrom));
+    if (o.dateTo) parts.push('dateTo=' + encodeURIComponent(o.dateTo));
+    if (o.statusFilter) parts.push('statusFilter=' + encodeURIComponent(o.statusFilter));
+    if (o.search) parts.push('search=' + encodeURIComponent(o.search));
+    if (o.searchField && o.searchField !== 'all') parts.push('searchField=' + encodeURIComponent(o.searchField));
+    if (o.notiKind && o.notiKind !== 'call') parts.push('notiKind=' + encodeURIComponent(o.notiKind));
+    if (o.dateSort && o.dateSort !== 'desc') parts.push('dateSort=' + encodeURIComponent(o.dateSort));
+    if (o.env === 'sandbox') parts.push('env=' + encodeURIComponent('sandbox'));
+    if (o.source === 'jpay') parts.push('source=' + encodeURIComponent('jpay'));
+    return parts.length ? '?' + parts.join('&') : '';
+  };
+  const exportUrl = baseUrl + '/export' + qs();
+  const excelBtn =
+    '<a href="' +
+    exportUrl +
+    '" style="margin-left:auto;padding:4px 10px;font-size:12px;background:#0d9488;color:#fff;border-radius:4px;text-decoration:none;white-space:nowrap;flex-shrink:0;">' +
+    esc(t(locale, 'tx_export_excel')) +
+    '</a>';
+  const periodOptions = [
+    { key: 'today', label: t(locale, 'tx_filter_today') },
+    { key: 'yesterday', label: t(locale, 'tx_filter_yesterday') },
+    { key: 'thisWeek', label: t(locale, 'tx_filter_this_week') },
+    { key: 'lastWeek', label: t(locale, 'tx_filter_last_week') },
+    { key: 'thisMonth', label: t(locale, 'tx_filter_this_month') },
+    { key: 'lastMonth', label: t(locale, 'tx_filter_last_month') },
+    { key: 'all', label: t(locale, 'tx_filter_all') },
+  ];
+  const periodLinks = periodOptions
+    .map((o) => {
+      const url = baseUrl + qs({ period: o.key, dateFrom: '', dateTo: '' });
+      const active = f.period === o.key;
+      return (
+        '<a href="' +
+        url +
+        '" style="padding:4px 8px;font-size:12px;border-radius:4px;text-decoration:none;margin-right:2px;background:' +
+        (active ? '#2563eb' : '#e5e7eb') +
+        ';color:' +
+        (active ? '#fff' : '#374151') +
+        ';">' +
+        esc(o.label) +
+        '</a>'
+      );
+    })
+    .join('');
+  const notiKindOptionsHtml = [
+    { key: 'call', label: t(locale, 'tx_noti_kind_call') },
+    { key: 'result', label: t(locale, 'tx_noti_kind_result') },
+    { key: 'both', label: t(locale, 'tx_noti_kind_both') },
+  ]
+    .map((opt) => '<option value="' + esc(opt.key) + '"' + (f.notiKindFilter === opt.key ? ' selected' : '') + '>' + esc(opt.label) + '</option>')
+    .join('');
+  const notiKindSelectHtml =
+    '<select style="padding:4px 8px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;" onchange="var p=new URLSearchParams(window.location.search||\'\');p.set(\'notiKind\',this.value);window.location.search=p.toString()">' +
+    notiKindOptionsHtml +
+    '</select>';
+  const dateForm =
+    '<form method="get" action="' +
+    baseUrl +
+    '" style="display:inline-flex;align-items:center;gap:6px;margin-left:8px;flex-wrap:wrap;">' +
+    '<input type="hidden" name="period" value="all" />' +
+    (txSource === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+    (env === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : '') +
+    '<input type="hidden" name="notiKind" value="' +
+    esc(f.notiKindFilter) +
+    '" />' +
+    '<input type="hidden" name="statusFilter" value="' +
+    esc(f.statusFilter) +
+    '" />' +
+    '<input type="hidden" name="search" value="' +
+    esc(f.searchKw) +
+    '" />' +
+    '<input type="hidden" name="searchField" value="' +
+    esc(f.searchField) +
+    '" />' +
+    '<input type="hidden" name="dateSort" value="' +
+    esc(f.dateSort) +
+    '" />' +
+    '<label style="font-size:12px;">' +
+    esc(t(locale, 'tx_filter_date') || '일자') +
+    '</label>' +
+    '<input type="date" name="dateFrom" value="' +
+    esc(f.dateFrom) +
+    '" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;" />' +
+    '<span>~</span>' +
+    '<input type="date" name="dateTo" value="' +
+    esc(f.dateTo) +
+    '" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;" />' +
+    '<button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;">' +
+    esc(t(locale, 'tx_apply')) +
+    '</button></form>';
+  const dateSortBtnStyle = (active) =>
+    'padding:4px 8px;font-size:12px;border-radius:4px;text-decoration:none;margin-right:2px;background:' +
+    (active ? '#2563eb' : '#e5e7eb') +
+    ';color:' +
+    (active ? '#fff' : '#374151') +
+    ';';
+  const dateSortLinks =
+    '<span style="color:#9ca3af;">|</span>' +
+    '<a href="' +
+    baseUrl +
+    qs({ dateSort: 'desc' }) +
+    '" style="' +
+    dateSortBtnStyle(f.dateSort === 'desc') +
+    '">' +
+    esc(t(locale, 'daily_date_sort_desc')) +
+    '</a>' +
+    '<a href="' +
+    baseUrl +
+    qs({ dateSort: 'asc' }) +
+    '" style="' +
+    dateSortBtnStyle(f.dateSort === 'asc') +
+    '">' +
+    esc(t(locale, 'daily_date_sort_asc')) +
+    '</a>';
+  const hubHtml = buildCrHubToolbarHtml(locale, esc, req.session.member, {
+    inline: true,
+    navEnv: env === 'sandbox' ? 'sandbox' : undefined,
+    env: {
+      show: true,
+      sandbox: env === 'sandbox',
+      liveUrl: baseUrl + qs({ env: 'live' }),
+      sandboxUrl: baseUrl + qs({ env: 'sandbox' }),
+      highlight: true,
+    },
+    pgSource: {
+      show: true,
+      active: txSource,
+      chillpayUrl: baseUrl + qs({ source: 'chillpay' }),
+      jpayUrl: baseUrl + qs({ source: 'jpay' }),
+    },
+  });
+  const thead =
+    '<thead><tr><th>' +
+    esc(t(locale, 'tx_filter_date') || '일자') +
+    '</th><th>' +
+    esc(t(locale, 'daily_th_row_count')) +
+    '</th><th>' +
+    esc(t(locale, 'tx_status_paid')) +
+    '</th><th>' +
+    esc(t(locale, 'tx_status_fail')) +
+    '</th><th>' +
+    esc(t(locale, 'tx_status_cancel')) +
+    '</th><th>' +
+    esc(t(locale, 'cr_type_void')) +
+    '</th><th>' +
+    esc(t(locale, 'cr_type_refund')) +
+    '</th><th>ICOPAY Σ</th></tr></thead>';
+  const tbodyRows = dayRows
+    .map(
+      (d) =>
+        '<tr class="daily-sum-row" data-date="' +
+        esc(d.date) +
+        '" style="cursor:pointer;" title="' +
+        esc(t(locale, 'daily_summary_dblclick_hint')) +
+        '"><td style="font-weight:600;">' +
+        esc(d.date) +
+        '</td><td>' +
+        esc(String(d.count)) +
+        '</td><td>' +
+        esc(String(d.success)) +
+        '</td><td>' +
+        esc(String(d.fail)) +
+        '</td><td>' +
+        esc(String(d.cancel)) +
+        '</td><td>' +
+        esc(String(d.void)) +
+        '</td><td>' +
+        esc(String(d.refund)) +
+        '</td><td style="text-align:left;font-size:11px;">' +
+        esc(formatDailyByCurr(d.byCurr)) +
+        '</td></tr>',
+    )
+    .join('');
+  const tbody =
+    '<tbody>' +
+    (tbodyRows ||
+      '<tr><td colspan="8" style="text-align:center;color:#777;">' +
+      esc(t(locale, 'cr_no_data')) +
+      '</td></tr>') +
+    '</tbody>';
+  const hint = '<p class="admin-page-desc">' + esc(t(locale, 'daily_noti_summary_desc')) + '</p>';
+  const detailPanel =
+    '<div id="dailyNotiDetailWrap" style="margin-top:20px;padding-top:16px;border-top:1px solid #e5e7eb;">' +
+    '<h2 style="font-size:15px;margin:0 0 8px 0;color:#1e293b;" id="dailyNotiDetailTitle">' +
+    esc(t(locale, 'daily_detail_title')) +
+    '</h2>' +
+    '<div id="dailyNotiDetailBody" class="admin-page-desc" style="color:#64748b;">' +
+    esc(t(locale, 'daily_detail_placeholder')) +
+    '</div></div>';
+  const script =
+    '<script>(function(){var apiBase="/admin/api/daily-noti-detail";function qs(){var p=new URLSearchParams(window.location.search||"");return p.toString();}function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}document.querySelectorAll("tr.daily-sum-row").forEach(function(tr){tr.addEventListener("dblclick",function(){var d=tr.getAttribute("data-date");if(!d)return;var el=document.getElementById("dailyNotiDetailBody");var title=document.getElementById("dailyNotiDetailTitle");if(title)title.textContent="' +
+    esc(t(locale, 'daily_detail_title')) +
+    ' ("+d+")";if(!el)return;el.innerHTML="' +
+    esc(t(locale, 'daily_detail_loading')) +
+    '";fetch(apiBase+"?date="+encodeURIComponent(d)+"&"+qs()).then(function(r){return r.json();}).then(function(j){if(!j||!j.success){el.innerHTML="' +
+    esc(t(locale, 'daily_detail_failed')) +
+    '";return;}var rows=j.rows||[];if(!rows.length){el.innerHTML="' +
+    esc(t(locale, 'cr_no_data')) +
+    '";return;}var th=["No","' +
+    esc(t(locale, 'cr_th_received_date')) +
+    '","' +
+    esc(t(locale, 'cr_th_received_time')) +
+    '","TxId","' +
+    esc(t(locale, 'cr_th_merchant')) +
+    '","Amt","ICOPAY","CCY","' +
+    esc(t(locale, 'tx_th_status')) +
+    '"];var html="<div style=\\"overflow-x:auto;\\"><table class=\\"tx-list-table\\"><thead><tr>"+th.map(function(h){return "<th>"+esc(h)+"</th>";}).join("")+"</tr></thead><tbody>";rows.forEach(function(r,i){html+="<tr><td>"+(i+1)+"</td><td>"+esc(r.d)+"</td><td style=\\"font-size:11px;\\">TH:"+esc(r.th)+"<br><span class=\\"time-jp\\">JP:"+esc(r.jp)+"</span></td><td style=\\"font-size:11px;\\">"+esc(r.txid)+"</td><td style=\\"font-size:11px;\\">"+esc(r.mid)+"</td><td>"+esc(r.amt)+"</td><td>"+esc(r.ico)+"</td><td>"+esc(r.ccy)+"</td><td>"+esc(r.st)+"</td></tr>";});html+="</tbody></table></div>";if(j.truncated)html="<p style=\\"color:#b45309;font-size:12px;margin-bottom:8px;\\">'+esc(t(locale, 'daily_detail_truncated')) +
+    ' ("+j.rowCount+")</p>"+html;el.innerHTML=html;}).catch(function(){el.innerHTML="' +
+    esc(t(locale, 'daily_detail_failed')) +
+    '";});});});})();</script>';
+  const tableContent =
+    hint +
+    '<div style="margin-bottom:12px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;width:100%;">' +
+    notiKindSelectHtml +
+    '<span style="color:#9ca3af;">|</span>' +
+    periodLinks +
+    dateSortLinks +
+    dateForm +
+    excelBtn +
+    '</div>' +
+    '<p class="admin-page-desc" style="font-size:12px;color:#64748b;margin:0 0 8px 0;">' +
+    esc(t(locale, 'daily_summary_default_month_desc_hint')) +
+    '</p>' +
+    '<p class="admin-page-desc" style="font-size:12px;">' +
+    esc(t(locale, 'daily_tz_note').replace(/\{\{tz\}\}/g, f.chillTz)) +
+    '</p>' +
+    '<table class="tx-list-table">' +
+    thead +
+    tbody +
+    '</table>' +
+    detailPanel +
+    script;
+  res.send(
+    renderCancelRefundPage(
+      locale,
+      adminUser,
+      appendCrListCountToTitle(t(locale, 'nav_daily_noti_summary'), dayRows.length),
+      tableContent,
+      '',
+      req.originalUrl,
+      req.session.member,
+      req,
+      undefined,
+      env,
+      { hubToolbarHtml: hubHtml },
+    ),
+  );
+});
+
+app.get('/admin/daily-noti-summary/export', requireAuth, requirePage('cr_transactions'), (req, res) => {
+  const locale = getLocale(req);
+  const f = getFilteredNotiLogsForDailySummary(req);
+  const dayRows = aggregateNotiLogsByDay(f.list, f.chillTz, f.dateSort);
+  const headerRow = [
+    t(locale, 'tx_filter_date') || 'Date',
+    t(locale, 'daily_th_row_count'),
+    t(locale, 'tx_status_paid'),
+    t(locale, 'tx_status_fail'),
+    t(locale, 'tx_status_cancel'),
+    t(locale, 'cr_type_void'),
+    t(locale, 'cr_type_refund'),
+    'ICOPAY Σ',
+  ];
+  const rows = dayRows.map((d) =>
+    [
+      d.date,
+      d.count,
+      d.success,
+      d.fail,
+      d.cancel,
+      d.void,
+      d.refund,
+      formatDailyByCurr(d.byCurr),
+    ].map(csvEscapeCell).join(','),
+  );
+  const csv = '\uFEFF' + headerRow.map(csvEscapeCell).join(',') + '\n' + rows.join('\n');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader(
+    'Content-Disposition',
+    'attachment; filename="daily-noti-summary-' + new Date().toISOString().slice(0, 10) + '.csv"',
+  );
+  res.send(csv);
+});
+
+app.get('/admin/api/daily-noti-detail', requireAuth, requirePage('cr_transactions'), (req, res) => {
+  const q = req.query || {};
+  const date = String(q.date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ success: false, error: 'bad_date' });
+  }
+  const f = getFilteredNotiLogsForDailySummary(req);
+  const chillTz = f.chillTz;
+  const voidRefundByTxId = buildVoidRefundNotiMap(30);
+  const voidRefundByOrderNo = buildVoidRefundNotiOrderNoMap(30);
+  const rows = [];
+  let n = 0;
+  for (const log of f.list) {
+    const ymd = dailyNotiIsoToYmd(log.receivedAtIso || log.receivedAt, chillTz);
+    if (ymd !== date) continue;
+    n++;
+    if (rows.length >= DAILY_DETAIL_ROW_CAP) break;
+    const body = parseNotiBody(log);
+    const pgK = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+    const rawAmt = getNotiBodyAmountRawForIcopay(body, pgK);
+    const ico =
+      rawAmt !== '' && rawAmt != null ? formatAmountWithSeparator(computeIcopayAmount(rawAmt, body.Currency ?? body.currency, pgK)) : '-';
+    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const txid = String(body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '').trim();
+    const kind = classifyNotiLogForDailyKind(log, voidRefundByTxId, voidRefundByOrderNo);
+    rows.push({
+      d: dt.date,
+      th: dt.timeTh,
+      jp: dt.timeJp,
+      txid,
+      mid: log.merchantId || '',
+      amt: rawAmt !== '' && rawAmt != null ? String(body.Amount ?? body.amount ?? rawAmt) : '-',
+      ico,
+      ccy: formatCurrencyForDisplay(body.Currency || body.currency) || '-',
+      st: kind,
+    });
+  }
+  res.json({ success: true, date, rows, rowCount: n, truncated: n > rows.length });
+});
+
+app.get('/admin/daily-pg-summary', requireAuth, requirePage('cr_pg_transactions'), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const { dayRows, chillTz, env, periodSort, dateSort, dateFrom, dateTo } = computeDailyPgSummaryDayRows(req);
+  const baseUrl = '/admin/daily-pg-summary';
+  const qs = (overrides) => {
+    const o = { env, sort: periodSort, dateFrom, dateTo, dateSort, ...overrides };
+    const parts = [];
+    if (o.env === 'sandbox') parts.push('env=' + encodeURIComponent('sandbox'));
+    if (o.sort && o.sort !== 'thisMonth') parts.push('sort=' + encodeURIComponent(o.sort));
+    if (o.dateFrom) parts.push('dateFrom=' + encodeURIComponent(o.dateFrom));
+    if (o.dateTo) parts.push('dateTo=' + encodeURIComponent(o.dateTo));
+    if (o.dateSort && o.dateSort !== 'desc') parts.push('dateSort=' + encodeURIComponent(o.dateSort));
+    return parts.length ? '?' + parts.join('&') : '';
+  };
+  const exportUrl = baseUrl + '/export' + qs();
+  const excelBtnPg =
+    '<a href="' +
+    exportUrl +
+    '" style="margin-left:auto;padding:4px 10px;font-size:12px;background:#0d9488;color:#fff;border-radius:4px;text-decoration:none;white-space:nowrap;flex-shrink:0;">' +
+    esc(t(locale, 'tx_export_excel')) +
+    '</a>';
+  const periodOptions = [
+    { key: 'today', label: t(locale, 'tx_filter_today') },
+    { key: 'yesterday', label: t(locale, 'tx_filter_yesterday') },
+    { key: 'thisWeek', label: t(locale, 'tx_filter_this_week') },
+    { key: 'lastWeek', label: t(locale, 'tx_filter_last_week') },
+    { key: 'thisMonth', label: t(locale, 'tx_filter_this_month') },
+    { key: 'lastMonth', label: t(locale, 'tx_filter_last_month') },
+    { key: 'all', label: t(locale, 'tx_filter_all') },
+  ];
+  const periodLinks = periodOptions
+    .map((o) => {
+      const url = baseUrl + qs({ sort: o.key, dateFrom: '', dateTo: '' });
+      const active = periodSort === o.key;
+      return (
+        '<a href="' +
+        url +
+        '" style="padding:4px 8px;font-size:12px;border-radius:4px;text-decoration:none;margin-right:2px;background:' +
+        (active ? '#2563eb' : '#e5e7eb') +
+        ';color:' +
+        (active ? '#fff' : '#374151') +
+        ';">' +
+        esc(o.label) +
+        '</a>'
+      );
+    })
+    .join('');
+  const dateForm =
+    '<form method="get" action="' +
+    baseUrl +
+    '" style="display:inline-flex;align-items:center;gap:6px;margin-left:8px;flex-wrap:wrap;">' +
+    '<input type="hidden" name="sort" value="all" />' +
+    (env === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : '') +
+    '<input type="hidden" name="dateSort" value="' +
+    esc(dateSort) +
+    '" />' +
+    '<input type="date" name="dateFrom" value="' +
+    esc(dateFrom) +
+    '" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;" />' +
+    '<span>~</span>' +
+    '<input type="date" name="dateTo" value="' +
+    esc(dateTo) +
+    '" style="padding:4px 6px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;" />' +
+    '<button type="submit" style="padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;">' +
+    esc(t(locale, 'tx_apply')) +
+    '</button></form>';
+  const dateSortBtnStylePg = (active) =>
+    'padding:4px 8px;font-size:12px;border-radius:4px;text-decoration:none;margin-right:2px;background:' +
+    (active ? '#2563eb' : '#e5e7eb') +
+    ';color:' +
+    (active ? '#fff' : '#374151') +
+    ';';
+  const dateSortLinksPg =
+    '<span style="color:#9ca3af;">|</span>' +
+    '<a href="' +
+    baseUrl +
+    qs({ dateSort: 'desc' }) +
+    '" style="' +
+    dateSortBtnStylePg(dateSort === 'desc') +
+    '">' +
+    esc(t(locale, 'daily_date_sort_desc')) +
+    '</a>' +
+    '<a href="' +
+    baseUrl +
+    qs({ dateSort: 'asc' }) +
+    '" style="' +
+    dateSortBtnStylePg(dateSort === 'asc') +
+    '">' +
+    esc(t(locale, 'daily_date_sort_asc')) +
+    '</a>';
+  const hubHtml = buildCrHubToolbarHtml(locale, esc, req.session.member, {
+    inline: true,
+    navEnv: env === 'sandbox' ? 'sandbox' : undefined,
+    env: {
+      show: true,
+      sandbox: env === 'sandbox',
+      liveUrl: baseUrl + qs({ env: 'live' }),
+      sandboxUrl: baseUrl + qs({ env: 'sandbox' }),
+      highlight: true,
+    },
+    pgSource: { show: true, active: 'chillpay', chillpayUrl: '/admin/transactions', jpayUrl: '/admin/transactions?source=jpay', hideJpay: true },
+  });
+  const thead =
+    '<thead><tr><th>' +
+    esc(t(locale, 'pg_tx_header_date') || 'Date') +
+    '</th><th>' +
+    esc(t(locale, 'daily_th_row_count')) +
+    '</th><th>' +
+    esc(t(locale, 'pg_tx_filter_status_success')) +
+    '</th><th>' +
+    esc(t(locale, 'pg_tx_filter_status_fail')) +
+    '</th><th>' +
+    esc(t(locale, 'pg_tx_filter_status_cancel')) +
+    '</th><th>' +
+    esc(t(locale, 'pg_tx_filter_status_voided')) +
+    '</th><th>' +
+    esc(t(locale, 'pg_tx_filter_status_refunded')) +
+    '</th><th>ICOPAY Σ</th></tr></thead>';
+  const tbodyRows = dayRows
+    .map(
+      (d) =>
+        '<tr class="daily-pg-sum-row" data-date="' +
+        esc(d.date) +
+        '" style="cursor:pointer;" title="' +
+        esc(t(locale, 'daily_summary_dblclick_hint')) +
+        '"><td style="font-weight:600;">' +
+        esc(d.date) +
+        '</td><td>' +
+        esc(String(d.count)) +
+        '</td><td>' +
+        esc(String(d.success)) +
+        '</td><td>' +
+        esc(String(d.fail)) +
+        '</td><td>' +
+        esc(String(d.cancel)) +
+        '</td><td>' +
+        esc(String(d.void)) +
+        '</td><td>' +
+        esc(String(d.refund)) +
+        '</td><td style="text-align:left;font-size:11px;">' +
+        esc(formatDailyByCurr(d.byCurr)) +
+        '</td></tr>',
+    )
+    .join('');
+  const tbody =
+    '<tbody>' +
+    (tbodyRows ||
+      '<tr><td colspan="8" style="text-align:center;color:#777;">' +
+      esc(t(locale, 'cr_no_data')) +
+      '</td></tr>') +
+    '</tbody>';
+  const hint = '<p class="admin-page-desc">' + esc(t(locale, 'daily_pg_summary_desc')) + '</p>';
+  const detailPanel =
+    '<div id="dailyPgDetailWrap" style="margin-top:20px;padding-top:16px;border-top:1px solid #e5e7eb;">' +
+    '<h2 style="font-size:15px;margin:0 0 8px 0;color:#1e293b;" id="dailyPgDetailTitle">' +
+    esc(t(locale, 'daily_detail_title')) +
+    '</h2>' +
+    '<div id="dailyPgDetailBody" class="admin-page-desc" style="color:#64748b;">' +
+    esc(t(locale, 'daily_detail_placeholder')) +
+    '</div></div>';
+  const script =
+    '<script>(function(){var apiBase="/admin/api/daily-pg-detail";function qs(){var p=new URLSearchParams(window.location.search||"");return p.toString();}function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}document.querySelectorAll("tr.daily-pg-sum-row").forEach(function(tr){tr.addEventListener("dblclick",function(){var d=tr.getAttribute("data-date");if(!d)return;var el=document.getElementById("dailyPgDetailBody");var title=document.getElementById("dailyPgDetailTitle");if(title)title.textContent="' +
+    esc(t(locale, 'daily_detail_title')) +
+    ' ("+d+")";if(!el)return;el.innerHTML="' +
+    esc(t(locale, 'daily_detail_loading')) +
+    '";fetch(apiBase+"?date="+encodeURIComponent(d)+"&"+qs()).then(function(r){return r.json();}).then(function(j){if(!j||!j.success){el.innerHTML="' +
+    esc(t(locale, 'daily_detail_failed')) +
+    '";return;}var rows=j.rows||[];if(!rows.length){el.innerHTML="' +
+    esc(t(locale, 'cr_no_data')) +
+    '";return;}var th=["No","' +
+    esc(t(locale, 'pg_tx_header_date')) +
+    '","' +
+    esc(t(locale, 'pg_tx_header_time')) +
+    '","TxId","' +
+    esc(t(locale, 'pg_tx_search_merchant')) +
+    '","OrderNo","Amt","ICOPAY","CCY","Status"];var html="<div style=\\"overflow-x:auto;\\"><table class=\\"tx-list-table\\"><thead><tr>"+th.map(function(h){return "<th>"+esc(h)+"</th>";}).join("")+"</tr></thead><tbody>";rows.forEach(function(r,i){html+="<tr><td>"+(i+1)+"</td><td>"+esc(r.d)+"</td><td style=\\"font-size:11px;\\">"+esc(r.t)+"</td><td style=\\"font-size:11px;\\">"+esc(r.txid)+"</td><td style=\\"font-size:11px;\\">"+esc(r.merch)+"</td><td style=\\"font-size:11px;\\">"+esc(r.ord)+"</td><td>"+esc(r.amt)+"</td><td>"+esc(r.ico)+"</td><td>"+esc(r.ccy)+"</td><td>"+esc(r.st)+"</td></tr>";});html+="</tbody></table></div>";if(j.truncated)html="<p style=\\"color:#b45309;font-size:12px;margin-bottom:8px;\\">'+esc(t(locale, 'daily_detail_truncated')) +
+    ' ("+j.rowCount+")</p>"+html;el.innerHTML=html;}).catch(function(){el.innerHTML="' +
+    esc(t(locale, 'daily_detail_failed')) +
+    '";});});});})();</script>';
+  const tableContent =
+    hint +
+    '<div style="margin-bottom:12px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;width:100%;">' +
+    periodLinks +
+    dateSortLinksPg +
+    dateForm +
+    excelBtnPg +
+    '</div>' +
+    '<p class="admin-page-desc" style="font-size:12px;color:#64748b;margin:0 0 8px 0;">' +
+    esc(t(locale, 'daily_summary_default_month_desc_hint')) +
+    '</p>' +
+    '<p class="admin-page-desc" style="font-size:12px;">' +
+    esc(t(locale, 'daily_pg_tz_note').replace(/\{\{tz\}\}/g, chillTz)) +
+    '</p>' +
+    '<table class="tx-list-table">' +
+    thead +
+    tbody +
+    '</table>' +
+    detailPanel +
+    script;
+  res.send(
+    renderCancelRefundPage(
+      locale,
+      adminUser,
+      appendCrListCountToTitle(t(locale, 'nav_daily_pg_summary'), dayRows.length),
+      tableContent,
+      '',
+      req.originalUrl,
+      req.session.member,
+      req,
+      undefined,
+      env,
+      { hubToolbarHtml: hubHtml },
+    ),
+  );
+});
+
+app.get('/admin/daily-pg-summary/export', requireAuth, requirePage('cr_pg_transactions'), (req, res) => {
+  const locale = getLocale(req);
+  const { dayRows } = computeDailyPgSummaryDayRows(req);
+  const headerRow = [
+    t(locale, 'pg_tx_header_date') || 'Date',
+    t(locale, 'daily_th_row_count'),
+    t(locale, 'pg_tx_filter_status_success'),
+    t(locale, 'pg_tx_filter_status_fail'),
+    t(locale, 'pg_tx_filter_status_cancel'),
+    t(locale, 'pg_tx_filter_status_voided'),
+    t(locale, 'pg_tx_filter_status_refunded'),
+    'ICOPAY Σ',
+  ];
+  const rows = dayRows.map((d) =>
+    [
+      d.date,
+      d.count,
+      d.success,
+      d.fail,
+      d.cancel,
+      d.void,
+      d.refund,
+      formatDailyByCurr(d.byCurr),
+    ].map(csvEscapeCell).join(','),
+  );
+  const csv = '\uFEFF' + headerRow.map(csvEscapeCell).join(',') + '\n' + rows.join('\n');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader(
+    'Content-Disposition',
+    'attachment; filename="daily-pg-summary-' + new Date().toISOString().slice(0, 10) + '.csv"',
+  );
+  res.send(csv);
+});
+
+app.get('/admin/api/daily-pg-detail', requireAuth, requirePage('cr_pg_transactions'), (req, res) => {
+  const q = req.query || {};
+  const date = String(q.date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ success: false, error: 'bad_date' });
+  }
+  const env = getPgEnvFromReq(req);
+  const store = loadPgTransactionStore();
+  const block = env === 'sandbox' ? store.sandbox : store.production;
+  const rowsRaw = (block.byDate && block.byDate[date]) || [];
+  const toIcopay = (amountRaw, currencyRaw) =>
+    computeIcopayAmount(amountRaw, currencyRaw, 'chillpay', { pgTxChillpayUsdThbDisplay: true });
+  const rows = [];
+  let n = 0;
+  for (const row of rowsRaw) {
+    n++;
+    if (rows.length >= DAILY_DETAIL_ROW_CAP) break;
+    const txIso = (() => {
+      const str = row && row.transactionDate;
+      if (!str) return '';
+      const m = String(str).trim().match(/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}):(\d{2}))?/);
+      if (!m) return '';
+      const d = parseInt(m[1], 10);
+      const mo = parseInt(m[2], 10);
+      const y = parseInt(m[3], 10);
+      const hh = parseInt(m[4] || '0', 10);
+      const mm = parseInt(m[5] || '0', 10);
+      const ss = parseInt(m[6] || '0', 10);
+      const utcMs = Date.UTC(y, mo - 1, d, hh - 7, mm, ss, 0);
+      const dt = new Date(utcMs);
+      return Number.isNaN(dt.getTime()) ? '' : dt.toISOString();
+    })();
+    const dtFmt = formatDateAndTimeTHJP(txIso);
+    let merch = row.merchant || '-';
+    const rn = row && row.routeNo != null ? String(row.routeNo).trim() : '';
+    if (rn) {
+      for (const m of MERCHANTS.values()) {
+        if (m && String(m.routeNo || '').trim() === rn) {
+          merch = m.name || m.label || m.merchantId || merch;
+          break;
+        }
+      }
+    }
+    rows.push({
+      d: dtFmt.date,
+      t: 'TH:' + dtFmt.timeTh + ' / JP:' + dtFmt.timeJp,
+      txid: String(row.transactionId || '').trim(),
+      merch,
+      ord: String(row.orderNo || '').trim(),
+      amt: row.amount != null ? String(row.amount) : '-',
+      ico: formatAmountWithSeparator(toIcopay(row.amount, row.currency)),
+      ccy: String(row.currency || '').trim() || '-',
+      st: String(row.status || '').trim() || '-',
+    });
+  }
+  res.json({ success: true, date, rows, rowCount: n, truncated: n > rows.length });
 });
 
 // ChillPay API 거래 내역: 프로덕션/샌드박스 각각 Search Payment Transaction으로 조회
@@ -21103,16 +22280,21 @@ function getPostAuthHomeRedirectUrl(req, sessionMember, permissions) {
       return PAGE_KEY_TO_DEFAULT_URL.advanced_system_monitor || '/admin/system-monitor';
     }
     if (perms.includes('cr_transactions') || perms.includes('cancel_refund')) {
-      return PAGE_KEY_TO_DEFAULT_URL.cr_transactions || '/admin/transactions';
+      const otl = otlIcopayNotiDefaultTransactionsUrl();
+      return otl || (PAGE_KEY_TO_DEFAULT_URL.cr_transactions || '/admin/transactions');
     }
     return getFirstAllowedRedirectUrl(perms);
   }
 
   if (role === ROLES.ADMIN) {
+    const otl = otlIcopayNotiDefaultTransactionsUrl();
+    if (otl) return otl;
     return '/admin/pg-transactions?sort=today';
   }
 
   if (role === ROLES.OPERATOR) {
+    const otl = otlIcopayNotiDefaultTransactionsUrl();
+    if (otl && (perms.includes('cr_transactions') || perms.includes('cancel_refund'))) return otl;
     if (perms.includes('cr_pg_transactions') || perms.includes('cancel_refund')) {
       return '/admin/pg-transactions?sort=today';
     }
