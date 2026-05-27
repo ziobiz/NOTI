@@ -4679,6 +4679,27 @@ function parseVoidRefundScheduleDateRaw(raw) {
   } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) {
     const [dd, mm, yyyy] = str.split('/').map(Number);
     date = new Date(Date.UTC(yyyy, mm - 1, dd, 12, 0, 0, 0));
+  } else if (/^\d{14}$/.test(str)) {
+    // ChillPay 노티 PaymentDate: YYYYMMDDHHmmss (숫자만 14자리 — epoch ms 아님)
+    const y = Number(str.slice(0, 4));
+    const mo = Number(str.slice(4, 6));
+    const da = Number(str.slice(6, 8));
+    const h = Number(str.slice(8, 10));
+    const min = Number(str.slice(10, 12));
+    const sec = Number(str.slice(12, 14));
+    date = new Date(y, mo - 1, da, h, min, sec, 0);
+  } else if (/^\d{12}$/.test(str)) {
+    const y = Number(str.slice(0, 4));
+    const mo = Number(str.slice(4, 6));
+    const da = Number(str.slice(6, 8));
+    const h = Number(str.slice(8, 10));
+    const min = Number(str.slice(10, 12));
+    date = new Date(y, mo - 1, da, h, min, 0, 0);
+  } else if (/^\d{8}$/.test(str)) {
+    const y = Number(str.slice(0, 4));
+    const mo = Number(str.slice(4, 6));
+    const da = Number(str.slice(6, 8));
+    date = new Date(y, mo - 1, da, 12, 0, 0, 0);
   } else if (/^\d+$/.test(str)) {
     const n = parseInt(str, 10);
     date = n > 1e12 ? new Date(n) : new Date(n * 1000);
@@ -4726,6 +4747,38 @@ function logMatchesCrVoidRefundDateRange(log, dateFrom, dateTo, tzFallback, isoT
   const inR = (ymd) => !!(ymd && (!dateFrom || ymd >= dateFrom) && (!dateTo || ymd <= dateTo));
   if (!payYmd && !recYmd) return false;
   return inR(payYmd) || inR(recYmd);
+}
+
+/** 노티거래내역·일일노티: ChillPay 타임존 기준 거래일(결제일)로 기간 필터. 결제일·수신일 중 하나라도 구간에 있으면 포함 */
+function logMatchesNotiTransactionDateRange(log, dateFrom, dateTo, tzFallback) {
+  if (!dateFrom && !dateTo) return true;
+  const payYmd = getCrVoidRefundPaymentCalendarYmd(log, tzFallback);
+  const inR = (ymd) => !!(ymd && (!dateFrom || ymd >= dateFrom) && (!dateTo || ymd <= dateTo));
+  if (inR(payYmd)) return true;
+  const recIso = log.receivedAtIso || log.receivedAt;
+  if (!recIso) return false;
+  try {
+    const recYmd = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tzFallback || 'Asia/Bangkok',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(recIso));
+    return inR(recYmd);
+  } catch {
+    return false;
+  }
+}
+
+/** 목록·CSV용: 본문 결제일 시각(TH/JP), 없으면 수신 시각 */
+function formatNotiLogPaymentDateTimeTHJP(log, tzFallback) {
+  const body = parseNotiBody(log);
+  const payRaw = notifBodyPaymentDateForWindow(body);
+  const pd = payRaw ? parseVoidRefundScheduleDateRaw(payRaw) : null;
+  if (pd && !Number.isNaN(pd.getTime())) {
+    return formatDateAndTimeTHJP(pd.toISOString());
+  }
+  return formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
 }
 
 function voidRefundNotiEntryMatchesEnv(entry, env) {
@@ -11662,53 +11715,15 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     }
   }
   if (dateFrom || dateTo) {
-    // receivedAtIso를 ChillPay timezone(설정값) 날짜(YYYY-MM-DD)로 변환해 문자열로 비교
-    list = list.filter((log) => {
-      const iso = log.receivedAtIso || log.receivedAt;
-      const ymd = isoToYmd(iso);
-      if (!ymd) return false;
-      if (dateFrom && ymd < dateFrom) return false;
-      if (dateTo && ymd > dateTo) return false;
-      return true;
-    });
+    list = list.filter((log) => logMatchesNotiTransactionDateRange(log, dateFrom, dateTo, chillTz));
   }
   const voidRefundByTxIdForFilter = buildVoidRefundNotiMap(30);
   const voidRefundByOrderNoForFilter = buildVoidRefundNotiOrderNoMap(30);
-  function getNotiFilterKind(log) {
-    const body = parseNotiBody(log);
-    if (isJpaySaleAsyncNotifyBody(body)) {
-      const rc = String(body.returncode).trim();
-      if (rc !== '00' && rc !== '0') return 'fail';
-    }
-    const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
-    const isSuccess = isSuccessPaymentBody(body);
-    const isCancel = isDefinitelyCancelPaymentStatus(ps);
-    const txId = body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '';
-    const orderNo = body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID ?? '';
-    const entry = (txId && voidRefundByTxIdForFilter[txId]) || (orderNo && voidRefundByOrderNoForFilter[String(orderNo).trim()]) || null;
-    const hasVoid = !!((txId && hasVoidNotiSent(txId)) || (entry && (entry.type === 'void' || entry.type === 'void_manual_email')));
-    const hasRefund = !!((txId && hasRefundNotiSent(txId)) || (entry && entry.type === 'refund'));
-    if (!isSuccess && !isCancel) return 'fail';
-    if (isCancel) return 'cancel';
-    if (isSuccess && !hasVoid && !hasRefund) return 'paid';
-    if (hasVoid) {
-      if (entry && entry.type === 'void_manual_email') return 'force_void';
-      const baseDate = body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
-      const window = entry && entry.sentAtIso ? getVoidRefundWindow(baseDate, entry.sentAtIso) : getVoidRefundWindow(baseDate);
-      if (window === 'void_auto') return 'void_auto';
-      if (window === 'void_manual') return 'void_manual';
-      return 'void_manual';
-    }
-    if (hasRefund) {
-      if (entry && entry.mode === 'manual') return 'refund_manual';
-      return 'refund_auto';
-    }
-    return 'paid';
-  }
   if (statusFilter) {
     list = list.filter((log) => {
-      const kind = getNotiFilterKind(log);
+      const kind = getNotiTransactionFilterKind(log, voidRefundByTxIdForFilter, voidRefundByOrderNoForFilter);
       if (statusFilter === 'fail') return kind === 'fail';
+      if (statusFilter === 'other') return kind === 'other';
       if (statusFilter === 'paid') return kind === 'paid';
       if (statusFilter === 'cancel') return kind === 'cancel';
       if (statusFilter === 'void_all') return kind === 'void_auto' || kind === 'void_manual' || kind === 'force_void';
@@ -11807,7 +11822,14 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   }
   // 요약: 성공/실패/무효/환불/기타 건수·금액 (색상 블록용) — slice 전 전체 목록 기준
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const notiSummary = { success: { count: 0, byCurr: {} }, fail: { count: 0, byCurr: {} }, cancel: { count: 0, byCurr: {} }, void: { count: 0, byCurr: {} }, refund: { count: 0, byCurr: {} }, other: { count: 0, byCurr: {} } };
+  const notiSummary = {
+    success: { count: 0, byCurr: {} },
+    fail: { count: 0, byCurr: {} },
+    cancel: { count: 0, byCurr: {} },
+    void: { count: 0, byCurr: {} },
+    refund: { count: 0, byCurr: {} },
+    other: { count: 0, byCurr: {} },
+  };
   const getNotiStatusKind = (log) => {
     const body = parseNotiBody(log);
     if (isJpaySaleAsyncNotifyBody(body)) {
@@ -11825,6 +11847,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       return 'success';
     }
     if (isDefinitelyCancelPaymentStatus(ps)) return 'cancel';
+    if (isDefinitelyRequestPaymentStatus(ps)) return 'other';
     return 'fail';
   };
   for (const log of list) {
@@ -11900,8 +11923,8 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   };
   const thLabels = [
     t(locale, 'tx_th_no'),
-    t(locale, 'cr_th_received_date'),
-    t(locale, 'cr_th_received_time'),
+    t(locale, 'cr_th_trade_date'),
+    t(locale, 'cr_th_trade_time'),
     'TransactionId',
     t(locale, 'tx_th_acquirer'),
     t(locale, 'cr_th_merchant'),
@@ -12018,12 +12041,13 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     const msgKey = key ? 'tx_filter_noti_' + key : 'tx_filter_status_all';
     const out = key ? t(locale, msgKey) : t(locale, 'tx_filter_status_all');
     if (out && out !== msgKey) return out;
-    const fallback = { '': t(locale, 'tx_filter_status_all'), fail: t(locale, 'tx_filter_noti_fail'), paid: t(locale, 'tx_filter_noti_paid'), cancel: t(locale, 'tx_filter_noti_cancel'), void_all: t(locale, 'tx_filter_noti_void_all'), void_auto: t(locale, 'tx_filter_noti_void_auto'), void_manual: t(locale, 'tx_filter_noti_void_manual'), force_void: t(locale, 'tx_filter_noti_force_void'), refund_all: t(locale, 'tx_filter_noti_refund_all'), refund_auto: t(locale, 'tx_filter_noti_refund_auto'), refund_manual: t(locale, 'tx_filter_noti_refund_manual'), force_refund: t(locale, 'tx_filter_noti_force_refund'), exclude_paid: t(locale, 'tx_filter_noti_exclude_paid') };
+    const fallback = { '': t(locale, 'tx_filter_status_all'), fail: t(locale, 'tx_filter_noti_fail'), other: t(locale, 'tx_filter_status_other'), paid: t(locale, 'tx_filter_noti_paid'), cancel: t(locale, 'tx_filter_noti_cancel'), void_all: t(locale, 'tx_filter_noti_void_all'), void_auto: t(locale, 'tx_filter_noti_void_auto'), void_manual: t(locale, 'tx_filter_noti_void_manual'), force_void: t(locale, 'tx_filter_noti_force_void'), refund_all: t(locale, 'tx_filter_noti_refund_all'), refund_auto: t(locale, 'tx_filter_noti_refund_auto'), refund_manual: t(locale, 'tx_filter_noti_refund_manual'), force_refund: t(locale, 'tx_filter_noti_force_refund'), exclude_paid: t(locale, 'tx_filter_noti_exclude_paid') };
     return fallback[key] != null ? fallback[key] : (key ? t(locale, 'tx_filter_noti_' + key) : t(locale, 'tx_filter_status_all')) || key || t(locale, 'tx_filter_status_all');
   };
   const statusFilterOptions = [
     { key: '', label: notiFilterLabel('') },
     { key: 'fail', label: notiFilterLabel('fail') },
+    { key: 'other', label: notiFilterLabel('other') },
     { key: 'paid', label: notiFilterLabel('paid') },
     { key: 'cancel', label: notiFilterLabel('cancel') },
     { key: 'void_all', label: notiFilterLabel('void_all') },
@@ -12176,6 +12200,9 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     } else if (isSuccess) {
       statusKey = 'tx_status_paid';
       statusClass = 'tx-status-success';
+    } else if (isDefinitelyRequestPaymentStatus(ps)) {
+      statusKey = 'tx_filter_status_other';
+      statusClass = 'tx-status-other';
     } else if (isError) {
       statusKey = 'tx_status_error';
       statusClass = 'tx-status-fail';
@@ -12194,7 +12221,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     else if (hasRefundLike) notiLabel = t(locale, 'cr_type_refund');
     const isVoidedOrRefunded = isSuccess && (hasVoidLike || hasRefundLike);
     const badgeClass = statusClass.replace('tx-status-', 'tx-badge-');
-    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const dt = formatNotiLogPaymentDateTimeTHJP(log, chillTz);
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
     const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
     const cells = [];
@@ -12261,10 +12288,12 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   });
   const txResizeScript = '<script>(function(){var table=document.querySelector(".tx-list-table");if(!table)return;var cols=table.querySelectorAll("col");var headers=table.querySelectorAll("thead th");var resizer=null,startX=0,startW=0,colIdx=0;function onMove(e){if(resizer==null)return;var dx=e.clientX-startX;var newW=Math.max(40,startW+dx);cols[colIdx].style.width=newW+"px";}function onUp(){resizer=null;document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);document.body.style.cursor="";document.body.style.userSelect="";}table.querySelectorAll(".tx-col-resizer").forEach(function(el){el.addEventListener("mousedown",function(e){e.preventDefault();colIdx=parseInt(el.getAttribute("data-col"),10);startX=e.clientX;startW=headers[colIdx]?headers[colIdx].offsetWidth:80;resizer=el;document.body.style.cursor="col-resize";document.body.style.userSelect="none";document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);});});})();</script>';
   const txHint = '<p class="page-desc">' + t(locale, 'noti_hint_log_same') + '</p>';
+  const txDateHint = '<p class="admin-page-desc" style="margin-bottom:10px;color:#64748b;font-size:12px;">' + t(locale, 'tx_noti_date_filter_note') + '</p>';
   const emptyStateHtml = totalCount === 0 ? '<div class="admin-page-desc" style="margin-bottom:14px;">' + t(locale, 'noti_alert_no_tx') + '</div>' : '';
   const tableContent =
     emptyStateHtml +
     txHint +
+    txDateHint +
     legendHtml +
     toolbarHtml +
     '<p class="admin-page-desc">' +
@@ -12407,6 +12436,7 @@ function classifyNotiLogForDailyKind(log, voidRefundByTxId, voidRefundByOrderNo)
     return 'success';
   }
   if (isDefinitelyCancelPaymentStatus(ps)) return 'cancel';
+  if (isDefinitelyRequestPaymentStatus(ps)) return 'other';
   return 'fail';
 }
 
@@ -12430,52 +12460,15 @@ function getFilteredNotiLogsForDailySummary(req) {
     }
   }
   if (dateFrom || dateTo) {
-    list = list.filter((log) => {
-      const ymd = dailyNotiIsoToYmd(log.receivedAtIso || log.receivedAt, chillTz);
-      if (!ymd) return false;
-      if (dateFrom && ymd < dateFrom) return false;
-      if (dateTo && ymd > dateTo) return false;
-      return true;
-    });
+    list = list.filter((log) => logMatchesNotiTransactionDateRange(log, dateFrom, dateTo, chillTz));
   }
   const voidRefundByTxIdForFilter = buildVoidRefundNotiMap(30);
   const voidRefundByOrderNoForFilter = buildVoidRefundNotiOrderNoMap(30);
-  function getNotiFilterKind(log) {
-    const body = parseNotiBody(log);
-    if (isJpaySaleAsyncNotifyBody(body)) {
-      const rc = String(body.returncode).trim();
-      if (rc !== '00' && rc !== '0') return 'fail';
-    }
-    const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
-    const isSuccess = isSuccessPaymentBody(body);
-    const isCancel = isDefinitelyCancelPaymentStatus(ps);
-    const txId = body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '';
-    const orderNo = body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID ?? '';
-    const entry =
-      (txId && voidRefundByTxIdForFilter[txId]) || (orderNo && voidRefundByOrderNoForFilter[String(orderNo).trim()]) || null;
-    const hasVoid = !!((txId && hasVoidNotiSent(txId)) || (entry && (entry.type === 'void' || entry.type === 'void_manual_email')));
-    const hasRefund = !!((txId && hasRefundNotiSent(txId)) || (entry && entry.type === 'refund'));
-    if (!isSuccess && !isCancel) return 'fail';
-    if (isCancel) return 'cancel';
-    if (isSuccess && !hasVoid && !hasRefund) return 'paid';
-    if (hasVoid) {
-      if (entry && entry.type === 'void_manual_email') return 'force_void';
-      const baseDate = body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
-      const window = entry && entry.sentAtIso ? getVoidRefundWindow(baseDate, entry.sentAtIso) : getVoidRefundWindow(baseDate);
-      if (window === 'void_auto') return 'void_auto';
-      if (window === 'void_manual') return 'void_manual';
-      return 'void_manual';
-    }
-    if (hasRefund) {
-      if (entry && entry.mode === 'manual') return 'refund_manual';
-      return 'refund_auto';
-    }
-    return 'paid';
-  }
   if (statusFilter) {
     list = list.filter((log) => {
-      const kind = getNotiFilterKind(log);
+      const kind = getNotiTransactionFilterKind(log, voidRefundByTxIdForFilter, voidRefundByOrderNoForFilter);
       if (statusFilter === 'fail') return kind === 'fail';
+      if (statusFilter === 'other') return kind === 'other';
       if (statusFilter === 'paid') return kind === 'paid';
       if (statusFilter === 'cancel') return kind === 'cancel';
       if (statusFilter === 'void_all') return kind === 'void_auto' || kind === 'void_manual' || kind === 'force_void';
@@ -12561,7 +12554,7 @@ function aggregateNotiLogsByDay(list, chillTz, dateSort) {
   const voidRefundByOrderNo = buildVoidRefundNotiOrderNoMap(30);
   const byDay = {};
   for (const log of list) {
-    const ymd = dailyNotiIsoToYmd(log.receivedAtIso || log.receivedAt, chillTz);
+    const ymd = getCrVoidRefundPaymentCalendarYmd(log, chillTz);
     if (!ymd) continue;
     if (!byDay[ymd]) {
       byDay[ymd] = {
@@ -12569,6 +12562,7 @@ function aggregateNotiLogsByDay(list, chillTz, dateSort) {
         count: 0,
         success: 0,
         fail: 0,
+        other: 0,
         cancel: 0,
         void: 0,
         refund: 0,
@@ -12589,6 +12583,7 @@ function aggregateNotiLogsByDay(list, chillTz, dateSort) {
     const kind = classifyNotiLogForDailyKind(log, voidRefundByTxId, voidRefundByOrderNo);
     if (kind === 'success') bucket.success++;
     else if (kind === 'fail') bucket.fail++;
+    else if (kind === 'other') bucket.other++;
     else if (kind === 'cancel') bucket.cancel++;
     else if (kind === 'void') bucket.void++;
     else if (kind === 'refund') bucket.refund++;
@@ -12941,6 +12936,8 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     '</th><th>' +
     esc(t(locale, 'tx_status_fail')) +
     '</th><th>' +
+    esc(t(locale, 'tx_filter_status_other')) +
+    '</th><th>' +
     esc(t(locale, 'tx_status_cancel')) +
     '</th><th>' +
     esc(t(locale, 'cr_type_void')) +
@@ -12963,6 +12960,8 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
         '</td><td>' +
         esc(String(d.fail)) +
         '</td><td>' +
+        esc(String(d.other || 0)) +
+        '</td><td>' +
         esc(String(d.cancel)) +
         '</td><td>' +
         esc(String(d.void)) +
@@ -12976,7 +12975,7 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
   const tbody =
     '<tbody>' +
     (tbodyRows ||
-      '<tr><td colspan="8" style="text-align:center;color:#777;">' +
+      '<tr><td colspan="9" style="text-align:center;color:#777;">' +
       esc(t(locale, 'cr_no_data')) +
       '</td></tr>') +
     '</tbody>';
@@ -12999,9 +12998,9 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     '";return;}var rows=j.rows||[];if(!rows.length){el.innerHTML="' +
     esc(t(locale, 'cr_no_data')) +
     '";return;}var th=["No","' +
-    esc(t(locale, 'cr_th_received_date')) +
+    esc(t(locale, 'cr_th_trade_date')) +
     '","' +
-    esc(t(locale, 'cr_th_received_time')) +
+    esc(t(locale, 'cr_th_trade_time')) +
     '","TxId","' +
     esc(t(locale, 'cr_th_merchant')) +
     '","Amt","ICOPAY","CCY","' +
@@ -13097,7 +13096,7 @@ app.get('/admin/api/daily-noti-detail', requireAuth, requirePage('cr_transaction
   const rows = [];
   let n = 0;
   for (const log of f.list) {
-    const ymd = dailyNotiIsoToYmd(log.receivedAtIso || log.receivedAt, chillTz);
+    const ymd = getCrVoidRefundPaymentCalendarYmd(log, chillTz);
     if (ymd !== date) continue;
     n++;
     if (rows.length >= DAILY_DETAIL_ROW_CAP) break;
@@ -13106,7 +13105,7 @@ app.get('/admin/api/daily-noti-detail', requireAuth, requirePage('cr_transaction
     const rawAmt = getNotiBodyAmountRawForIcopay(body, pgK);
     const ico =
       rawAmt !== '' && rawAmt != null ? formatAmountWithSeparator(computeIcopayAmount(rawAmt, body.Currency ?? body.currency, pgK)) : '-';
-    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const dt = formatNotiLogPaymentDateTimeTHJP(log, chillTz);
     const txid = String(body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '').trim();
     const kind = classifyNotiLogForDailyKind(log, voidRefundByTxId, voidRefundByOrderNo);
     rows.push({
@@ -14433,13 +14432,10 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
   const dateTo = (q.dateTo || '').toString().trim();
   const notiKindFilter = parseTxNotiKindFilter(req);
   let list = filterTransactionLogsByNotiKind([...getTransactionListLogs(req)].slice().reverse(), notiKindFilter);
+  const cfgTxExport = loadChillPayTransactionConfig();
+  const chillTzExport = (cfgTxExport && cfgTxExport.timezone) ? String(cfgTxExport.timezone).trim() : 'Asia/Bangkok';
   if (dateFrom || dateTo) {
-    const fromTs = dateFrom ? Date.parse(dateFrom) : 0;
-    const toTs = dateTo ? (Date.parse(dateTo) + 86400000) : Infinity;
-    list = list.filter((log) => {
-      const t = Date.parse(log.receivedAtIso || log.receivedAt);
-      return !Number.isNaN(t) && t >= fromTs && t < toTs;
-    });
+    list = list.filter((log) => logMatchesNotiTransactionDateRange(log, dateFrom, dateTo, chillTzExport));
   }
   if (searchKw) {
     const kw = searchKw.toLowerCase();
@@ -14517,6 +14513,8 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
   }
   const headerRow = [
     t(locale, 'tx_th_no'),
+    t(locale, 'cr_th_trade_date'),
+    t(locale, 'cr_th_trade_time'),
     t(locale, 'cr_th_received_date'),
     t(locale, 'cr_th_received_time'),
     'TransactionId',
@@ -14555,10 +14553,12 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
     let statusLabel = t(locale, 'status_fail');
     if (isCancel) statusLabel = t(locale, 'status_cancel');
     else if (isSuccess) statusLabel = t(locale, 'status_payment');
+    else if (isDefinitelyRequestPaymentStatus(ps)) statusLabel = t(locale, 'tx_filter_status_other');
     else if (isError) statusLabel = t(locale, 'status_error');
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
     const routeNo = getRouteNoDisplay(merchant, log.routeKey);
-    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const tradeDt = formatNotiLogPaymentDateTimeTHJP(log, chillTzExport);
+    const recvDt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
     const txId = body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '';
     const isJpExport = getNotiLogPgAcquirer(log) === 'jpay';
     let notiLabel = '';
@@ -14603,8 +14603,10 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
     detailStr = String(detailStr).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     return [
       idx + 1,
-      dt.date,
-      'TH:' + dt.timeTh + ' JP:' + dt.timeJp,
+      tradeDt.date,
+      'TH:' + tradeDt.timeTh + ' JP:' + tradeDt.timeJp,
+      recvDt.date,
+      'TH:' + recvDt.timeTh + ' JP:' + recvDt.timeJp,
       txId,
       acquirerLabelFromLog(locale, log),
       log.merchantId || '',
@@ -14778,6 +14780,56 @@ function isDefinitelyCancelPaymentStatus(ps) {
   return ps === 2 || ps === '2' || ps === 3 || ps === '3'
     || ps === 'Cancel' || ps === 'Canceled' || ps === 'Cancelled'
     || (typeof ps === 'string' && ps.toLowerCase() === 'cancel');
+}
+
+/** ChillPay Transaction API 5=Request, 포털 Status "Request" — 결제 대기(미완료) */
+function isDefinitelyRequestPaymentStatus(ps) {
+  if (ps == null || ps === '') return false;
+  if (ps === 5 || ps === '5') return true;
+  if (typeof ps === 'string') {
+    const low = ps.toLowerCase();
+    if (low === 'request' || low === 'pending') return true;
+  }
+  return false;
+}
+
+/**
+ * 노티거래내역 상태 필터 kind (paid|fail|cancel|other|void_*|refund_*)
+ * ChillPay Request(5) 등은 other(기타). voidRefundByTxId / voidRefundByOrderNo 는 buildVoidRefundNotiMap(30) 결과
+ */
+function getNotiTransactionFilterKind(log, voidRefundByTxId, voidRefundByOrderNo) {
+  const body = parseNotiBody(log);
+  if (isJpaySaleAsyncNotifyBody(body)) {
+    const rc = String(body.returncode).trim();
+    if (rc !== '00' && rc !== '0') return 'fail';
+  }
+  const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+  const isSuccess = isSuccessPaymentBody(body);
+  const isCancel = isDefinitelyCancelPaymentStatus(ps);
+  const isRequest = isDefinitelyRequestPaymentStatus(ps);
+  const txId = body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '';
+  const orderNo = body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID ?? '';
+  const entry =
+    (txId && voidRefundByTxId[txId]) || (orderNo && voidRefundByOrderNo[String(orderNo).trim()]) || null;
+  const hasVoid = !!((txId && hasVoidNotiSent(txId)) || (entry && (entry.type === 'void' || entry.type === 'void_manual_email')));
+  const hasRefund = !!((txId && hasRefundNotiSent(txId)) || (entry && entry.type === 'refund'));
+  if (isRequest && !isSuccess && !isCancel) return 'other';
+  if (!isSuccess && !isCancel) return 'fail';
+  if (isCancel) return 'cancel';
+  if (isSuccess && !hasVoid && !hasRefund) return 'paid';
+  if (hasVoid) {
+    if (entry && entry.type === 'void_manual_email') return 'force_void';
+    const baseDate = body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
+    const window = entry && entry.sentAtIso ? getVoidRefundWindow(baseDate, entry.sentAtIso) : getVoidRefundWindow(baseDate);
+    if (window === 'void_auto') return 'void_auto';
+    if (window === 'void_manual') return 'void_manual';
+    return 'void_manual';
+  }
+  if (hasRefund) {
+    if (entry && entry.mode === 'manual') return 'refund_manual';
+    return 'refund_auto';
+  }
+  return 'paid';
 }
 
 /** ChillPay 무효(Void) 노티로 볼 값: 콜백 20/24, Transaction API 6/7. (2=취소는 제외) */
