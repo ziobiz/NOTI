@@ -395,13 +395,16 @@ const PAGE_KEYS = [
   'pg_logs',
   'internal_logs',
   'dev_internal_logs',
+  'dealmai_webhook_logs',
   'pg_result',
   'internal_result',
   'dev_result',
+  'dealmai_webhook_result',
   'traffic_analysis',
   'internal_targets',
   'internal_noti_settings',
   'dev_internal_noti_settings',
+  'dealmai_webhook_settings',
   'test_config',
   'test_run',
   'test_history',
@@ -426,13 +429,16 @@ const PAGE_KEY_TO_DEFAULT_URL = {
   pg_logs: '/admin/logs',
   internal_logs: '/admin/internal',
   dev_internal_logs: '/admin/dev-internal',
+  dealmai_webhook_logs: '/admin/dealmai-webhook',
   pg_result: '/admin/logs-result',
   internal_result: '/admin/internal-result',
   dev_result: '/admin/dev-internal-result',
+  dealmai_webhook_result: '/admin/dealmai-webhook-result',
   traffic_analysis: '/admin/traffic',
   internal_targets: '/admin/internal-targets',
   internal_noti_settings: '/admin/internal-noti-settings',
   dev_internal_noti_settings: '/admin/dev-internal-noti-settings',
+  dealmai_webhook_settings: '/admin/dealmai-webhook-settings',
   test_config: '/admin/test-configs',
   test_run: '/admin/test-pay',
   test_history: '/admin/test-logs',
@@ -472,6 +478,7 @@ const INITIAL_PASSWORD_SUFFIX = '1!';
 const INTERNAL_TARGETS_CONFIG_PATH = path.join(CONFIG_DIR, 'internal-targets.json');
 const INTERNAL_NOTI_SETTINGS_PATH = path.join(CONFIG_DIR, 'internal-noti-settings.json');
 const DEV_INTERNAL_NOTI_SETTINGS_PATH = path.join(CONFIG_DIR, 'dev-internal-noti-settings.json');
+const DEALMAI_WEBHOOK_SETTINGS_PATH = path.join(CONFIG_DIR, 'dealmai-webhook-settings.json');
 const SITE_SETTINGS_PATH = path.join(CONFIG_DIR, 'site-settings.json');
 const TEST_CONFIGS_CONFIG_PATH = path.join(CONFIG_DIR, 'test-configs.json');
 const CHILLPAY_TRANSACTION_CONFIG_PATH = path.join(CONFIG_DIR, 'chillpay-transaction.json');
@@ -2023,6 +2030,7 @@ const CHILLPAY_PG_TRANSACTIONS_BACKUPS_PATH = path.join(DATA_DIR, 'chillpay-pg-t
 const PG_TRANSACTIONS_RESET_BACKUPS_MAX = 2;
 const INTERNAL_LOG_PATH = path.join(DATA_DIR, 'internal-noti.log');
 const DEV_INTERNAL_LOG_PATH = path.join(DATA_DIR, 'dev-internal-noti.log');
+const DEALMAI_WEBHOOK_LOG_PATH = path.join(DATA_DIR, 'dealmai-webhook.log');
 const TEST_LOG_PATH = path.join(DATA_DIR, 'test-payments.log');
 const CONFIG_LOG_PATH = path.join(DATA_DIR, 'config-change.log');
 const VOID_REFUND_NOTI_LOG_PATH = path.join(DATA_DIR, 'void-refund-noti.log');
@@ -2742,7 +2750,7 @@ function isCancelLikeNotiBody(body, log) {
   return false;
 }
 
-/** 무효/환불 노티: PaymentStatus 반영 + JPAY 필드를 전산/릴레이용 키로 보강 */
+/** 무효/환불 노티: PaymentStatus 반영 (ChillPay 전용; JPAY는 원문 그대로 sendVoidOrRefundNoti 에서 처리) */
 function enrichPayloadForVoidRefundNoti(log, basePayload, paymentStatus) {
   let payload;
   if (basePayload && typeof basePayload === 'object' && !Buffer.isBuffer(basePayload)) {
@@ -2753,20 +2761,6 @@ function enrichPayloadForVoidRefundNoti(log, basePayload, paymentStatus) {
     } catch {
       payload = { PaymentStatus: paymentStatus };
     }
-  }
-  if (getNotiLogPgAcquirer(log) === 'jpay') {
-    if (payload.TransactionId == null || String(payload.TransactionId).trim() === '') {
-      const tid = payload.transaction_id ?? payload.transactionId;
-      if (tid != null && String(tid).trim() !== '') payload.TransactionId = String(tid).trim();
-    }
-    if (payload.OrderNo == null || String(payload.OrderNo).trim() === '') {
-      const on = payload.orderid ?? payload.orderNo ?? payload.orderID;
-      if (on != null && String(on).trim() !== '') payload.OrderNo = String(on).trim();
-    }
-    if ((payload.Amount == null || payload.Amount === '') && payload.total_fee != null) {
-      payload.Amount = String(payload.total_fee);
-    }
-    if (!payload.Currency && payload.fee_type) payload.Currency = String(payload.fee_type);
   }
   return payload;
 }
@@ -2894,7 +2888,7 @@ function devInternalHaystackAdminLog(log, locale) {
 /** 전산/개발 노티 로그 화면: JPAY 원문 릴레이 건에 수신 Content-Type·헤더·원문 미리보기 병합 표시 */
 function jpayInternalLogDisplayPayload(log) {
   const payload = (log && log.payload) || {};
-  if (log && String(log.pgProvider || '').toLowerCase() === 'jpay' && log.jpayRawRelay) {
+  if (log && String(log.pgProvider || '').toLowerCase() === 'jpay') {
     return {
       ...payload,
       ...(log.incomingContentType ? { _middleware_incomingContentType: log.incomingContentType } : {}),
@@ -2906,6 +2900,404 @@ function jpayInternalLogDisplayPayload(log) {
     };
   }
   return payload;
+}
+
+/** JPAY: NOTI 로그에서 수신 본문·Content-Type·rawBody 추출 (원문 송부용) */
+function jpayRawRelayFromNotiLog(log) {
+  let body = log && log.body;
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      body = {};
+    }
+  }
+  if (!body || typeof body !== 'object') body = {};
+  const incomingCt = (log && log.contentType && String(log.contentType).trim()) || 'application/x-www-form-urlencoded';
+  const ctBase = (incomingCt.split(';')[0] || '').trim().toLowerCase();
+  const contentType =
+    ctBase && (ctBase.includes('application/json') || ctBase.includes('application/x-www-form-urlencoded'))
+      ? ctBase
+      : 'application/x-www-form-urlencoded';
+  const rawBody =
+    log && log.rawBody != null && String(log.rawBody).trim() !== '' ? String(log.rawBody) : undefined;
+  return { body, contentType, rawBody };
+}
+
+/** JPAY: 전산/개발 로그에서 재전송용 relayPack (internal log에는 rawBody 전체 미저장) */
+function jpayRawRelayFromInternalLog(log) {
+  const payload = (log && log.payload) || {};
+  let body = payload;
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      body = {};
+    }
+  }
+  if (!body || typeof body !== 'object') body = {};
+  const incomingCt =
+    (log && log.incomingContentType && String(log.incomingContentType).trim()) || 'application/x-www-form-urlencoded';
+  const ctBase = (incomingCt.split(';')[0] || '').trim().toLowerCase();
+  const contentType =
+    ctBase && (ctBase.includes('application/json') || ctBase.includes('application/x-www-form-urlencoded'))
+      ? ctBase
+      : 'application/x-www-form-urlencoded';
+  return { body, contentType, rawBody: undefined };
+}
+
+/** JPAY: 가맹점 relayFormat 에 맞는 relayToMerchant 옵션 (raw=수신 원문, merchant 없으면 항상 raw) */
+function jpayRelayOptsFromMerchant(merchant, relayPack) {
+  const relayFormat =
+    merchant && (merchant.relayFormat === 'json' || merchant.relayFormat === 'form') ? merchant.relayFormat : 'raw';
+  if (relayFormat === 'json') {
+    return { contentType: 'application/json', rawBody: undefined };
+  }
+  if (relayFormat === 'form') {
+    return { contentType: 'application/x-www-form-urlencoded', rawBody: undefined };
+  }
+  return { contentType: relayPack.contentType, rawBody: relayPack.rawBody };
+}
+
+/** JPAY: 전산 전송 URL (릴레이 OFF·대체 전송 포함) */
+function resolveJpayInternalNotiDeliveryUrl(merchant, enableRelay, kind, rof) {
+  const r = normalizeMerchantRelayOffForwardTarget(rof);
+  if (!enableRelay && r === 'internal') {
+    return resolveRelayOffInternalUrl(merchant, kind);
+  }
+  if (!enableRelay && r === 'dev_internal') {
+    if (merchant && merchant.internalTargetId) {
+      const u = findInternalTargetUrl(merchant.internalTargetId, kind);
+      if (u) return u;
+    }
+    return INTERNAL_NOTI_URL ? String(INTERNAL_NOTI_URL).trim() : null;
+  }
+  if (merchant && merchant.internalTargetId) {
+    const u = findInternalTargetUrl(merchant.internalTargetId, kind);
+    if (u) return u;
+  }
+  return INTERNAL_NOTI_URL ? String(INTERNAL_NOTI_URL).trim() : null;
+}
+
+/** JPAY: URL 로 수신 원문 POST (1회 재시도). 전산/개발은 merchant=null 로 항상 raw. */
+async function relayJpayRawWithRetry(url, relayPack, merchant) {
+  const relayOpts = jpayRelayOptsFromMerchant(merchant, relayPack);
+  let res = await relayToMerchant(url, relayPack.body, relayOpts);
+  let ok = res.status >= 200 && res.status < 400;
+  if (!ok) {
+    await new Promise((r) => setTimeout(r, 2000));
+    res = await relayToMerchant(url, relayPack.body, relayOpts);
+    ok = res.status >= 200 && res.status < 400;
+  }
+  return { ok, res, relayOpts };
+}
+
+function jpayInternalLogExtrasFromNotiLog(log) {
+  const incomingCt = (log && log.contentType && String(log.contentType).trim()) || '';
+  const rawBody = log && log.rawBody != null ? String(log.rawBody) : '';
+  return {
+    incomingContentType: incomingCt,
+    rawBodyLength: rawBody.length,
+    rawBodyPreview: rawBody.length > 6000 ? rawBody.slice(0, 6000) + '…' : rawBody,
+  };
+}
+
+// ===== DEALMAI 웹훅 (가맹점별 사용 + 전역 URL/Secret) =====
+function loadDealmaiWebhookSettings() {
+  const raw = loadJsonConfig(DEALMAI_WEBHOOK_SETTINGS_PATH, null);
+  if (!raw || typeof raw !== 'object') {
+    return { webhookUrl: '', webhookSecret: '', defaultPartnerCode: '' };
+  }
+  return {
+    webhookUrl: String(raw.webhookUrl || '').trim(),
+    webhookSecret: String(raw.webhookSecret || '').trim(),
+    defaultPartnerCode: String(raw.defaultPartnerCode || '').trim(),
+    secretGeneratedAt: raw.secretGeneratedAt || '',
+    secretGeneratedBy: raw.secretGeneratedBy || '',
+  };
+}
+
+function saveDealmaiWebhookSettings(settings) {
+  trySaveJsonConfigOrWarn(DEALMAI_WEBHOOK_SETTINGS_PATH, settings, 'dealmai-webhook-settings.json');
+}
+
+function generateDealmaiWebhookSecret() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function merchantShouldDeliverDealmaiWebhook(merchant) {
+  return !!(merchant && merchant.enableDealmaiWebhook === true);
+}
+
+function classifyDealmaiWebhookEvent(body, pgProvider) {
+  if (!body || typeof body !== 'object') return 'unknown';
+  if (pgProvider === 'jpay') {
+    const rc = String(body.returncode ?? body.returnCode ?? '').trim();
+    if (rc === '00' || rc === '0') return 'paid';
+    if (rc) return 'fail';
+    const ts = String(body.trade_state || body.tradeState || '').toUpperCase();
+    if (ts === 'SUCCESS') return 'paid';
+    if (ts === 'FAIL') return 'fail';
+    return 'unknown';
+  }
+  const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
+  if (ps === 1 || ps === '1') return 'paid';
+  if (ps === 2 || ps === '2') return 'cancel';
+  if (ps === 9 || ps === '9' || ps === 8 || ps === '8') return 'refund';
+  if (typeof isDefinitelyVoidPaymentStatus === 'function' && isDefinitelyVoidPaymentStatus(ps)) return 'void';
+  if (ps === 0 || ps === '0') return 'fail';
+  return 'unknown';
+}
+
+/** Deal Mai ontheline: Paid | Unpaid | Refund | Partial Refund | Fail */
+function mapDealmaiOnthelineEvent(body, pgProvider, eventOverride) {
+  const ov = eventOverride ? String(eventOverride).trim().toLowerCase() : '';
+  if (ov === 'refund') return 'Refund';
+  if (ov === 'void') return 'Unpaid';
+  const raw = classifyDealmaiWebhookEvent(body, pgProvider);
+  if (raw === 'paid') return 'Paid';
+  if (raw === 'refund') return 'Refund';
+  if (raw === 'cancel' || raw === 'void') return 'Unpaid';
+  if (raw === 'fail') return 'Fail';
+  return 'Fail';
+}
+
+function currencyCodeToDealmaiLabel(code) {
+  const c = normalizeCurrencyCode(code);
+  if (c === '392') return 'JPY';
+  if (c === '410') return 'KRW';
+  if (c === '764') return 'THB';
+  if (c === '840') return 'USD';
+  const s = String(code || '').toUpperCase();
+  if (s === 'JPY' || s === 'KRW' || s === 'THB' || s === 'USD') return s;
+  return 'JPY';
+}
+
+function countryFromDealmaiCurrency(currency) {
+  if (currency === 'JPY') return 'JP';
+  if (currency === 'KRW') return 'KR';
+  if (currency === 'THB') return 'TH';
+  if (currency === 'USD') return 'US';
+  return 'JP';
+}
+
+function pickDealmaiAmount(body, pgProvider) {
+  if (pgProvider === 'jpay') {
+    const v = body.total_fee ?? body.amount ?? body.Amount;
+    if (v != null && String(v).trim() !== '') {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    }
+  }
+  const v = body.Amount ?? body.amount;
+  if (v != null && String(v).trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function pickDealmaiTransactionId(body) {
+  return getFirstNonEmptyField(body, ['TransactionId', 'transaction_id', 'transactionId', 'orderid', 'OrderNo', 'orderNo']);
+}
+
+function pickDealmaiCustomerName(body, merchant) {
+  const name = getFirstNonEmptyField(body, ['CustomerName', 'customerName', 'custName', 'customer_name', 'memberid']);
+  if (name) return name;
+  if (merchant && merchant.merchantId) return String(merchant.merchantId);
+  return 'Customer';
+}
+
+function pickDealmaiCustomerEmail(body, merchant) {
+  let email = getFirstNonEmptyField(body, ['email', 'Email', 'customerEmail', 'customer_email']);
+  const cid = getFirstNonEmptyField(body, ['CustomerId', 'customerId']);
+  if (!email && cid && cid.includes('@')) email = cid;
+  if (!email && merchant && merchant.internalCustomerId && String(merchant.internalCustomerId).includes('@')) {
+    email = String(merchant.internalCustomerId).trim();
+  }
+  return email || 'noreply@icopay.net';
+}
+
+/** Deal Mai ontheline 웹훅 JSON (https://dealmai.com/api/ontheline-webhook) */
+function buildDealmaiWebhookPayload(merchant, opts) {
+  const o = opts || {};
+  let body = o.body;
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      body = {};
+    }
+  }
+  if (!body || typeof body !== 'object') body = {};
+  const pgProvider = o.pgProvider === 'jpay' ? 'jpay' : 'chillpay';
+  const cfg = loadDealmaiWebhookSettings();
+  const partner =
+    String((merchant && merchant.dealmaiPartnerCode) || '').trim() || String(cfg.defaultPartnerCode || '').trim();
+  const currencyRaw = body.Currency ?? body.currency ?? body.fee_type;
+  const currency = currencyCodeToDealmaiLabel(currencyRaw);
+  const country =
+    getFirstNonEmptyField(body, ['country', 'Country']) ||
+    String((merchant && merchant.dealmaiCountry) || '').trim() ||
+    countryFromDealmaiCurrency(currency);
+  const eventOverride = o.eventOverride ? String(o.eventOverride).trim().toLowerCase() : '';
+  const outbound = {
+    event: mapDealmaiOnthelineEvent(body, pgProvider, eventOverride),
+    transaction_id: pickDealmaiTransactionId(body),
+    customer: {
+      name: pickDealmaiCustomerName(body, merchant),
+      email: pickDealmaiCustomerEmail(body, merchant),
+      country: country.length === 2 ? country.toUpperCase() : country,
+    },
+    amount: pickDealmaiAmount(body, pgProvider),
+    currency,
+    partner,
+    paygw: pgProvider === 'jpay' ? 'JPAY' : 'CHILLP',
+  };
+  return {
+    outbound,
+    partnerMissing: !partner,
+    pgSource: body,
+    pgProvider,
+    merchantId: merchant ? merchant.merchantId || o.merchantId || '' : o.merchantId || '',
+    kind: o.kind || 'callback',
+    routeKey: o.routeKey || '',
+  };
+}
+
+function signDealmaiWebhookBody(secret, jsonBody) {
+  if (!secret) return '';
+  return crypto.createHmac('sha256', secret).update(jsonBody, 'utf8').digest('hex');
+}
+
+let DEALMAI_WEBHOOK_LOGS = loadJsonLogFile(DEALMAI_WEBHOOK_LOG_PATH, 'storedAtIso');
+
+function appendDealmaiWebhookLog(entry) {
+  const nowIso = new Date().toISOString();
+  const log = {
+    ...entry,
+    storedAt: getThailandNowString(),
+    storedAtIso: nowIso,
+  };
+  DEALMAI_WEBHOOK_LOGS.push(log);
+  const cutoff = getLogKeepMemCutoffMs();
+  DEALMAI_WEBHOOK_LOGS = DEALMAI_WEBHOOK_LOGS.filter((e) => {
+    const t = Date.parse(e.storedAtIso || e.storedAt);
+    return !Number.isNaN(t) && t >= cutoff;
+  });
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFile(DEALMAI_WEBHOOK_LOG_PATH, JSON.stringify(log) + '\n', () => {});
+  } catch {
+    // 무시
+  }
+}
+
+/** DEALMAI 웹훅 POST (1회 재시도). 가맹점 enableDealmaiWebhook + 전역 URL 필요. */
+async function deliverDealmaiWebhook(merchant, opts) {
+  if (!merchantShouldDeliverDealmaiWebhook(merchant)) {
+    return { ok: false, skipped: true, reason: 'merchant_disabled' };
+  }
+  const cfg = loadDealmaiWebhookSettings();
+  const url = cfg.webhookUrl;
+  if (!url) {
+    return { ok: false, skipped: true, reason: 'no_url' };
+  }
+  const built = buildDealmaiWebhookPayload(merchant, opts);
+  if (built.partnerMissing) {
+    return {
+      ok: false,
+      skipped: false,
+      reason: 'partner_missing',
+      status: 0,
+      payload: built.outbound,
+      url,
+    };
+  }
+  if (!built.outbound.transaction_id) {
+    return {
+      ok: false,
+      skipped: false,
+      reason: 'transaction_id_missing',
+      status: 0,
+      payload: built.outbound,
+      url,
+    };
+  }
+  const payload = built.outbound;
+  const jsonBody = JSON.stringify(payload);
+  const signature = signDealmaiWebhookBody(cfg.webhookSecret, jsonBody);
+  const headers = {
+    'Content-Type': 'application/json',
+    'User-Agent': 'ICOPAY-Noti-Middleware/1.0',
+  };
+  if (signature) headers['X-OnTheLine-Signature'] = 'sha256=' + signature;
+
+  async function postOnce() {
+    return axios.post(url, jsonBody, {
+      headers,
+      timeout: RELAY_TIMEOUT_MS,
+      validateStatus: () => true,
+    });
+  }
+
+  let res;
+  try {
+    res = await postOnce();
+    let ok = res.status >= 200 && res.status < 400;
+    if (!ok) {
+      await new Promise((r) => setTimeout(r, 2000));
+      res = await postOnce();
+      ok = res.status >= 200 && res.status < 400;
+    }
+    const preview =
+      res.data != null
+        ? typeof res.data === 'string'
+          ? res.data.slice(0, 600)
+          : JSON.stringify(res.data).slice(0, 600)
+        : '';
+    return { ok, status: res.status, responsePreview: preview, payload, built, url };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err.code || err.message || String(err),
+      payload,
+      built,
+      url,
+    };
+  }
+}
+
+async function dispatchDealmaiWebhookForNoti(merchant, opts) {
+  const merchantId = merchant && (merchant.merchantId || opts.merchantId) ? merchant.merchantId || opts.merchantId : opts.merchantId || '';
+  if (!merchantShouldDeliverDealmaiWebhook(merchant)) return { ok: false, skipped: true };
+  const result = await deliverDealmaiWebhook(merchant, opts);
+  const built = result.built || buildDealmaiWebhookPayload(merchant, opts);
+  appendDealmaiWebhookLog({
+    merchantId,
+    routeNo: merchant ? merchant.routeNo || '' : '',
+    internalTargetId: merchant ? merchant.internalTargetId || '' : '',
+    payload: result.payload || built.outbound,
+    pgSource: built.pgSource,
+    webhookTargetUrl: result.url || loadDealmaiWebhookSettings().webhookUrl || '',
+    webhookDeliveryStatus: result.skipped ? 'skip' : result.ok ? 'ok' : 'fail',
+    webhookHttpStatus: result.status != null ? result.status : undefined,
+    webhookResponsePreview: result.responsePreview || undefined,
+    webhookError: result.error || undefined,
+    pgProvider: opts.pgProvider === 'jpay' ? 'jpay' : 'chillpay',
+    kind: opts.kind || 'callback',
+    routeKey: opts.routeKey || '',
+  });
+  return result;
+}
+
+function dealmaiWebhookDeliveryLabel(locale, status) {
+  const s = String(status || '').toLowerCase();
+  if (s === 'ok') return t(locale, 'dealmai_webhook_deliver_ok');
+  if (s === 'skip') return t(locale, 'dealmai_webhook_deliver_skip');
+  if (s === 'fail') return t(locale, 'dealmai_webhook_deliver_fail');
+  return status || '—';
 }
 
 /**
@@ -3123,6 +3515,7 @@ function reloadMemLogsFromDisk() {
   NOTI_LOGS = loadPgNotiJsonLogFile();
   INTERNAL_LOGS = loadJsonLogFile(INTERNAL_LOG_PATH, 'storedAtIso');
   DEV_INTERNAL_LOGS = loadJsonLogFile(DEV_INTERNAL_LOG_PATH, 'storedAtIso');
+  DEALMAI_WEBHOOK_LOGS = loadJsonLogFile(DEALMAI_WEBHOOK_LOG_PATH, 'storedAtIso');
   TEST_LOGS = loadJsonLogFile(TEST_LOG_PATH, 'loggedAtIso');
   MAIL_LOGS = loadJsonLogFile(MAIL_LOG_PATH, 'sentAtIso');
   RECURRING_CALLBACK_LOGS = loadJsonLogFile(RECURRING_CALLBACK_LOG_PATH, 'at');
@@ -5012,18 +5405,19 @@ async function sendVoidOrRefundNoti(log, type, mode) {
     return { success: false, error: !merchant ? '가맹점 없음(미등록)' : '노티 본문 없음' };
   }
   const paymentStatus = type === 'refund' ? '9' : '2';
-  const payload = enrichPayloadForVoidRefundNoti(log, log.body, paymentStatus);
+  const isJpayVr = pgProv === 'jpay';
+  const jpayRelayPack = isJpayVr ? jpayRawRelayFromNotiLog(log) : null;
+  const payload = isJpayVr ? jpayRelayPack.body : enrichPayloadForVoidRefundNoti(log, log.body, paymentStatus);
   console.log(
     '[무효/환불 노티 전송] type=',
     type,
-    'PaymentStatus=',
-    paymentStatus,
+    isJpayVr ? 'JPAY 원문' : 'PaymentStatus=' + paymentStatus,
     'merchantId=',
     log.merchantId,
     'pg=',
     pgProv,
     'TransactionId=',
-    payload.TransactionId,
+    notifBodyTxId(payload) || payload.TransactionId,
   );
   const urls = [];
   if (merchant.enableRelay !== false) {
@@ -5031,26 +5425,24 @@ async function sendVoidOrRefundNoti(log, type, mode) {
     if (merchant.resultUrl && merchant.resultUrl !== merchant.callbackUrl) urls.push({ url: merchant.resultUrl, kind: 'result' });
   }
   let relayOk = true;
-  const relayCt =
-    pgProv === 'jpay'
-      ? merchant.relayFormat === 'json'
-        ? 'application/json'
-        : merchant.relayFormat === 'raw'
-          ? (log.contentType && String(log.contentType).trim()) || 'application/x-www-form-urlencoded'
-          : 'application/x-www-form-urlencoded'
-      : 'application/json';
   for (const { url } of urls) {
     try {
       let sendBody = payload;
-      let sendOpts = { contentType: relayCt };
-      if (pgProv === 'chillpay' && merchantRelayEnrichmentEnabled(merchant)) {
-        const rfVr =
-          merchant.relayFormat === 'form' ? 'form' : merchant.relayFormat === 'json' ? 'json' : 'json';
-        const ctVr = rfVr === 'form' ? 'application/x-www-form-urlencoded' : 'application/json';
-        const enriched = enrichMerchantRelayPayload(merchant, rfVr, payload, undefined, ctVr, log.env || 'live');
-        const built = buildEnrichedRelayArgs(rfVr, { contentType: ctVr }, payload, enriched);
-        sendBody = built.body;
-        sendOpts = built.relayOpts;
+      let sendOpts;
+      if (isJpayVr) {
+        sendOpts = jpayRelayOptsFromMerchant(merchant, jpayRelayPack);
+      } else {
+        const relayCt = 'application/json';
+        sendOpts = { contentType: relayCt };
+        if (merchantRelayEnrichmentEnabled(merchant)) {
+          const rfVr =
+            merchant.relayFormat === 'form' ? 'form' : merchant.relayFormat === 'json' ? 'json' : 'json';
+          const ctVr = rfVr === 'form' ? 'application/x-www-form-urlencoded' : 'application/json';
+          const enriched = enrichMerchantRelayPayload(merchant, rfVr, payload, undefined, ctVr, log.env || 'live');
+          const built = buildEnrichedRelayArgs(rfVr, { contentType: ctVr }, payload, enriched);
+          sendBody = built.body;
+          sendOpts = built.relayOpts;
+        }
       }
       const res = await relayToMerchant(url, sendBody, sendOpts);
       if (res.status < 200 || res.status >= 300) relayOk = false;
@@ -5067,27 +5459,35 @@ async function sendVoidOrRefundNoti(log, type, mode) {
   const rofVr = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
   const useRelayOffDevUrlsVr = !enableRelayVr && rofVr === 'dev_internal';
 
-  const internalPayload = transformForInternal(payload, merchant, { pgProvider: pgProv });
+  const internalPayload = isJpayVr ? jpayRelayPack.body : transformForInternal(payload, merchant, { pgProvider: pgProv });
   let internalOk = false;
   let internalTargetUrl = '';
 
   if (deliverChillpayInternalVr) {
     try {
-      const internalUrl = resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayVr, 'callback');
+      const internalUrl = isJpayVr
+        ? resolveJpayInternalNotiDeliveryUrl(merchant, enableRelayVr, 'callback', rofVr)
+        : resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayVr, 'callback');
       if (!internalUrl) {
         console.log('[무효/환불 노티 → 전산 스킵] URL 미설정, merchant=', log.merchantId);
       } else {
         internalTargetUrl = internalUrl;
-        console.log('[취소 노티 → 전산] url=', internalUrl, 'PaymentStatus=', internalPayload.PaymentStatus, 'TransactionId=', internalPayload.TransactionId);
-        let internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 1 });
-        internalOk = internalRes.success;
-        if (!internalOk) {
-          console.warn('[취소 노티 → 전산 실패] status=', internalRes.status, ' 1회 재시도 예정');
-          await new Promise((r) => setTimeout(r, 2000));
-          internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 2 });
+        if (isJpayVr) {
+          console.log('[JPAY 취소 노티 → 전산] 원문 POST url=', internalUrl);
+          const jpayIntRes = await relayJpayRawWithRetry(internalUrl, jpayRelayPack, null);
+          internalOk = jpayIntRes.ok;
+        } else {
+          console.log('[취소 노티 → 전산] url=', internalUrl, 'PaymentStatus=', internalPayload.PaymentStatus, 'TransactionId=', internalPayload.TransactionId);
+          let internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 1 });
           internalOk = internalRes.success;
-          if (internalOk) console.log('[취소 노티 → 전산 재시도 성공]');
-          else console.warn('[취소 노티 → 전산 재시도 실패]');
+          if (!internalOk) {
+            console.warn('[취소 노티 → 전산 실패] status=', internalRes.status, ' 1회 재시도 예정');
+            await new Promise((r) => setTimeout(r, 2000));
+            internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 2 });
+            internalOk = internalRes.success;
+            if (internalOk) console.log('[취소 노티 → 전산 재시도 성공]');
+            else console.warn('[취소 노티 → 전산 재시도 실패]');
+          }
         }
       }
       appendInternalLog({
@@ -5098,29 +5498,37 @@ async function sendVoidOrRefundNoti(log, type, mode) {
         payload: internalPayload,
         internalTargetUrl,
         internalDeliveryStatus: internalTargetUrl ? (internalOk ? 'ok' : 'fail') : 'skip',
+        ...(isJpayVr
+          ? { jpayRawRelay: true, pgProvider: 'jpay', ...jpayInternalLogExtrasFromNotiLog(log) }
+          : {}),
       });
     } catch (err) {
       console.error('[무효/환불 노티 → 전산 실패]', err.message);
-      let failUrl = internalTargetUrl || resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayVr, 'callback') || '';
-      let failPayload = internalPayload;
-      try {
-        failPayload = transformForInternal(payload, merchant, { pgProvider: pgProv });
-      } catch (_) {}
+      let failUrl = internalTargetUrl;
+      if (!failUrl) {
+        failUrl =
+          (isJpayVr
+            ? resolveJpayInternalNotiDeliveryUrl(merchant, enableRelayVr, 'callback', rofVr)
+            : resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayVr, 'callback')) || '';
+      }
       appendInternalLog({
         storedAt: new Date().toISOString(),
         merchantId: log.merchantId,
         routeNo: merchant.routeNo || '',
         internalTargetId: merchant.internalTargetId || '',
-        payload: failPayload,
+        payload: internalPayload,
         internalTargetUrl: failUrl || '',
         internalDeliveryStatus: 'fail',
+        ...(isJpayVr
+          ? { jpayRawRelay: true, pgProvider: 'jpay', ...jpayInternalLogExtrasFromNotiLog(log) }
+          : {}),
       });
     }
   } else {
     console.log('[무효/환불 노티 → 전산 스킵] 전산 노티 미사용(enableInternal 꺼짐), merchant=', log.merchantId);
   }
 
-  const devPayload = transformForDevInternal(payload, merchant, { pgProvider: pgProv });
+  const devPayload = isJpayVr ? jpayRelayPack.body : transformForDevInternal(payload, merchant, { pgProvider: pgProv });
   let devOk = false;
   let devInternalTargetUrl = '';
 
@@ -5135,13 +5543,24 @@ async function sendVoidOrRefundNoti(log, type, mode) {
       }
       if (!devUrl) {
         console.log('[무효/환불 노티 → 개발 전산 스킵] URL 미설정, merchant=', log.merchantId);
+      } else if (isJpayVr && sameJpayNotifyUrl(devUrl, internalTargetUrl)) {
+        devInternalTargetUrl = devUrl;
+        console.log('[JPAY 취소 노티 → 개발 전산 스킵] 운영 전산과 동일 URL');
+        devOk = internalOk;
       } else {
         devInternalTargetUrl = devUrl;
-        console.log('[취소 노티 → 개발 전산] url=', devUrl, 'PaymentStatus=', devPayload.PaymentStatus, 'TransactionId=', devPayload.TransactionId);
-        devAggVr = await sendDevInternalHttpNotify(devUrl, devPayload);
-        devOk = devAggVr.success;
-        if (devOk) console.log('[취소 노티 → 개발 전산 완료] attempts=', devAggVr.attempts);
-        else console.warn('[취소 노티 → 개발 전산 실패] attempts=', devAggVr.attempts, 'status=', devAggVr.status);
+        if (isJpayVr) {
+          console.log('[JPAY 취소 노티 → 개발 전산] 원문 POST url=', devUrl);
+          const jpayDevRes = await relayJpayRawWithRetry(devUrl, jpayRelayPack, null);
+          devOk = jpayDevRes.ok;
+          devAggVr = { success: jpayDevRes.ok, status: jpayDevRes.res && jpayDevRes.res.status, attempts: jpayDevRes.ok ? 1 : 2 };
+        } else {
+          console.log('[취소 노티 → 개발 전산] url=', devUrl, 'PaymentStatus=', devPayload.PaymentStatus, 'TransactionId=', devPayload.TransactionId);
+          devAggVr = await sendDevInternalHttpNotify(devUrl, devPayload);
+          devOk = devAggVr.success;
+          if (devOk) console.log('[취소 노티 → 개발 전산 완료] attempts=', devAggVr.attempts);
+          else console.warn('[취소 노티 → 개발 전산 실패] attempts=', devAggVr.attempts, 'status=', devAggVr.status);
+        }
       }
       appendDevInternalLog({
         storedAt: new Date().toISOString(),
@@ -5152,7 +5571,8 @@ async function sendVoidOrRefundNoti(log, type, mode) {
         internalTargetUrl: devInternalTargetUrl,
         internalDeliveryStatus: devInternalTargetUrl ? (devOk ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP) : DEV_INTERNAL_DELIVER_FAIL,
         pgProvider: pgProv,
-        ...(devInternalTargetUrl && devAggVr ? devInternalLogUpstreamExtras(devAggVr) : {}),
+        ...(isJpayVr ? { jpayRawRelay: true, ...jpayInternalLogExtrasFromNotiLog(log) } : {}),
+        ...(devInternalTargetUrl && devAggVr && !isJpayVr ? devInternalLogUpstreamExtras(devAggVr) : {}),
       });
     } catch (err) {
       console.error('[무효/환불 노티 → 개발 전산 실패]', err.message);
@@ -5161,23 +5581,49 @@ async function sendVoidOrRefundNoti(log, type, mode) {
         failUrl =
           (useRelayOffDevUrlsVr ? resolveRelayOffDevUrl(merchant, 'callback') : resolveMerchantDevInternalUrl(merchant, 'callback')) || '';
       }
-      let failPayload = devPayload;
-      try {
-        failPayload = transformForDevInternal(payload, merchant, { pgProvider: pgProv });
-      } catch (_) {}
       appendDevInternalLog({
         storedAt: new Date().toISOString(),
         merchantId: log.merchantId,
         routeNo: merchant.routeNo || '',
         internalTargetId: merchant.internalTargetId || '',
-        payload: failPayload,
+        payload: devPayload,
         internalTargetUrl: failUrl || '',
         internalDeliveryStatus: failUrl ? DEV_INTERNAL_DELIVER_SKIP : DEV_INTERNAL_DELIVER_FAIL,
         pgProvider: pgProv,
+        ...(isJpayVr ? { jpayRawRelay: true, ...jpayInternalLogExtrasFromNotiLog(log) } : {}),
       });
     }
   } else {
     console.log('[무효/환불 노티 → 개발 전산 스킵] 개발 노티 미사용(enableDevInternal 꺼짐), merchant=', log.merchantId);
+  }
+
+  if (merchantShouldDeliverDealmaiWebhook(merchant)) {
+    try {
+      const whBody =
+        log.body && typeof log.body === 'object'
+          ? log.body
+          : typeof log.body === 'string'
+          ? (() => {
+              try {
+                return JSON.parse(log.body || '{}');
+              } catch {
+                return {};
+              }
+            })()
+          : {};
+      await dispatchDealmaiWebhookForNoti(merchant, {
+        body: isJpayVr && jpayRelayPack ? jpayRelayPack.body : whBody,
+        rawBody: isJpayVr && jpayRelayPack ? jpayRelayPack.rawBody : log.rawBody,
+        contentType: isJpayVr && jpayRelayPack ? jpayRelayPack.contentType : log.contentType,
+        pgProvider: pgProv,
+        merchantId: log.merchantId,
+        kind: 'callback',
+        env: log.env || 'live',
+        eventOverride: type === 'refund' ? 'refund' : type === 'void' ? 'void' : undefined,
+      });
+    } catch (err) {
+      console.error('[무효/환불 → DEALMAI 웹훅 실패]', err.message);
+    }
   }
 
   const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
@@ -5457,20 +5903,6 @@ function merchantShouldDeliverChillpayInternal(merchant, enableRelay, enableInte
 /** ChillPay/JPAY 공통: 「개발 노티 사용」이 켜진 경우에만 개발 전산 전송. 릴레이 OFF·대체=개발만으로 개발 전송을 켜지 않음. */
 function merchantShouldDeliverChillpayDevInternal(merchant, enableRelay, enableDevInternalChecked) {
   return enableDevInternalChecked === true;
-}
-
-/** JPAY: 릴레이 OFF이고 대체가 전산 또는 개발(dev_internal)일 때 「전산 노티」용 운영 전산 URL. 대체=개발이어도 전산은 운영 전산 대상(전산 노티와 동일 경로). */
-function resolveJpayRelayOffInternalProcessedUrl(merchant, kind, rof) {
-  const r = normalizeMerchantRelayOffForwardTarget(rof);
-  if (r === 'internal') return resolveRelayOffInternalUrl(merchant, kind);
-  if (r === 'dev_internal') {
-    if (merchant && merchant.internalTargetId) {
-      const u = findInternalTargetUrl(merchant.internalTargetId, kind);
-      if (u) return u;
-    }
-    return INTERNAL_NOTI_URL ? String(INTERNAL_NOTI_URL).trim() : null;
-  }
-  return null;
 }
 
 /** RESULT: 브라우저 POST 시 302 리다이렉트 생략(가맹점으로 POST 릴레이만). PG 서버 노티·GET 리다이렉트 경로는 영향 없음. */
@@ -6625,6 +7057,23 @@ async function handleNotiRequest(routeKey, req, res) {
     console.log('[개발 전산 전송 스킵] 개발 노티 미사용(enableDevInternal 꺼짐), merchant=', merchantId);
   }
 
+  if (merchantShouldDeliverDealmaiWebhook(merchant)) {
+    try {
+      await dispatchDealmaiWebhookForNoti(merchant, {
+        body,
+        rawBody: rawBodyStr || undefined,
+        contentType: incomingContentType,
+        pgProvider: 'chillpay',
+        merchantId,
+        kind,
+        env,
+        routeKey,
+      });
+    } catch (err) {
+      console.error('[DEALMAI 웹훅 전송 실패]', err.message);
+    }
+  }
+
   const shouldRedirectResultBrowser =
     kind === 'result' &&
     (merchantForcesResultBrowserRedirect(merchant) || isLikelyBrowserResultReturn(req)) &&
@@ -6774,8 +7223,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   const enableInternalChecked = merchant.enableInternal !== false;
   const enableDevInternalChecked = merchant.enableDevInternal === true;
   const rofJpay = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
-  const jpayRelayOffUsesProcessedInternal =
-    !enableRelay && (rofJpay === 'internal' || rofJpay === 'dev_internal');
+  const jpayRelayPack = { body, contentType: ctForRelay, rawBody: jpayRelayRaw };
 
   let relaySuccess = false;
   let relayFailReason = '';
@@ -6846,17 +7294,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   let internalTargetUrl = '';
   if (enableInternalChecked) {
     try {
-      let internalUrl = null;
-      if (jpayRelayOffUsesProcessedInternal) {
-        internalUrl = resolveJpayRelayOffInternalProcessedUrl(merchant, kind, rofJpay);
-      } else {
-        if (merchant.internalTargetId) {
-          internalUrl = findInternalTargetUrl(merchant.internalTargetId, kind);
-        }
-        if (!internalUrl && INTERNAL_NOTI_URL) {
-          internalUrl = INTERNAL_NOTI_URL;
-        }
-      }
+      const internalUrl = resolveJpayInternalNotiDeliveryUrl(merchant, enableRelay, kind, rofJpay);
       if (!internalUrl) {
         console.log('[JPAY 전산 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
         appendInternalLog({
@@ -6867,38 +7305,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
           payload: body,
           internalTargetUrl: '',
           internalDeliveryStatus: 'skip',
-          jpayRawRelay: !jpayRelayOffUsesProcessedInternal,
-          relayOffForwardInternal: jpayRelayOffUsesProcessedInternal,
-          pgProvider: 'jpay',
-          routeKey,
-          ...jpayInternalLogExtras(),
-        });
-      } else if (jpayRelayOffUsesProcessedInternal) {
-        const internalPayload = transformForInternal(body, merchant, { pgProvider: 'jpay' });
-        internalTargetUrl = internalUrl;
-        console.log(
-          '[JPAY 전산 전송] 릴레이 끔·대체 송부(전산/개발), 노티 환경설정 가공 후 운영 전산으로 POST, merchant=',
-          merchantId,
-          'url=',
-          internalUrl,
-        );
-        let internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 1 });
-        internalDeliverySuccess = internalRes.success;
-        if (!internalDeliverySuccess) {
-          await new Promise((r) => setTimeout(r, 2000));
-          internalRes = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 2 });
-          internalDeliverySuccess = internalRes.success;
-        }
-        appendInternalLog({
-          storedAt: new Date().toISOString(),
-          merchantId,
-          routeNo: merchant.routeNo || '',
-          internalTargetId: merchant.internalTargetId || '',
-          payload: internalPayload,
-          internalTargetUrl,
-          internalDeliveryStatus: internalDeliverySuccess ? 'ok' : 'fail',
-          jpayRawRelay: false,
-          relayOffForwardInternal: true,
+          jpayRawRelay: true,
           pgProvider: 'jpay',
           routeKey,
           ...jpayInternalLogExtras(),
@@ -6906,13 +7313,8 @@ async function handleJpayNotiRequest(routeKey, req, res) {
       } else {
         internalTargetUrl = internalUrl;
         console.log('[JPAY 전산 전송] 원문 POST, merchant=', merchantId, 'url=', internalUrl);
-        let internalRes = await relayToMerchant(internalUrl, body, { contentType: ctForRelay, rawBody: jpayRelayRaw });
-        internalDeliverySuccess = internalRes.status >= 200 && internalRes.status < 400;
-        if (!internalDeliverySuccess) {
-          await new Promise((r) => setTimeout(r, 2000));
-          internalRes = await relayToMerchant(internalUrl, body, { contentType: ctForRelay, rawBody: jpayRelayRaw });
-          internalDeliverySuccess = internalRes.status >= 200 && internalRes.status < 400;
-        }
+        const jpayIntRes = await relayJpayRawWithRetry(internalUrl, jpayRelayPack, null);
+        internalDeliverySuccess = jpayIntRes.ok;
         appendInternalLog({
           storedAt: new Date().toISOString(),
           merchantId,
@@ -6929,26 +7331,16 @@ async function handleJpayNotiRequest(routeKey, req, res) {
       }
     } catch (err) {
       console.error('[JPAY 전산 전송 실패]', err.message);
-      let failUrl = internalTargetUrl;
-      if (!failUrl && jpayRelayOffUsesProcessedInternal) failUrl = resolveJpayRelayOffInternalProcessedUrl(merchant, kind, rofJpay) || '';
-      if (!failUrl && merchant.internalTargetId) failUrl = findInternalTargetUrl(merchant.internalTargetId, kind) || '';
-      if (!failUrl && INTERNAL_NOTI_URL) failUrl = INTERNAL_NOTI_URL;
-      let failPayload = body;
-      try {
-        failPayload = jpayRelayOffUsesProcessedInternal
-          ? transformForInternal(body, merchant, { pgProvider: 'jpay' })
-          : body;
-      } catch (_) {}
+      let failUrl = internalTargetUrl || resolveJpayInternalNotiDeliveryUrl(merchant, enableRelay, kind, rofJpay) || '';
       appendInternalLog({
         storedAt: new Date().toISOString(),
         merchantId,
         routeNo: merchant.routeNo || '',
         internalTargetId: merchant.internalTargetId || '',
-        payload: failPayload,
+        payload: body,
         internalTargetUrl: failUrl || '',
         internalDeliveryStatus: 'fail',
-        jpayRawRelay: !jpayRelayOffUsesProcessedInternal,
-        relayOffForwardInternal: jpayRelayOffUsesProcessedInternal,
+        jpayRawRelay: true,
         pgProvider: 'jpay',
         routeKey,
         ...jpayInternalLogExtras(),
@@ -6973,13 +7365,8 @@ async function handleJpayNotiRequest(routeKey, req, res) {
       } else {
         devInternalTargetUrl = devUrl;
         console.log('[JPAY 개발 전산 전송] 원문 POST, merchant=', merchantId, 'url=', devUrl);
-        let devRes = await relayToMerchant(devUrl, body, { contentType: ctForRelay, rawBody: jpayRelayRaw });
-        devDeliverySuccess = devRes.status >= 200 && devRes.status < 400;
-        if (!devDeliverySuccess) {
-          await new Promise((r) => setTimeout(r, 2000));
-          devRes = await relayToMerchant(devUrl, body, { contentType: ctForRelay, rawBody: jpayRelayRaw });
-          devDeliverySuccess = devRes.status >= 200 && devRes.status < 400;
-        }
+        const jpayDevRes = await relayJpayRawWithRetry(devUrl, jpayRelayPack, null);
+        devDeliverySuccess = jpayDevRes.ok;
       }
       appendDevInternalLog({
         storedAt: new Date().toISOString(),
@@ -7018,6 +7405,23 @@ async function handleJpayNotiRequest(routeKey, req, res) {
     }
   } else {
     console.log('[JPAY 개발 전산 스킵] 개발 노티 미사용(enableDevInternal 꺼짐), merchant=', merchantId);
+  }
+
+  if (merchantShouldDeliverDealmaiWebhook(merchant)) {
+    try {
+      await dispatchDealmaiWebhookForNoti(merchant, {
+        body,
+        rawBody: rawBodyStr || undefined,
+        contentType: incomingContentType || ctForRelay,
+        pgProvider: 'jpay',
+        merchantId,
+        kind,
+        env: 'jpay',
+        routeKey,
+      });
+    } catch (err) {
+      console.error('[JPAY DEALMAI 웹훅 전송 실패]', err.message);
+    }
   }
 
   const shouldRedirectResultBrowserJpay =
@@ -7324,28 +7728,31 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
   if (can('merchants')) {
     nav.push(navGroup(t(locale, 'nav_merchant'), ['/admin/merchants'], link('/admin/merchants', t(locale, 'nav_merchant_settings'))));
   }
-  if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('traffic_analysis') || can('mail_logs')) {
-    const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/pg-notify-delivery', '/admin/mail-logs', '/admin/traffic'];
+  if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('dealmai_webhook_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('dealmai_webhook_result') || can('traffic_analysis') || can('mail_logs')) {
+    const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/dealmai-webhook-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/dealmai-webhook', '/admin/pg-notify-delivery', '/admin/mail-logs', '/admin/traffic'];
     const logItems = [];
     if (can('pg_result')) logItems.push(link('/admin/logs-result', t(locale, 'nav_pg_result')));
     if (can('internal_result')) logItems.push(link('/admin/internal-result', t(locale, 'nav_internal_result')));
     if (can('dev_result')) logItems.push(link('/admin/dev-internal-result', t(locale, 'nav_dev_result')));
+    if (can('dealmai_webhook_result')) logItems.push(link('/admin/dealmai-webhook-result', t(locale, 'nav_dealmai_webhook_result')));
     if (can('pg_logs')) logItems.push(link('/admin/logs', t(locale, 'nav_pg_noti_log')));
     if (can('internal_logs')) logItems.push(link('/admin/internal', t(locale, 'nav_internal_noti_log')));
     if (can('dev_internal_logs')) {
       logItems.push(link('/admin/dev-internal', t(locale, 'nav_dev_internal_noti_log')));
       logItems.push(link('/admin/pg-notify-delivery', t(locale, 'nav_pg_notify_delivery')));
     }
+    if (can('dealmai_webhook_logs')) logItems.push(link('/admin/dealmai-webhook', t(locale, 'nav_dealmai_webhook_log')));
     if (can('mail_logs')) logItems.push(link('/admin/mail-logs', t(locale, 'nav_mail_logs')));
     if (can('traffic_analysis')) logItems.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis')));
     nav.push(navGroup(t(locale, 'nav_logs'), logPaths, logItems.join('')));
   }
-  if (can('internal_targets') || can('internal_noti_settings') || can('dev_internal_noti_settings') || can('test_run')) {
-    const internalPaths = ['/admin/internal-targets', '/admin/internal-noti-settings', '/admin/dev-internal-noti-settings', '/admin/noti-analysis'];
+  if (can('internal_targets') || can('internal_noti_settings') || can('dev_internal_noti_settings') || can('dealmai_webhook_settings') || can('test_run')) {
+    const internalPaths = ['/admin/internal-targets', '/admin/internal-noti-settings', '/admin/dev-internal-noti-settings', '/admin/dealmai-webhook-settings', '/admin/noti-analysis'];
     const internalItems = [];
     if (can('internal_targets')) internalItems.push(link('/admin/internal-targets', t(locale, 'nav_internal_targets')));
     if (can('internal_noti_settings')) internalItems.push(link('/admin/internal-noti-settings', t(locale, 'nav_internal_noti_settings')));
     if (can('dev_internal_noti_settings')) internalItems.push(link('/admin/dev-internal-noti-settings', t(locale, 'nav_dev_internal_noti_settings')));
+    if (can('dealmai_webhook_settings')) internalItems.push(link('/admin/dealmai-webhook-settings', t(locale, 'nav_dealmai_webhook_settings')));
     if (can('test_run')) internalItems.push(link('/admin/noti-analysis', t(locale, 'nav_noti_analysis')));
     nav.push(navGroup(t(locale, 'nav_internal'), internalPaths, internalItems.join('')));
   }
@@ -8745,13 +9152,16 @@ const PAGE_KEY_TO_LABEL = {
   pg_logs: 'nav_pg_noti_log',
   internal_logs: 'nav_internal_noti_log',
   dev_internal_logs: 'nav_dev_internal_noti_log',
+  dealmai_webhook_logs: 'nav_dealmai_webhook_log',
   pg_result: 'nav_pg_result',
   internal_result: 'nav_internal_result',
   dev_result: 'nav_dev_result',
+  dealmai_webhook_result: 'nav_dealmai_webhook_result',
   traffic_analysis: 'nav_traffic_analysis',
   internal_targets: 'nav_internal_targets',
   internal_noti_settings: 'nav_internal_noti_settings',
   dev_internal_noti_settings: 'nav_dev_internal_noti_settings',
+  dealmai_webhook_settings: 'nav_dealmai_webhook_settings',
   test_config: 'nav_test_config',
   test_run: 'nav_test_run',
   test_history: 'nav_test_history',
@@ -9625,6 +10035,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       const relay = m.enableRelay === false ? 'N' : 'Y';
       const internal = m.enableInternal === false ? 'N' : 'Y';
       const devInternal = m.enableDevInternal === true ? 'Y' : 'N';
+      const dealmaiWebhook = m.enableDealmaiWebhook === true ? 'Y' : 'N';
       const internalTargetId = m.internalTargetId || '';
       const confirmDel = (t(locale, 'merchants_confirm_delete') || '').replace(/'/g, "\\'");
       const confirmDel2 = (t(locale, 'merchants_confirm_delete_second') || '').replace(/'/g, "\\'");
@@ -9650,6 +10061,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <td>${relay}</td>
         <td>${internal}</td>
         <td>${devInternal}</td>
+        <td>${dealmaiWebhook}</td>
         <td class="actions-cell">
           <div style="display:flex;flex-direction:column;gap:4px;align-items:center;">
             <button
@@ -9666,6 +10078,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
               data-enable-relay="${relay}"
               data-enable-internal="${internal}"
               data-enable-dev-internal="${devInternal}"
+              data-enable-dealmai-webhook="${dealmaiWebhook}"
+              data-dealmai-partner-code="${String(m.dealmaiPartnerCode || '').replace(/"/g, '&quot;')}"
               data-relay-off-forward="${
                 m.relayOffForwardTarget === 'internal'
                   ? 'internal'
@@ -9956,6 +10370,14 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           <input type="checkbox" name="enableDevInternal" />
           ${t(locale, 'merchants_check_enable_dev_internal')}
         </label>
+        <label>
+          <input type="checkbox" name="enableDealmaiWebhook" />
+          ${t(locale, 'merchants_check_enable_dealmai_webhook')}
+        </label>
+        <label>
+          ${t(locale, 'merchants_label_dealmai_partner')}
+          <input type="text" name="dealmaiPartnerCode" id="merchant-dealmai-partner" placeholder="AV1-JA" />
+        </label>
         <button type="submit">${t(locale, 'merchants_save')}</button>
       </form>
     </div>
@@ -9987,13 +10409,14 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             <th style="width:50px;">${t(locale, 'merchants_relay')}</th>
             <th style="width:50px;">${t(locale, 'merchants_internal')}</th>
             <th style="width:50px;">${t(locale, 'common_dev')}</th>
+            <th style="width:50px;">${t(locale, 'merchants_dealmai_webhook')}</th>
             <th class="actions-cell" style="width:80px;">${t(locale, 'members_manage')}</th>
           </tr>
         </thead>
         <tbody>
           ${
             rows ||
-            `<tr><td colspan="15" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
+            `<tr><td colspan="16" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
           }
         </tbody>
       </table>
@@ -10250,6 +10673,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var relayCheckbox = form.querySelector('input[name="enableRelay"]');
         var internalCheckbox = form.querySelector('input[name="enableInternal"]');
         var devInternalCheckbox = form.querySelector('input[name="enableDevInternal"]');
+        var dealmaiWebhookCheckbox = form.querySelector('input[name="enableDealmaiWebhook"]');
+        var dealmaiPartnerInput = form.querySelector('input[name="dealmaiPartnerCode"]');
 
         if (merchantIdInput) {
           merchantIdInput.value = button.dataset.merchantId || '';
@@ -10285,6 +10710,12 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         }
         if (devInternalCheckbox) {
           devInternalCheckbox.checked = (button.dataset.enableDevInternal || 'N') === 'Y';
+        }
+        if (dealmaiWebhookCheckbox) {
+          dealmaiWebhookCheckbox.checked = (button.dataset.enableDealmaiWebhook || 'N') === 'Y';
+        }
+        if (dealmaiPartnerInput) {
+          dealmaiPartnerInput.value = button.dataset.dealmaiPartnerCode || '';
         }
         var relayFormatSelect = form.querySelector('select[name="relayFormat"]');
         if (relayFormatSelect) relayFormatSelect.value = button.dataset.relayFormat || 'raw';
@@ -10455,6 +10886,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
     t(locale, 'merchants_relay'),
     t(locale, 'merchants_internal'),
     t(locale, 'common_dev'),
+    t(locale, 'merchants_dealmai_webhook'),
   ];
   const lines = ['\uFEFF' + header.map(escapeCsv).join(',')];
   for (const [id, m] of sortedEntries) {
@@ -10480,6 +10912,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
     const relay = m.enableRelay === false ? 'N' : 'Y';
     const internal = m.enableInternal === false ? 'N' : 'Y';
     const devInternal = m.enableDevInternal === true ? 'Y' : 'N';
+    const dealmaiWebhook = m.enableDealmaiWebhook === true ? 'Y' : 'N';
     lines.push(
       [
         id,
@@ -10498,6 +10931,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
         relay,
         internal,
         devInternal,
+        dealmaiWebhook,
       ].map(escapeCsv).join(','),
     );
   }
@@ -10523,6 +10957,8 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     enableRelay,
     enableInternal,
     enableDevInternal,
+    enableDealmaiWebhook,
+    dealmaiPartnerCode: rawDealmaiPartnerCode,
     relayFormat,
     relayEnrichmentMode: rawRelayEnrichmentMode,
     resultDeliveryMode: rawResultDeliveryMode,
@@ -10639,6 +11075,8 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     enableRelay: enableRelayOn,
     enableInternal: enableInternal === 'on',
     enableDevInternal: enableDevInternal === 'on',
+    enableDealmaiWebhook: enableDealmaiWebhook === 'on',
+    dealmaiPartnerCode: String(rawDealmaiPartnerCode || '').trim(),
     relayOffForwardTarget: relayOffForwardSaved,
     relayOffInternalCallbackUrl: relayOffInternalCbSaved,
     relayOffInternalResultUrl: relayOffInternalRsSaved,
@@ -15187,7 +15625,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
   );
 });
 
-// 취소 노티 재전송: 전산 = 노티 환경설정(transformForInternal), 개발 = 개발 환경설정(transformForDevInternal), 피지 = 원문 그대로(cancel-resend-pg). handleNotiRequest·sendVoidOrRefundNoti 와 동일한 전송 조건.
+// 취소 노티 재전송: ChillPay=환경설정 가공, JPAY=수신 원문 그대로, 피지=원문(cancel-resend-pg). handleNotiRequest·sendVoidOrRefundNoti 와 동일한 전송 조건.
 app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage('cr_cancel'), async (req, res) => {
   const locale = getLocale(req);
   const index = parseInt(req.body.index, 10);
@@ -15216,9 +15654,14 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
   const rofCr = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
   const useRelayOffDevCr = !enableRelayCr && rofCr === 'dev_internal';
 
+  const isJpayCr = getNotiLogPgAcquirer(log) === 'jpay';
+  const jpayRelayPackCr = isJpayCr ? jpayRawRelayFromNotiLog(log) : null;
+
   let internalUrl = null;
   if (deliverInternalCr) {
-    internalUrl = resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayCr, 'callback');
+    internalUrl = isJpayCr
+      ? resolveJpayInternalNotiDeliveryUrl(merchant, enableRelayCr, 'callback', rofCr)
+      : resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayCr, 'callback');
   }
   let devUrl = null;
   if (deliverDevCr) {
@@ -15230,15 +15673,21 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
     );
   }
 
-  const bodyForCancel = { ...body, PaymentStatus: 2 };
-  const internalPayload = transformForInternal(bodyForCancel, merchant);
-  const devPayload = transformForDevInternal(bodyForCancel, merchant);
+  const bodyForCancel = isJpayCr ? null : { ...body, PaymentStatus: 2 };
+  const internalPayload = isJpayCr ? jpayRelayPackCr.body : transformForInternal(bodyForCancel, merchant);
+  const devPayload = isJpayCr ? jpayRelayPackCr.body : transformForDevInternal(bodyForCancel, merchant);
+  const jpayCrLogExtras = isJpayCr ? { jpayRawRelay: true, pgProvider: 'jpay', ...jpayInternalLogExtrasFromNotiLog(log) } : {};
 
   let intOk = true;
   if (internalUrl) {
     try {
-      const result = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 1 });
-      intOk = result.success;
+      if (isJpayCr) {
+        const jpayRes = await relayJpayRawWithRetry(internalUrl, jpayRelayPackCr, null);
+        intOk = jpayRes.ok;
+      } else {
+        const result = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 1 });
+        intOk = result.success;
+      }
       appendInternalLog({
         storedAt: new Date().toISOString(),
         merchantId: log.merchantId,
@@ -15247,6 +15696,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
         payload: internalPayload,
         internalTargetUrl: internalUrl,
         internalDeliveryStatus: intOk ? 'ok' : 'fail',
+        ...jpayCrLogExtras,
       });
     } catch (e) {
       intOk = false;
@@ -15258,6 +15708,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
         payload: internalPayload,
         internalTargetUrl: internalUrl,
         internalDeliveryStatus: 'fail',
+        ...jpayCrLogExtras,
       });
     }
   } else if (deliverInternalCr) {
@@ -15269,14 +15720,21 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
       payload: internalPayload,
       internalTargetUrl: '',
       internalDeliveryStatus: 'skip',
+      ...jpayCrLogExtras,
     });
   }
 
   let devOk = true;
   if (devUrl) {
     try {
-      const devResult = await sendDevInternalHttpNotify(devUrl, devPayload);
-      devOk = devResult.success;
+      let devResult = null;
+      if (isJpayCr) {
+        const jpayDevRes = await relayJpayRawWithRetry(devUrl, jpayRelayPackCr, null);
+        devOk = jpayDevRes.ok;
+      } else {
+        devResult = await sendDevInternalHttpNotify(devUrl, devPayload);
+        devOk = devResult.success;
+      }
       appendDevInternalLog({
         storedAt: new Date().toISOString(),
         merchantId: log.merchantId,
@@ -15285,8 +15743,9 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
         payload: devPayload,
         internalTargetUrl: devUrl,
         internalDeliveryStatus: devOk ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP,
-        pgProvider: 'chillpay',
-        ...devInternalLogUpstreamExtras(devResult),
+        pgProvider: isJpayCr ? 'jpay' : 'chillpay',
+        ...jpayCrLogExtras,
+        ...(devResult ? devInternalLogUpstreamExtras(devResult) : {}),
       });
     } catch (e) {
       devOk = false;
@@ -15298,7 +15757,8 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
         payload: devPayload,
         internalTargetUrl: devUrl,
         internalDeliveryStatus: devUrl ? DEV_INTERNAL_DELIVER_SKIP : DEV_INTERNAL_DELIVER_FAIL,
-        pgProvider: 'chillpay',
+        pgProvider: isJpayCr ? 'jpay' : 'chillpay',
+        ...jpayCrLogExtras,
       });
     }
   } else if (deliverDevCr) {
@@ -15310,7 +15770,8 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
       payload: devPayload,
       internalTargetUrl: '',
       internalDeliveryStatus: DEV_INTERNAL_DELIVER_FAIL,
-      pgProvider: 'chillpay',
+      pgProvider: isJpayCr ? 'jpay' : 'chillpay',
+      ...jpayCrLogExtras,
     });
   }
 
@@ -15365,10 +15826,18 @@ app.post('/admin/cancel-refund/cancel-resend-pg', requireAuth, requirePage('cr_c
   if (isSuccessPaymentBody(bodyToSend)) {
     return res.redirect('/admin/cancel-refund/cancel?resendPg=fail&reasonPg=' + encodeURIComponent('결제 완료 노티는 취소 재전송할 수 없습니다.'));
   }
-  // 피지 재전송: 원문 그대로 전송(가공/transform 미적용). 취소 고정만 PaymentStatus=2 로 보정
-  bodyToSend = { ...bodyToSend, PaymentStatus: 2 };
+  const isJpayPgResend = getNotiLogPgAcquirer(log) === 'jpay';
+  let relayRes;
   try {
-    const relayRes = await relayToMerchant(targetUrl, bodyToSend, { contentType: 'application/json' });
+    if (isJpayPgResend) {
+      const relayPack = jpayRawRelayFromNotiLog(log);
+      const relayOpts = jpayRelayOptsFromMerchant(merchant, relayPack);
+      relayRes = await relayToMerchant(targetUrl, relayPack.body, relayOpts);
+    } else {
+      // ChillPay 피지 재전송: 취소 고정만 PaymentStatus=2 로 보정
+      const bodyToSendCp = { ...bodyToSend, PaymentStatus: 2 };
+      relayRes = await relayToMerchant(targetUrl, bodyToSendCp, { contentType: 'application/json' });
+    }
     const ok = relayRes.status >= 200 && relayRes.status < 300;
     if (ok) {
       if (NOTI_LOGS[index]) {
@@ -15581,10 +16050,11 @@ app.post('/admin/cancel-refund/noti-resend-internal', requireAuth, requirePage('
     return res.redirect(baseRedirect + '&resend=fail&reason=' + encodeURIComponent('해당 결제 건을 찾을 수 없음 (NOTI_LOGS)'));
   }
   const enableRelayResend = merchant.enableRelay !== false;
+  const rofResend = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
+  const isJpayResend = getNotiLogPgAcquirer(log) === 'jpay';
   let internalUrl = null;
-  if (resolveMerchantListPgAcquirer(merchant) === 'jpay') {
-    if (merchant.internalTargetId) internalUrl = findInternalTargetUrl(merchant.internalTargetId, 'callback');
-    if (!internalUrl && INTERNAL_NOTI_URL) internalUrl = INTERNAL_NOTI_URL;
+  if (isJpayResend) {
+    internalUrl = resolveJpayInternalNotiDeliveryUrl(merchant, enableRelayResend, 'callback', rofResend);
   } else {
     internalUrl = resolveChillpayInternalNotiDeliveryUrl(merchant, enableRelayResend, 'callback');
   }
@@ -15592,11 +16062,31 @@ app.post('/admin/cancel-refund/noti-resend-internal', requireAuth, requirePage('
     return res.redirect(baseRedirect + '&resend=fail&reason=' + encodeURIComponent('전산 URL 미설정'));
   }
   const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body || '{}'); } catch { return {}; } })() : {});
-  const payload = enrichPayloadForVoidRefundNoti(log, body, paymentStatus);
-  const internalPayload = transformForInternal(payload, merchant, {
-    pgProvider: getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay',
-  });
   try {
+    if (isJpayResend) {
+      const relayPack = jpayRawRelayFromNotiLog(log);
+      const jpayRes = await relayJpayRawWithRetry(internalUrl, relayPack, null);
+      appendInternalLog({
+        storedAt: new Date().toISOString(),
+        merchantId: log.merchantId,
+        routeNo: merchant.routeNo || '',
+        internalTargetId: merchant.internalTargetId || '',
+        payload: relayPack.body,
+        internalTargetUrl: internalUrl,
+        internalDeliveryStatus: jpayRes.ok ? 'ok' : 'fail',
+        jpayRawRelay: true,
+        pgProvider: 'jpay',
+        ...jpayInternalLogExtrasFromNotiLog(log),
+      });
+      return res.redirect(
+        baseRedirect +
+          '&resend=' +
+          (jpayRes.ok ? 'ok' : 'fail') +
+          (jpayRes.ok ? '' : '&reason=' + encodeURIComponent('HTTP ' + (jpayRes.res && jpayRes.res.status) + ' 또는 전산 응답 실패')),
+      );
+    }
+    const payload = enrichPayloadForVoidRefundNoti(log, body, paymentStatus);
+    const internalPayload = transformForInternal(payload, merchant, { pgProvider: 'chillpay' });
     const result = await sendToInternal(internalUrl, internalPayload, { icopayNotifyAttempt: 2 });
     appendInternalLog({
       storedAt: new Date().toISOString(),
@@ -18954,6 +19444,128 @@ app.post('/admin/internal-noti-settings', requireAuth, requirePage('internal_not
   return res.redirect('/admin/internal-noti-settings?pg=' + encodeURIComponent(pgSel));
 });
 
+app.get('/admin/dealmai-webhook-settings', requireAuth, requirePage('dealmai_webhook_settings'), (req, res) => {
+  const locale = getLocale(req);
+  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+  const adminUser = req.session.adminUser || '';
+  const nowDate = new Date();
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const cfg = loadDealmaiWebhookSettings();
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const saved = req.query.saved === '1' ? '<div class="alert alert-ok">' + esc(t(locale, 'dealmai_webhook_settings_saved')) + '</div>' : '';
+  const secretMeta =
+    cfg.secretGeneratedAt || cfg.secretGeneratedBy
+      ? '<p class="admin-page-desc">' +
+        esc(t(locale, 'dealmai_webhook_secret_meta')) +
+        ': ' +
+        esc(cfg.secretGeneratedAt || '') +
+        (cfg.secretGeneratedBy ? ' · ' + esc(cfg.secretGeneratedBy) : '') +
+        '</p>'
+      : '';
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+  <meta charset="UTF-8" />
+  <title>${esc(t(locale, 'nav_dealmai_webhook_settings'))}</title>
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}
+    body { font-family: system-ui, sans-serif; margin:0; background:#edf2f7; }
+    .layout { display:flex; min-height:100vh; }
+    .main { flex:1; padding:16px 24px; }
+    .card { background:#fff; padding:20px 24px; border-radius:10px; border:1px solid #e5e7eb; margin-bottom:16px; max-width:720px; }
+    label { display:block; margin:12px 0; font-size:14px; font-weight:600; color:#374151; }
+    input[type=text], input[type=url] { width:100%; padding:8px 10px; margin-top:6px; box-sizing:border-box; font-family:monospace; font-size:13px; }
+    .secret-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .secret-row input { flex:1; min-width:200px; }
+    button, .btn { padding:8px 14px; border-radius:6px; border:none; cursor:pointer; font-size:13px; }
+    .btn-primary { background:#2563eb; color:#fff; }
+    .btn-secondary { background:#e5e7eb; color:#374151; }
+    .alert-ok { background:#d1fae5; border:1px solid #6ee7b7; color:#065f46; padding:10px 12px; border-radius:8px; margin-bottom:12px; }
+    ol.flow { margin:8px 0 0 18px; font-size:13px; color:#4b5563; line-height:1.6; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    ${getAdminSidebar(locale, adminUser, req.session.member, '/admin/dealmai-webhook-settings', req)}
+    <main class="main">
+      ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, '/admin/dealmai-webhook-settings')}
+      <h1>${esc(t(locale, 'nav_dealmai_webhook_settings'))}</h1>
+      ${saved}
+      <div class="card">
+        <p class="admin-page-desc">${esc(t(locale, 'dealmai_webhook_settings_desc'))}</p>
+        <form method="post" action="/admin/dealmai-webhook-settings">
+          <label>${esc(t(locale, 'dealmai_webhook_label_url'))}
+            <input type="url" name="webhookUrl" value="${esc(cfg.webhookUrl)}" placeholder="https://dealmai.com/api/ontheline-webhook" />
+          </label>
+          <label>${esc(t(locale, 'dealmai_webhook_label_default_partner'))}
+            <input type="text" name="defaultPartnerCode" value="${esc(cfg.defaultPartnerCode)}" placeholder="AV1-JA" />
+          </label>
+          <label>${esc(t(locale, 'dealmai_webhook_label_secret'))}
+            <div class="secret-row">
+              <input type="text" name="webhookSecret" id="dealmai-secret" value="${esc(cfg.webhookSecret)}" autocomplete="off" />
+            </div>
+          </label>
+          ${secretMeta}
+          <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
+            <button type="submit" class="btn-primary">${esc(t(locale, 'dealmai_webhook_btn_save'))}</button>
+            <button type="submit" formaction="/admin/dealmai-webhook-settings/regenerate-secret" formmethod="post" class="btn-secondary" onclick="return confirm('${esc(t(locale, 'dealmai_webhook_regenerate_confirm')).replace(/'/g, "\\'")}');">${esc(t(locale, 'dealmai_webhook_btn_regenerate'))}</button>
+          </div>
+        </form>
+      </div>
+      <div class="card">
+        <h2 style="margin:0 0 8px;font-size:16px;">${esc(t(locale, 'dealmai_webhook_flow_title'))}</h2>
+        <ol class="flow">
+          <li>${esc(t(locale, 'dealmai_webhook_flow_1'))}</li>
+          <li>${esc(t(locale, 'dealmai_webhook_flow_2'))}</li>
+          <li>${esc(t(locale, 'dealmai_webhook_flow_3'))}</li>
+        </ol>
+        <p class="admin-page-desc" style="margin-top:12px;">${esc(t(locale, 'dealmai_webhook_merchant_hint'))}</p>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`);
+});
+
+app.post('/admin/dealmai-webhook-settings/regenerate-secret', requireAuth, requirePage('dealmai_webhook_settings'), (req, res) => {
+  const cfg = loadDealmaiWebhookSettings();
+  cfg.webhookSecret = generateDealmaiWebhookSecret();
+  cfg.secretGeneratedAt = new Date().toISOString();
+  cfg.secretGeneratedBy = req.session.adminUser || 'unknown';
+  saveDealmaiWebhookSettings(cfg);
+  if (typeof appendConfigChangeLog === 'function') {
+    appendConfigChangeLog({
+      action: 'dealmai_webhook_settings',
+      detail: 'DEALMAI 웹훅 Secret 재생성',
+      actor: req.session.adminUser || 'unknown',
+      clientIp: (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '',
+    });
+  }
+  return res.redirect('/admin/dealmai-webhook-settings?saved=1');
+});
+
+app.post('/admin/dealmai-webhook-settings', requireAuth, requirePage('dealmai_webhook_settings'), (req, res) => {
+  const prev = loadDealmaiWebhookSettings();
+  const webhookUrl = String(req.body.webhookUrl || '').trim();
+  const webhookSecret = String(req.body.webhookSecret || '').trim();
+  const defaultPartnerCode = String(req.body.defaultPartnerCode || '').trim();
+  saveDealmaiWebhookSettings({
+    ...prev,
+    webhookUrl,
+    webhookSecret,
+    defaultPartnerCode,
+  });
+  if (typeof appendConfigChangeLog === 'function') {
+    appendConfigChangeLog({
+      action: 'dealmai_webhook_settings',
+      detail: 'DEALMAI 웹훅 URL/Secret 저장',
+      actor: req.session.adminUser || 'unknown',
+      clientIp: (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '',
+      payload: { webhookUrl },
+    });
+  }
+  return res.redirect('/admin/dealmai-webhook-settings?saved=1');
+});
+
 app.post('/admin/internal-targets', requireAuth, requirePage('internal_targets'), (req, res) => {
   const locale = getLocale(req);
   const { id: rawId, name, callbackUrl, resultUrl, devCallbackUrl, devResultUrl, pgProvider, linkedMid: rawLinkedMid } = req.body;
@@ -21211,7 +21823,15 @@ app.post('/admin/internal/resend', requireAuth, requirePageAny(['internal_logs',
     return res.redirect(base + '?err=no_target' + srcQ);
   }
   const resendKind = (req.body.resendKind || '').toString().toLowerCase() || (isCancelNotiBody(log.payload || {}) ? 'cancel' : 'payment');
+  const isJpayInternalResend = String(log.pgProvider || '').toLowerCase() === 'jpay';
   try {
+    if (isJpayInternalResend) {
+      const relayPack = jpayRawRelayFromInternalLog(log);
+      const jpayRes = await relayJpayRawWithRetry(url, relayPack, null);
+      if (jpayRes.ok) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+      const reason = jpayRes.res && jpayRes.res.status ? 'HTTP ' + jpayRes.res.status : '';
+      return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+    }
     const result = await sendToInternal(url, log.payload, { icopayNotifyAttempt: 2 });
     if (result.success) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
     const reason = result.status ? 'HTTP ' + result.status : (result.error || '');
@@ -21653,7 +22273,16 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
     return res.redirect(base + '?err=no_target' + srcQ);
   }
   const resendKind = (req.body.resendKind || '').toString().toLowerCase() || (isCancelNotiBody(log.payload || {}) ? 'cancel' : 'payment');
+  const isJpayDevResend = String(log.pgProvider || '').toLowerCase() === 'jpay' || log.jpayRawRelay === true;
   try {
+    if (isJpayDevResend) {
+      const relayPack = jpayRawRelayFromInternalLog(log);
+      const jpayRes = await relayJpayRawWithRetry(url, relayPack, null);
+      if (jpayRes.ok) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+      const reason =
+        (jpayRes.res && jpayRes.res.status ? 'HTTP ' + jpayRes.res.status : '') || 'relay failed';
+      return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+    }
     const result = await sendDevInternalHttpNotify(url, log.payload, { icopayNotifyHttpAttemptBase: 1 });
     if (result.success) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
     const reason =
@@ -21662,6 +22291,214 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
     return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
   } catch (err) {
     return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(err.message || String(err)) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+  }
+});
+
+app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs'), (req, res) => {
+  const locale = getLocale(req);
+  const q = req.query || {};
+  const logPg = parseTxSourceFromReq(req);
+  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+  const adminUser = req.session.adminUser || '';
+  const nowDate = new Date();
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const reversed = [...DEALMAI_WEBHOOK_LOGS].slice().reverse();
+  const withIndex = reversed.map((log, i) => ({ log, realIndex: DEALMAI_WEBHOOK_LOGS.length - 1 - i }));
+  let filtered = withIndex.filter(({ log }) => {
+    const pg = String(log.pgProvider || 'chillpay').toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
+    return pg === logPg;
+  });
+  const dr = parseLogDateRangeFromQuery(q);
+  if (dr.startDate || dr.endDate) {
+    filtered = filtered.filter(({ log }) => {
+      const ymd = getBangkokYmdFromIso(log.storedAtIso || log.storedAt);
+      if (!ymd) return false;
+      if (dr.startDate && ymd < dr.startDate) return false;
+      if (dr.endDate && ymd > dr.endDate) return false;
+      return true;
+    });
+  }
+  const hubHtml = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dealmai-webhook', q, logPg, { showEnv: false });
+  const perPage = parseAllowedPerPage(q.perPage);
+  const totalCount = filtered.length;
+  const pageNum = Math.max(1, parseInt(q.page, 10) || 1);
+  const totalPages = Math.max(1, Math.ceil(totalCount / perPage));
+  const pageSlice = filtered.slice((pageNum - 1) * perPage, pageNum * perPage);
+  const logPagerFooter = buildCrListPagerFooterHtml(locale, t, {
+    totalCount,
+    totalPages,
+    pageNum,
+    perPage,
+    hrefFor: (o) => '/admin/dealmai-webhook?' + buildQueryString({ ...(q || {}), ...o }),
+  });
+  const rows = pageSlice
+    .map(({ log, realIndex }) => {
+      const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+      const payload = log.payload || {};
+      const event = payload.event || '—';
+      const txId =
+        payload.transaction_id
+          ? String(payload.transaction_id)
+          : payload.body && (payload.body.TransactionId || payload.body.transaction_id || payload.body.orderid)
+          ? String(payload.body.TransactionId || payload.body.transaction_id || payload.body.orderid)
+          : log.pgSource && (log.pgSource.TransactionId || log.pgSource.transaction_id || log.pgSource.orderid)
+          ? String(log.pgSource.TransactionId || log.pgSource.transaction_id || log.pgSource.orderid)
+          : '—';
+      const statusLabel = dealmaiWebhookDeliveryLabel(locale, log.webhookDeliveryStatus);
+      const resendBtn =
+        log.webhookTargetUrl && (log.payload || log.pgSource)
+          ? `<form method="post" action="/admin/dealmai-webhook/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="source" value="${logPg === 'jpay' ? 'jpay' : 'chillpay'}" /><button type="submit" class="btn-resend">${esc(t(locale, 'pg_logs_btn_resend'))}</button></form>`
+          : '—';
+      return `<tr>
+        <td>${esc(dt.date)}</td>
+        <td>${esc(dt.timeTh)}</td>
+        <td>${esc(event)}</td>
+        <td>${esc(log.merchantId || '')}</td>
+        <td>${esc(txId)}</td>
+        <td>${esc(statusLabel)}</td>
+        <td>${log.webhookHttpStatus != null ? esc(String(log.webhookHttpStatus)) : '—'}</td>
+        <td style="font-size:11px;word-break:break-all;text-align:left;">${esc((log.webhookTargetUrl || '').slice(0, 80))}</td>
+        <td>${resendBtn}</td>
+      </tr>`;
+    })
+    .join('');
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}">
+<head><meta charset="UTF-8" /><title>${esc(t(locale, 'nav_dealmai_webhook_log'))}</title>
+<style>${ADMIN_PAGE_DESC_BOX_CSS} body{font-family:system-ui,sans-serif;margin:0;background:#edf2f7;} .layout{display:flex;min-height:100vh;} .main{flex:1;padding:16px 24px;} table{border-collapse:collapse;width:100%;background:#fff;} th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;text-align:center;} th{background:#e5f0ff;} .btn-resend{padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;}</style>
+</head>
+<body><div class="layout">
+${getAdminSidebar(locale, adminUser, req.session.member, '/admin/dealmai-webhook', req)}
+<main class="main">
+${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, '/admin/dealmai-webhook')}
+<div class="cr-title-hub-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:14px;"><h1>${esc(t(locale, 'nav_dealmai_webhook_log'))} (${totalCount})</h1>${hubHtml}</div>
+<table><thead><tr>
+<th>${esc(t(locale, 'pg_logs_th_received_date'))}</th><th>${esc(t(locale, 'pg_logs_th_received_time'))}</th><th>Event</th><th>${esc(t(locale, 'cr_th_merchant'))}</th><th>TransactionId</th><th>${esc(t(locale, 'dev_noti_th_delivery'))}</th><th>HTTP</th><th>URL</th><th>${esc(t(locale, 'pg_logs_th_resend'))}</th>
+</tr></thead><tbody>${rows || '<tr><td colspan="9" style="text-align:center;color:#777;">' + esc(t(locale, 'internal_logs_empty')) + '</td></tr>'}</tbody></table>
+${logPagerFooter}
+</main></div></body></html>`);
+});
+
+app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webhook_result'), (req, res) => {
+  const locale = getLocale(req);
+  const q = req.query || {};
+  const logPg = parseTxSourceFromReq(req);
+  const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+  const adminUser = req.session.adminUser || '';
+  const nowDate = new Date();
+  const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const resendMsg =
+    q.resend === 'ok'
+      ? '<div class="alert alert-ok" style="margin-bottom:12px;padding:10px;background:#d1fae5;border-radius:8px;">' + esc(t(locale, 'pg_logs_resend_pay_ok')) + '</div>'
+      : q.resend === 'fail'
+      ? '<div class="alert alert-fail" style="margin-bottom:12px;padding:10px;background:#fee2e2;border-radius:8px;">' + esc(t(locale, 'pg_logs_resend_pay_fail')) + (q.reason ? ': ' + esc(q.reason) : '') + '</div>'
+      : '';
+  let logs = [...DEALMAI_WEBHOOK_LOGS].reverse().filter((log) => {
+    const pg = String(log.pgProvider || 'chillpay').toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
+    return pg === logPg;
+  });
+  const dr = parseLogDateRangeFromQuery(q);
+  if (dr.startDate || dr.endDate) {
+    logs = logs.filter((log) => {
+      const ymd = getBangkokYmdFromIso(log.storedAtIso || log.storedAt);
+      if (!ymd) return false;
+      if (dr.startDate && ymd < dr.startDate) return false;
+      if (dr.endDate && ymd > dr.endDate) return false;
+      return true;
+    });
+  }
+  const hubHtml = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dealmai-webhook-result', q, logPg, { showEnv: false });
+  const okN = logs.filter((l) => String(l.webhookDeliveryStatus || '').toLowerCase() === 'ok').length;
+  const failN = logs.filter((l) => String(l.webhookDeliveryStatus || '').toLowerCase() === 'fail').length;
+  const skipN = logs.filter((l) => String(l.webhookDeliveryStatus || '').toLowerCase() === 'skip').length;
+  const rows = logs.slice(0, 100).map((log) => {
+    const realIndex = DEALMAI_WEBHOOK_LOGS.indexOf(log);
+    const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+    const payload = log.payload || {};
+    const event = payload.event || '—';
+    const txId =
+      payload.transaction_id
+        ? String(payload.transaction_id)
+        : payload.body && (payload.body.TransactionId || payload.body.transaction_id || payload.body.orderid)
+        ? String(payload.body.TransactionId || payload.body.transaction_id || payload.body.orderid)
+        : log.pgSource && (log.pgSource.TransactionId || log.pgSource.transaction_id || log.pgSource.orderid)
+        ? String(log.pgSource.TransactionId || log.pgSource.transaction_id || log.pgSource.orderid)
+        : '—';
+    const statusLabel = dealmaiWebhookDeliveryLabel(locale, log.webhookDeliveryStatus);
+    const resendBtn =
+      log.webhookTargetUrl && (log.payload || log.pgSource)
+        ? `<form method="post" action="/admin/dealmai-webhook/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="result" /><input type="hidden" name="source" value="${logPg === 'jpay' ? 'jpay' : 'chillpay'}" /><button type="submit" class="btn-resend">${esc(t(locale, 'pg_logs_btn_resend'))}</button></form>`
+        : '—';
+    return `<tr><td>${esc(dt.date)}</td><td>${esc(dt.timeTh)}</td><td>${esc(event)}</td><td>${esc(log.merchantId || '')}</td><td>${esc(txId)}</td><td>${esc(statusLabel)}</td><td>${log.webhookHttpStatus != null ? esc(String(log.webhookHttpStatus)) : '—'}</td><td>${resendBtn}</td></tr>`;
+  }).join('');
+  res.send(`<!DOCTYPE html>
+<html lang="${locale}"><head><meta charset="UTF-8" /><title>${esc(t(locale, 'nav_dealmai_webhook_result'))}</title>
+<style>${ADMIN_PAGE_DESC_BOX_CSS} body{font-family:system-ui,sans-serif;margin:0;background:#edf2f7;} .layout{display:flex;min-height:100vh;} .main{flex:1;padding:16px 24px;} table{border-collapse:collapse;width:100%;background:#fff;} th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;text-align:center;} th{background:#e5f0ff;} .summary{display:flex;gap:16px;margin-bottom:12px;font-size:14px;} .btn-resend{padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;}</style>
+</head><body><div class="layout">
+${getAdminSidebar(locale, adminUser, req.session.member, '/admin/dealmai-webhook-result', req)}
+<main class="main">
+${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, '/admin/dealmai-webhook-result')}
+${resendMsg}
+<div class="cr-title-hub-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:14px;"><h1>${esc(t(locale, 'nav_dealmai_webhook_result'))}</h1>${hubHtml}</div>
+<div class="summary"><span>OK: ${okN}</span><span>FAIL: ${failN}</span><span>SKIP: ${skipN}</span></div>
+<table><thead><tr><th>${esc(t(locale, 'pg_logs_th_received_date'))}</th><th>${esc(t(locale, 'pg_logs_th_received_time'))}</th><th>Event</th><th>${esc(t(locale, 'cr_th_merchant'))}</th><th>TransactionId</th><th>${esc(t(locale, 'dev_noti_th_delivery'))}</th><th>HTTP</th><th>${esc(t(locale, 'pg_logs_th_resend'))}</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="8" style="text-align:center;color:#777;">' + esc(t(locale, 'cr_no_data')) + '</td></tr>'}</tbody></table>
+</main></div></body></html>`);
+});
+
+app.post('/admin/dealmai-webhook/resend', requireAuth, requirePageAny(['dealmai_webhook_logs', 'dealmai_webhook_result']), async (req, res) => {
+  const returnTo = (req.body.returnTo || '').trim();
+  const base = returnTo === 'result' ? '/admin/dealmai-webhook-result' : '/admin/dealmai-webhook';
+  const srcQ = (req.body.source || '').toString().toLowerCase() === 'jpay' ? '&source=jpay' : '';
+  const index = parseInt(req.body.index, 10);
+  if (Number.isNaN(index) || index < 0 || index >= DEALMAI_WEBHOOK_LOGS.length) {
+    return res.redirect(base + '?err=invalid' + srcQ);
+  }
+  const log = DEALMAI_WEBHOOK_LOGS[index];
+  const url = log.webhookTargetUrl || loadDealmaiWebhookSettings().webhookUrl;
+  if (!url || (!log.payload && !log.pgSource)) {
+    return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent('no_target') + srcQ);
+  }
+  try {
+    const cfg = loadDealmaiWebhookSettings();
+    let outbound = log.payload;
+    if (!outbound || !outbound.transaction_id || !outbound.partner) {
+      const merchant = MERCHANTS.get(log.merchantId || '') || null;
+      const built = buildDealmaiWebhookPayload(merchant, {
+        body: log.pgSource || log.payload && log.payload.body || log.payload,
+        pgProvider: log.pgProvider === 'jpay' ? 'jpay' : 'chillpay',
+        kind: log.kind || 'callback',
+      });
+      outbound = built.outbound;
+    }
+    const jsonBody = JSON.stringify(outbound);
+    const signature = signDealmaiWebhookBody(cfg.webhookSecret, jsonBody);
+    const headers = { 'Content-Type': 'application/json', 'User-Agent': 'ICOPAY-Noti-Middleware/1.0' };
+    if (signature) headers['X-OnTheLine-Signature'] = 'sha256=' + signature;
+    let resHttp = await axios.post(url, jsonBody, { headers, timeout: RELAY_TIMEOUT_MS, validateStatus: () => true });
+    let ok = resHttp.status >= 200 && resHttp.status < 400;
+    if (!ok) {
+      await new Promise((r) => setTimeout(r, 2000));
+      resHttp = await axios.post(url, jsonBody, { headers, timeout: RELAY_TIMEOUT_MS, validateStatus: () => true });
+      ok = resHttp.status >= 200 && resHttp.status < 400;
+    }
+    appendDealmaiWebhookLog({
+      merchantId: log.merchantId || '',
+      routeNo: log.routeNo || '',
+      payload: outbound,
+      pgSource: log.pgSource,
+      webhookTargetUrl: url,
+      webhookDeliveryStatus: ok ? 'ok' : 'fail',
+      webhookHttpStatus: resHttp.status,
+      pgProvider: log.pgProvider || 'chillpay',
+      kind: log.kind || 'callback',
+    });
+    if (ok) return res.redirect(base + '?resend=ok' + srcQ);
+    return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent('HTTP ' + resHttp.status) + srcQ);
+  } catch (err) {
+    return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(err.message || String(err)) + srcQ);
   }
 });
 
