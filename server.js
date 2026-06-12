@@ -168,6 +168,25 @@ const ADMIN_LAYOUT_SHELL_CSS = `
     .topbar-logout:hover { background:#e0f2fe; color:#1e40af; }
     .sidebar-lang a { color:#93c5fd; text-decoration:none; margin:0 2px; font-weight:600; }
     .sidebar-lang a:hover { color:#dbeafe; text-decoration:underline; }
+    .hub-nav-links { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; margin-top:8px; width:100%; }
+    .hub-nav-link { padding:4px 10px; border-radius:6px; text-decoration:none; font-size:12px; font-weight:600; background:#fff; color:#374151; border:1px solid #d1d5db; white-space:nowrap; }
+    .hub-nav-link:hover { background:#f1f5f9; color:#1e293b; }
+    .hub-nav-link--active { background:#2563eb; color:#fff; border-color:#1d4ed8; font-weight:700; }
+    .hub-nav-hello-row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; width:100%; }
+    .btn-hub-nav-hello { padding:4px 12px; font-size:12px; font-weight:700; border-radius:6px; border:1px solid #94a3b8; background:#f8fafc; color:#334155; cursor:pointer; }
+    .btn-hub-nav-hello:hover { background:#e2e8f0; }
+    .btn-hub-nav-hello--restore { background:#fef3c7; border-color:#f59e0b; color:#92400e; }
+    .hub-nav-guide { margin-top:8px; padding:10px 12px; border:1px solid #e2e8f0; border-radius:8px; background:#f8fafc; width:100%; box-sizing:border-box; }
+    .hub-nav-guide-head { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; margin-bottom:8px; }
+    .hub-nav-guide-title { font-size:12px; font-weight:800; color:#1e293b; letter-spacing:0.04em; }
+    .hub-nav-guide-vbar { color:#94a3b8; font-weight:500; }
+    .hub-nav-guide-actions { display:flex; flex-wrap:wrap; gap:6px; }
+    .hub-nav-guide-actions button { padding:3px 10px; font-size:11px; border-radius:5px; cursor:pointer; border:1px solid #cbd5e1; background:#fff; color:#475569; }
+    .hub-nav-guide-actions button.hub-nav-guide-save { background:#2563eb; color:#fff; border-color:#1d4ed8; }
+    .hub-nav-guide-list { display:flex; flex-wrap:wrap; gap:6px 12px; }
+    .hub-nav-guide-item { font-size:12px; color:#374151; display:inline-flex; align-items:center; gap:4px; }
+    .hub-nav-guide-item--off { opacity:0.55; }
+    .cr-hub-toolbar--inline .hub-nav-links, .cr-hub-toolbar--inline .hub-nav-hello-row, .cr-hub-toolbar--inline .hub-nav-guide { margin-top:6px; }
 `;
 
 /** multipart/form-data (파일 필드 제외, 텍스트 필드만) */
@@ -420,6 +439,7 @@ const PAGE_KEYS = [
   'cr_force_refund',
   'cr_noti',
   'cr_void_deleted',
+  'cr_jpay_followup',
   'mail_logs',
   'advanced_system_monitor',
 ];
@@ -454,6 +474,7 @@ const PAGE_KEY_TO_DEFAULT_URL = {
   cr_force_refund: '/admin/cancel-refund/force-refund',
   cr_noti: '/admin/cancel-refund/noti',
   cr_void_deleted: '/admin/cancel-refund/void-deleted-list',
+  cr_jpay_followup: '/admin/cancel-refund/jpay-followup',
   mail_logs: '/admin/mail-logs',
   advanced_system_monitor: '/admin/system-monitor',
 };
@@ -1278,6 +1299,25 @@ function resolveRelayOffDevUrl(merchant, kind) {
   const override = String(merchant[key] || '').trim();
   if (override) return override;
   return resolveMerchantDevInternalUrl(merchant, kind);
+}
+
+/** 릴레이 OFF + 대체=개발 + 「개발노티 전용사용」: 대체 송부 Dev URL만 서버·브라우저(JPAY)에 사용 */
+function merchantRelayOffDevDedicatedUse(merchant) {
+  return !!(merchant && merchant.relayOffDevDedicatedUse === true);
+}
+
+/** JPAY Result 브라우저 복귀 URL. 전용사용 시 대체 Dev Result, 아니면 가맹점 resultUrl */
+function resolveJpayResultBrowserForwardUrl(merchant, enableRelay) {
+  if (!merchant || typeof merchant !== 'object') return '';
+  if (enableRelay !== false) {
+    return String(merchant.resultUrl || '').trim();
+  }
+  const rof = normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget);
+  if (rof === 'dev_internal' && merchantRelayOffDevDedicatedUse(merchant)) {
+    const u = resolveRelayOffDevUrl(merchant, 'result');
+    if (u) return String(u).trim();
+  }
+  return String(merchant.resultUrl || '').trim();
 }
 
 /**
@@ -2964,6 +3004,20 @@ function jpayRawRelayFromNotiLog(log) {
   return { body, contentType, rawBody };
 }
 
+/** JPAY 수동 무효·환불(후속관리): 결제 성공 원문을 취소/환불 노티 형태로 보강. rawBody는 필드 변경 시 무시. */
+function buildJpayManualVoidRefundRelayPack(log, type) {
+  const base = jpayRawRelayFromNotiLog(log);
+  const body = { ...base.body };
+  const isVoid = type === 'void';
+  const failRc = isVoid ? '02' : '09';
+  if (body.returncode === '00' || body.returncode === '0' || body.returncode === 0) body.returncode = failRc;
+  if (body.returnCode === '00' || body.returnCode === '0' || body.returnCode === 0) body.returnCode = failRc;
+  if (body.trade_state != null && String(body.trade_state).trim() !== '') body.trade_state = 'FAIL';
+  if (body.tradeState != null && String(body.tradeState).trim() !== '') body.tradeState = 'FAIL';
+  body._middleware_manualFollowup = isVoid ? 'void' : 'refund';
+  return { body, contentType: base.contentType, rawBody: undefined };
+}
+
 /** JPAY: 전산/개발 로그에서 재전송용 relayPack (internal log에는 rawBody 전체 미저장) */
 function jpayRawRelayFromInternalLog(log) {
   const payload = (log && log.payload) || {};
@@ -3338,6 +3392,56 @@ function dealmaiWebhookDeliveryLabel(locale, status) {
   if (s === 'skip') return t(locale, 'dealmai_webhook_deliver_skip');
   if (s === 'fail') return t(locale, 'dealmai_webhook_deliver_fail');
   return status || '—';
+}
+
+function pgNotiLogWebhookPartnerCode(log, merchant) {
+  const fromLog = String((log && log.dealmaiPartnerCode) || '').trim();
+  if (fromLog) return fromLog;
+  return merchant ? merchantDealmaiPartnerCell(merchant) : '';
+}
+
+/** JPAY PG 노티 로그·목록: 웹훅 송부 상태 + Partner 코드 표시 */
+function pgNotiLogWebhookDisplayText(locale, log, merchantOptional) {
+  const merchant =
+    merchantOptional || (log && log.merchantId ? MERCHANTS.get(log.merchantId) : null);
+  const statusRaw = String((log && log.webhookDeliveryStatus) || '').trim().toLowerCase();
+  const partner = pgNotiLogWebhookPartnerCode(log, merchant);
+  if (statusRaw) {
+    const label = dealmaiWebhookDeliveryLabel(locale, statusRaw);
+    return partner ? label + ' · ' + partner : label;
+  }
+  if (merchant && !merchantShouldDeliverDealmaiWebhook(merchant)) {
+    return dealmaiWebhookDeliveryLabel(locale, 'skip');
+  }
+  return '—';
+}
+
+function pgNotiLogWebhookRowClass(log) {
+  const s = String((log && log.webhookDeliveryStatus) || '').toLowerCase();
+  if (s === 'ok') return 'status-ok';
+  if (s === 'fail') return 'status-fail';
+  return '';
+}
+
+/** PG 노티 로그에 DEALMAI 웹훅 송부 결과를 반영(동일 거래 dedupe 키로 최신 행 갱신) */
+function mergeDealmaiWebhookIntoPgNotiLog(baseEntry, merchant, whResult) {
+  if (!baseEntry || typeof baseEntry !== 'object') return;
+  const partner = merchant ? merchantDealmaiPartnerCell(merchant) : '';
+  let webhookDeliveryStatus = 'skip';
+  if (merchant && merchantShouldDeliverDealmaiWebhook(merchant)) {
+    if (whResult && whResult.skipped) webhookDeliveryStatus = 'skip';
+    else webhookDeliveryStatus = whResult && whResult.ok ? 'ok' : 'fail';
+  }
+  const patch = {
+    webhookDeliveryStatus,
+    dealmaiPartnerCode: partner,
+  };
+  if (whResult && whResult.status != null) patch.webhookHttpStatus = whResult.status;
+  appendPgNotiLog({
+    ...baseEntry,
+    ...patch,
+    receivedAtIso: new Date().toISOString(),
+  });
 }
 
 /**
@@ -5446,7 +5550,11 @@ async function sendVoidOrRefundNoti(log, type, mode) {
   }
   const paymentStatus = type === 'refund' ? '9' : '2';
   const isJpayVr = pgProv === 'jpay';
-  const jpayRelayPack = isJpayVr ? jpayRawRelayFromNotiLog(log) : null;
+  const jpayRelayPack = isJpayVr
+    ? (mode === 'manual' && (type === 'void' || type === 'refund')
+        ? buildJpayManualVoidRefundRelayPack(log, type)
+        : jpayRawRelayFromNotiLog(log))
+    : null;
   const payload = isJpayVr ? jpayRelayPack.body : enrichPayloadForVoidRefundNoti(log, log.body, paymentStatus);
   console.log(
     '[무효/환불 노티 전송] type=',
@@ -7309,7 +7417,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   const reqAccept = (req.get && req.get('Accept')) || (req.headers && req.headers.accept) || '';
   const reqUserAgent = (req.get && req.get('User-Agent')) || (req.headers && req.headers['user-agent']) || '';
   const formatUsed = enableRelay && relaySuccess ? relayFormat : undefined;
-  appendPgNotiLog({
+  const pgLogEntry = {
     routeKey,
     merchantId,
     kind,
@@ -7328,7 +7436,8 @@ async function handleJpayNotiRequest(routeKey, req, res) {
     pgProvider: 'jpay',
     jpayMid: jpayMidResolved,
     jpayRouteToken: jpayPathToken || '',
-  });
+  };
+  appendPgNotiLog(pgLogEntry);
 
   let internalDeliverySuccess = false;
   let internalTargetUrl = '';
@@ -7447,9 +7556,10 @@ async function handleJpayNotiRequest(routeKey, req, res) {
     console.log('[JPAY 개발 전산 스킵] 개발 노티 미사용(enableDevInternal 꺼짐), merchant=', merchantId);
   }
 
+  let jpayWebhookResult = { skipped: true };
   if (merchantShouldDeliverDealmaiWebhook(merchant)) {
     try {
-      await dispatchDealmaiWebhookForNoti(merchant, {
+      jpayWebhookResult = await dispatchDealmaiWebhookForNoti(merchant, {
         body,
         rawBody: rawBodyStr || undefined,
         contentType: incomingContentType || ctForRelay,
@@ -7461,8 +7571,10 @@ async function handleJpayNotiRequest(routeKey, req, res) {
       });
     } catch (err) {
       console.error('[JPAY DEALMAI 웹훅 전송 실패]', err.message);
+      jpayWebhookResult = { ok: false, skipped: false };
     }
   }
+  mergeDealmaiWebhookIntoPgNotiLog(pgLogEntry, merchant, jpayWebhookResult);
 
   const shouldRedirectResultBrowserJpay =
     kind === 'result' &&
@@ -7471,7 +7583,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   if (shouldRedirectResultBrowserJpay) {
     const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
     const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
-    let redirectTo = targetUrl;
+    let redirectTo = resolveJpayResultBrowserForwardUrl(merchant, enableRelay) || targetUrl;
     if (redirectTo && isOurTestReturnUrl(redirectTo, reqHost)) {
       redirectTo = baseUrl + '/noti/test-result' + (redirectTo.includes('?') ? redirectTo.slice(redirectTo.indexOf('?')) : '');
     }
@@ -7594,7 +7706,9 @@ function sendJpayBrowserResultRedirect(req, res, jpayRouteKey) {
   const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
   let targetUrl = null;
   if (match && match.kind === 'result') {
-    let u = match.targetUrl || '';
+    const m = match.merchant;
+    const er = m && m.enableRelay !== false;
+    let u = resolveJpayResultBrowserForwardUrl(m, er) || match.targetUrl || '';
     if (u && isOurTestReturnUrl(u, reqHost)) {
       u = baseUrl + '/noti/test-result' + (u.includes('?') ? u.slice(u.indexOf('?')) : '');
     }
@@ -7758,6 +7872,9 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
   const canSeeMembers = role === ROLES.SUPER_ADMIN || role === ROLES.ADMIN;
   const perms = member && member.permissions ? member.permissions : PAGE_KEYS;
   const can = (key) => canSeeMembers || perms.includes(key) || (typeof key === 'string' && key.startsWith('cr_') && perms.includes('cancel_refund'));
+  const sessionPg = req && getSessionPgSource(req);
+  const hubCr = (hubKey) => filterSidebarHubNav(member, 'cr', sessionPg, hubKey);
+  const hubLog = (hubKey) => filterSidebarHubNav(member, 'logs', sessionPg, hubKey);
   const sectionOpen = (paths) => paths.some((p) => pathMatch(p));
   // 왼쪽 메뉴: 섹션별로 접었다 펼치는 드롭다운 구조
   const navGroup = (sectionTitle, paths, itemsHtml) => {
@@ -7771,19 +7888,19 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
   if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('dealmai_webhook_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('dealmai_webhook_result') || can('traffic_analysis') || can('mail_logs')) {
     const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/dealmai-webhook-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/dealmai-webhook', '/admin/pg-notify-delivery', '/admin/mail-logs', '/admin/traffic'];
     const logItems = [];
-    if (can('pg_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs-result'), t(locale, 'nav_pg_result')));
-    if (can('internal_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal-result'), t(locale, 'nav_internal_result')));
-    if (can('dev_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal-result'), t(locale, 'nav_dev_result')));
-    if (can('dealmai_webhook_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook-result'), t(locale, 'nav_dealmai_webhook_result')));
-    if (can('pg_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs'), t(locale, 'nav_pg_noti_log')));
-    if (can('internal_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal'), t(locale, 'nav_internal_noti_log')));
+    if (can('pg_result') && hubLog('pg_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs-result'), t(locale, 'nav_pg_result')));
+    if (can('internal_result') && hubLog('internal_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal-result'), t(locale, 'nav_internal_result')));
+    if (can('dev_result') && hubLog('dev_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal-result'), t(locale, 'nav_dev_result')));
+    if (can('dealmai_webhook_result') && hubLog('dealmai_webhook_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook-result'), t(locale, 'nav_dealmai_webhook_result')));
+    if (can('pg_logs') && hubLog('pg_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs'), t(locale, 'nav_pg_noti_log')));
+    if (can('internal_logs') && hubLog('internal_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal'), t(locale, 'nav_internal_noti_log')));
     if (can('dev_internal_logs')) {
-      logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal'), t(locale, 'nav_dev_internal_noti_log')));
-      logItems.push(link('/admin/pg-notify-delivery', t(locale, 'nav_pg_notify_delivery')));
+      if (hubLog('dev_internal_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal'), t(locale, 'nav_dev_internal_noti_log')));
+      if (hubLog('pg_notify_delivery')) logItems.push(link('/admin/pg-notify-delivery', t(locale, 'nav_pg_notify_delivery')));
     }
-    if (can('dealmai_webhook_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook'), t(locale, 'nav_dealmai_webhook_log')));
-    if (can('mail_logs')) logItems.push(link('/admin/mail-logs', t(locale, 'nav_mail_logs')));
-    if (can('traffic_analysis')) logItems.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis')));
+    if (can('dealmai_webhook_logs') && hubLog('dealmai_webhook_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook'), t(locale, 'nav_dealmai_webhook_log')));
+    if (can('mail_logs') && hubLog('mail_logs')) logItems.push(link('/admin/mail-logs', t(locale, 'nav_mail_logs')));
+    if (can('traffic_analysis') && hubLog('traffic')) logItems.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis')));
     nav.push(navGroup(t(locale, 'nav_logs'), logPaths, logItems.join('')));
   }
   if (can('internal_targets') || can('internal_noti_settings') || can('dev_internal_noti_settings') || can('dealmai_webhook_settings') || can('test_run')) {
@@ -7800,25 +7917,28 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
   if (crAny) {
     const crCfg = loadChillPayTransactionConfig();
     const forceRefundDaysNav = Number(crCfg.forceRefundWindowDays) >= 0 ? crCfg.forceRefundWindowDays : 0;
-    const crPaths = ['/admin/transactions', '/admin/daily-noti-summary', '/admin/daily-noti-summary/export', '/admin/pg-transactions', '/admin/daily-pg-summary', '/admin/daily-pg-summary/export', '/admin/cancel-refund/cancel', '/admin/cancel-refund/void', '/admin/cancel-refund/void-summary', '/admin/cancel-refund/refund', '/admin/cancel-refund/force-refund', '/admin/cancel-refund/noti', '/admin/cancel-refund/void-deleted-list'];
+    const crPaths = ['/admin/transactions', '/admin/daily-noti-summary', '/admin/daily-noti-summary/export', '/admin/pg-transactions', '/admin/daily-pg-summary', '/admin/daily-pg-summary/export', '/admin/cancel-refund/cancel', '/admin/cancel-refund/void', '/admin/cancel-refund/void-summary', '/admin/cancel-refund/refund', '/admin/cancel-refund/force-refund', '/admin/cancel-refund/noti', '/admin/cancel-refund/void-deleted-list', '/admin/cancel-refund/jpay-followup'];
     const crLabel = t(locale, 'nav_cancel_refund');
     const crItems = [];
     const txNavUrl = urlWithSessionPgSource(req, '/admin/transactions');
-    if (can('cr_transactions')) crItems.push(link(txNavUrl, t(locale, 'nav_transaction_list')));
-    if (can('cr_transactions')) {
+    if (can('cr_transactions') && hubCr('tx')) crItems.push(link(txNavUrl, t(locale, 'nav_transaction_list')));
+    if (can('cr_transactions') && hubCr('daily_noti')) {
       crItems.push(
         link(urlWithSessionPgSource(req, '/admin/daily-noti-summary?period=thisMonth&dateSort=desc'), t(locale, 'nav_daily_noti_summary')),
       );
     }
-    if (can('cr_pg_transactions')) crItems.push(link('/admin/pg-transactions?sort=today', t(locale, 'nav_pg_transaction_list')));
-    if (can('cr_pg_transactions')) crItems.push(link('/admin/daily-pg-summary?sort=thisMonth&dateSort=desc', t(locale, 'nav_daily_pg_summary')));
-    if (can('cr_cancel')) crItems.push(link('/admin/cancel-refund/cancel', t(locale, 'nav_cancel_refund_cancel')));
-    if (can('cr_void')) crItems.push(link('/admin/cancel-refund/void', t(locale, 'nav_cancel_refund_void')));
-    if (can('cr_void_summary')) crItems.push(link('/admin/cancel-refund/void-summary', t(locale, 'nav_cancel_refund_void_summary')));
-    if (can('cr_refund')) crItems.push(link('/admin/cancel-refund/refund', t(locale, 'nav_cancel_refund_refund')));
-    if (can('cr_force_refund') && forceRefundDaysNav > 0) crItems.push(link('/admin/cancel-refund/force-refund', t(locale, 'nav_cancel_refund_force_refund')));
-    if (can('cr_noti')) crItems.push(link('/admin/cancel-refund/noti', t(locale, 'nav_cancel_refund_noti'), 'nav-item-small'));
-    if (can('cr_void_deleted')) crItems.push(link('/admin/cancel-refund/void-deleted-list', t(locale, 'cr_void_deleted_list')));
+    if (can('cr_jpay_followup') && hubCr('jpay_followup')) {
+      crItems.push(link('/admin/cancel-refund/jpay-followup?source=jpay', t(locale, 'nav_jpay_followup')));
+    }
+    if (can('cr_pg_transactions') && hubCr('pg_tx')) crItems.push(link('/admin/pg-transactions?sort=today', t(locale, 'nav_pg_transaction_list')));
+    if (can('cr_pg_transactions') && hubCr('daily_pg')) crItems.push(link('/admin/daily-pg-summary?sort=thisMonth&dateSort=desc', t(locale, 'nav_daily_pg_summary')));
+    if (can('cr_cancel') && hubCr('cancel')) crItems.push(link('/admin/cancel-refund/cancel', t(locale, 'nav_cancel_refund_cancel')));
+    if (can('cr_void') && hubCr('void')) crItems.push(link('/admin/cancel-refund/void', t(locale, 'nav_cancel_refund_void')));
+    if (can('cr_void_summary') && hubCr('void_summary')) crItems.push(link('/admin/cancel-refund/void-summary', t(locale, 'nav_cancel_refund_void_summary')));
+    if (can('cr_refund') && hubCr('refund')) crItems.push(link('/admin/cancel-refund/refund', t(locale, 'nav_cancel_refund_refund')));
+    if (can('cr_force_refund') && forceRefundDaysNav > 0 && hubCr('force_refund')) crItems.push(link('/admin/cancel-refund/force-refund', t(locale, 'nav_cancel_refund_force_refund')));
+    if (can('cr_noti') && hubCr('noti')) crItems.push(link('/admin/cancel-refund/noti', t(locale, 'nav_cancel_refund_noti'), 'nav-item-small'));
+    if (can('cr_void_deleted') && hubCr('void_deleted')) crItems.push(link('/admin/cancel-refund/void-deleted-list', t(locale, 'cr_void_deleted_list')));
     const crOpen = sectionOpen(crPaths);
     nav.push(`<details class="nav-group"${crOpen ? ' open' : ''}><summary class="nav-group-summary"><a href="${txNavUrl}" class="nav-group-summary-link" style="color:inherit;text-decoration:none;" onclick="event.stopPropagation()">${crLabel}</a></summary><div class="nav-group-items">${crItems.join('')}</div></details>`);
   }
@@ -8241,6 +8361,70 @@ function applyMemberSession(req, member) {
   req.session.adminUser = member.userId;
   if (member.mustChangePassword) req.session.mustChangePassword = true;
 }
+
+function parseHubNavSaveBody(body) {
+  const group = String((body && body.group) || '').trim();
+  const pg = String((body && body.pg) || '').trim();
+  if (group !== 'cr' && group !== 'logs') return null;
+  if (pg !== 'jpay' && pg !== 'chillpay') return null;
+  let enabledKeys = null;
+  if (body && body.enabledKeys != null) {
+    if (Array.isArray(body.enabledKeys)) enabledKeys = body.enabledKeys.map((k) => String(k).trim()).filter(Boolean);
+    else if (typeof body.enabledKeys === 'string') {
+      try {
+        const parsed = JSON.parse(body.enabledKeys);
+        if (Array.isArray(parsed)) enabledKeys = parsed.map((k) => String(k).trim()).filter(Boolean);
+      } catch (_) {
+        enabledKeys = [];
+      }
+    }
+  }
+  const helloHidden =
+    body && body.helloHidden != null && (body.helloHidden === true || body.helloHidden === '1' || body.helloHidden === 1);
+  return { group, pg, enabledKeys, helloHidden };
+}
+
+app.post('/admin/hub-nav-view-settings/save', requireAuth, (req, res) => {
+  const member = req.session && req.session.member;
+  if (!member) return res.status(401).json({ ok: false });
+  const parsed = parseHubNavSaveBody(req.body || {});
+  if (!parsed) return res.status(400).json({ ok: false, error: 'invalid' });
+  const scopeBefore = getMemberHubNavScopeSettings(member, parsed.group, parsed.pg);
+  const keysToSave =
+    parsed.enabledKeys != null
+      ? parsed.enabledKeys
+      : scopeBefore.enabledKeys ||
+        (parsed.group === 'logs'
+          ? getDefaultLogsHubNavEnabledKeys(member)
+          : getDefaultCrHubNavEnabledKeys(
+              parsed.pg,
+              member,
+              Number(loadChillPayTransactionConfig().forceRefundWindowDays) >= 0 ? loadChillPayTransactionConfig().forceRefundWindowDays : 0,
+            ));
+  const helloToSave = parsed.helloHidden != null ? parsed.helloHidden : scopeBefore.helloHidden;
+  setMemberHubNavScopeSettings(member, parsed.group, parsed.pg, keysToSave, helloToSave);
+  if (req.headers.accept && String(req.headers.accept).indexOf('application/json') !== -1) {
+    return res.json({ ok: true });
+  }
+  const back = String((req.body && req.body.back) || req.get('Referer') || '/admin/merchants');
+  return res.redirect(back);
+});
+
+app.post('/admin/hub-nav-view-settings/hello-toggle', requireAuth, (req, res) => {
+  const member = req.session && req.session.member;
+  if (!member) return res.status(401).json({ ok: false });
+  const parsed = parseHubNavSaveBody(req.body || {});
+  if (!parsed || parsed.helloHidden == null) return res.status(400).json({ ok: false, error: 'invalid' });
+  const scope = getMemberHubNavScopeSettings(member, parsed.group, parsed.pg);
+  const forceRefundDays = Number(loadChillPayTransactionConfig().forceRefundWindowDays) >= 0 ? loadChillPayTransactionConfig().forceRefundWindowDays : 0;
+  const keys =
+    scope.enabledKeys ||
+    (parsed.group === 'logs'
+      ? getDefaultLogsHubNavEnabledKeys(member)
+      : getDefaultCrHubNavEnabledKeys(parsed.pg, member, forceRefundDays));
+  setMemberHubNavScopeSettings(member, parsed.group, parsed.pg, keys, parsed.helloHidden);
+  return res.json({ ok: true });
+});
 
 // 관리자 계정 설정 페이지 (로그인한 회원 본인: 아이디/비밀번호/Google OTP)
 app.get('/admin/account', requireAuth, requirePage('account'), async (req, res) => {
@@ -9224,6 +9408,7 @@ const PAGE_KEY_TO_LABEL = {
   cr_force_refund: 'nav_cancel_refund_force_refund',
   cr_noti: 'nav_cancel_refund_noti',
   cr_void_deleted: 'cr_void_deleted_list',
+  cr_jpay_followup: 'nav_jpay_followup',
   mail_logs: 'nav_mail_logs',
   advanced_system_monitor: 'nav_server_manage',
 };
@@ -9236,7 +9421,7 @@ const PERM_GROUPS = [
   { id: 'new_reg', labelKey: 'perm_group_new_reg', type: 'single', keys: ['merchants'], color: '#fef3c7', borderColor: '#fcd34d' },
   { id: 'logs', labelKey: 'perm_group_logs', type: 'multi', keys: ['pg_result', 'internal_result', 'dev_result', 'pg_logs', 'internal_logs', 'dev_internal_logs', 'traffic_analysis', 'mail_logs'], color: '#e0f2fe', borderColor: '#7dd3fc' },
   { id: 'noti', labelKey: 'perm_group_noti', type: 'single', keys: ['internal_targets', 'internal_noti_settings', 'dev_internal_noti_settings'], color: '#dbeafe', borderColor: '#60a5fa' },
-  { id: 'cancel_refund', labelKey: 'perm_group_cancel_refund', type: 'multi', keys: ['cr_transactions', 'cr_pg_transactions', 'cr_cancel', 'cr_void', 'cr_void_summary', 'cr_refund', 'cr_force_refund', 'cr_noti', 'cr_void_deleted'], color: '#d1fae5', borderColor: '#6ee7b7' },
+  { id: 'cancel_refund', labelKey: 'perm_group_cancel_refund', type: 'multi', keys: ['cr_transactions', 'cr_pg_transactions', 'cr_cancel', 'cr_void', 'cr_void_summary', 'cr_refund', 'cr_force_refund', 'cr_noti', 'cr_void_deleted', 'cr_jpay_followup'], color: '#d1fae5', borderColor: '#6ee7b7' },
   { id: 'test', labelKey: 'perm_group_test', type: 'single', keys: ['test_config', 'test_run', 'test_history'], color: '#fce7f3', borderColor: '#f472b6' },
   { id: 'system', labelKey: 'perm_group_system', type: 'multi', keys: ['account', 'account_reset', 'settings', 'advanced_system_monitor'], color: '#f1f5f9', borderColor: '#cbd5e1' },
 ];
@@ -10083,6 +10268,10 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       const internal = m.enableInternal === false ? 'N' : 'Y';
       const devInternal = m.enableDevInternal === true ? 'Y' : 'N';
       const dealmaiWebhook = m.enableDealmaiWebhook === true ? 'Y' : 'N';
+      const dealmaiPartnerDisp = String(merchantDealmaiPartnerCell(m))
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
       const internalTargetId = m.internalTargetId || '';
       const confirmDel = (t(locale, 'merchants_confirm_delete') || '').replace(/'/g, "\\'");
       const confirmDel2 = (t(locale, 'merchants_confirm_delete_second') || '').replace(/'/g, "\\'");
@@ -10109,6 +10298,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <td>${internal}</td>
         <td>${devInternal}</td>
         <td>${dealmaiWebhook}</td>
+        <td>${dealmaiPartnerDisp || '—'}</td>
         <td class="actions-cell">
           <div style="display:flex;flex-direction:column;gap:4px;align-items:center;">
             <button
@@ -10153,6 +10343,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
               data-relay-off-internal-rs="${escAttr(m.relayOffInternalResultUrl || '')}"
               data-relay-off-dev-cb="${escAttr(m.relayOffDevCallbackUrl || '')}"
               data-relay-off-dev-rs="${escAttr(m.relayOffDevResultUrl || '')}"
+              data-relay-off-dev-dedicated="${m.relayOffDevDedicatedUse === true ? 'Y' : 'N'}"
               style="padding:4px 8px;font-size:12px;background:#facc15;color:#111827;border:none;border-radius:4px;cursor:pointer;"
             >${t(locale, 'merchants_edit')}</button>
             <form method="post" action="/admin/merchants/delete" onsubmit="return confirm('${confirmDel}') && confirm('${confirmDel2}');" style="margin:0;">
@@ -10355,6 +10546,11 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           </label>
           <button type="button" id="btn-fill-relay-off-dev-from-target" style="margin-top:10px;padding:6px 12px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;">${t(locale, 'merchants_relay_off_urls_fill_from_target_dev')}</button>
           <p class="admin-page-desc" style="margin-top:8px;">${t(locale, 'merchants_relay_off_urls_dev_hint')}</p>
+          <label id="merch-relay-off-dev-dedicated-wrap" style="display:block;margin-top:12px;padding:8px 10px;background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;">
+            <input type="checkbox" name="relayOffDevDedicatedUse" id="merchant-relay-off-dev-dedicated" />
+            ${t(locale, 'merchants_relay_off_dev_dedicated_label')}
+          </label>
+          <p class="admin-page-desc" style="margin-top:6px;">${t(locale, 'merchants_relay_off_dev_dedicated_hint')}</p>
         </div>
         <div id="merch-relay-format-only-wrap">
         <label>
@@ -10457,13 +10653,14 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             <th style="width:50px;">${t(locale, 'merchants_internal')}</th>
             <th style="width:50px;">${t(locale, 'common_dev')}</th>
             <th style="width:50px;">${t(locale, 'merchants_dealmai_webhook')}</th>
+            <th style="width:88px;">${t(locale, 'merchants_th_dealmai_partner')}</th>
             <th class="actions-cell" style="width:80px;">${t(locale, 'members_manage')}</th>
           </tr>
         </thead>
         <tbody>
           ${
             rows ||
-            `<tr><td colspan="16" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
+            `<tr><td colspan="17" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
           }
         </tbody>
       </table>
@@ -10531,6 +10728,19 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var showDev = !relayOn && v === 'dev_internal';
         if (pInt) pInt.style.display = showInt ? 'block' : 'none';
         if (pDev) pDev.style.display = showDev ? 'block' : 'none';
+        syncRelayOffDevDedicatedUi();
+      }
+
+      function syncRelayOffDevDedicatedUi() {
+        var dedCb = document.getElementById('merchant-relay-off-dev-dedicated');
+        var devInternalCheckbox = form && form.querySelector('input[name="enableDevInternal"]');
+        var rsIn = document.getElementById('merchant-result-url');
+        var jpayOn = radJpay && radJpay.checked;
+        var dedOn = dedCb && dedCb.checked;
+        if (dedOn && devInternalCheckbox) devInternalCheckbox.checked = true;
+        if (rsIn && jpayOn && dedOn) {
+          rsIn.required = false;
+        }
       }
 
       function syncRelayMerchantUrls() {
@@ -10639,6 +10849,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       if (relayCbEl) relayCbEl.addEventListener('change', syncRelayMerchantUrls);
       var rofSelectEl = document.getElementById('merchant-relay-off-forward');
       if (rofSelectEl) rofSelectEl.addEventListener('change', syncRelayOffUrlPanels);
+      var dedDedicatedEl = document.getElementById('merchant-relay-off-dev-dedicated');
+      if (dedDedicatedEl) dedDedicatedEl.addEventListener('change', syncRelayOffDevDedicatedUi);
 
       var btnFillRelayOffInt = document.getElementById('btn-fill-relay-off-int-from-target');
       if (btnFillRelayOffInt && form) {
@@ -10751,6 +10963,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         if (riRs) riRs.value = button.dataset.relayOffInternalRs || '';
         if (rdCb) rdCb.value = button.dataset.relayOffDevCb || '';
         if (rdRs) rdRs.value = button.dataset.relayOffDevRs || '';
+        var dedDedicated = form.querySelector('input[name="relayOffDevDedicatedUse"]');
+        if (dedDedicated) dedDedicated.checked = (button.dataset.relayOffDevDedicated || 'N') === 'Y';
         syncRelayMerchantUrls();
         if (internalCheckbox) {
           internalCheckbox.checked = (button.dataset.enableInternal || 'Y') === 'Y';
@@ -10832,6 +11046,18 @@ function merchantChillpayRecurringCell(m) {
   return m.chillpayRecurring === 'Y' ? 'Y' : 'N';
 }
 
+/** 목록·CSV: DEALMAI 웹훅 Partner 코드 (가맹점 값, 없으면 웹훅 ON 시 전역 기본값) */
+function merchantDealmaiPartnerCell(m) {
+  if (!m || typeof m !== 'object') return '';
+  const merchantCode = String(m.dealmaiPartnerCode || '').trim();
+  if (merchantCode) return merchantCode;
+  if (m.enableDealmaiWebhook === true) {
+    const cfg = loadDealmaiWebhookSettings();
+    return String(cfg.defaultPartnerCode || '').trim();
+  }
+  return '';
+}
+
 /** 목록·CSV: 노티 수신 형식 짧은 표기 (일반 / JSON / FORM) */
 function merchantRelayFormatCellShort(locale, m) {
   const rf = String(m.relayFormat || 'raw').toLowerCase();
@@ -10853,7 +11079,13 @@ function merchantRelayOffForwardLine(locale, m) {
   if (!m || m.enableRelay !== false) return '';
   const r = normalizeMerchantRelayOffForwardTarget(m.relayOffForwardTarget);
   if (r === 'internal') return t(locale, 'merchants_relay_off_cell_internal');
-  if (r === 'dev_internal') return t(locale, 'merchants_relay_off_cell_dev');
+  if (r === 'dev_internal') {
+    const base = t(locale, 'merchants_relay_off_cell_dev');
+    if (merchantRelayOffDevDedicatedUse(m)) {
+      return base + ' · ' + t(locale, 'merchants_relay_off_dev_dedicated_cell');
+    }
+    return base;
+  }
   return '';
 }
 
@@ -10934,6 +11166,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
     t(locale, 'merchants_internal'),
     t(locale, 'common_dev'),
     t(locale, 'merchants_dealmai_webhook'),
+    t(locale, 'merchants_th_dealmai_partner'),
   ];
   const lines = ['\uFEFF' + header.map(escapeCsv).join(',')];
   for (const [id, m] of sortedEntries) {
@@ -10979,6 +11212,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
         internal,
         devInternal,
         dealmaiWebhook,
+        merchantDealmaiPartnerCell(m),
       ].map(escapeCsv).join(','),
     );
   }
@@ -11109,6 +11343,24 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     !enableRelayOn && relayOffForwardSaved === 'dev_internal'
       ? String((req.body && req.body.relayOffDevResultUrl) || '').trim()
       : '';
+  const relayOffDevDedicatedSaved =
+    !enableRelayOn && relayOffForwardSaved === 'dev_internal' && req.body && req.body.relayOffDevDedicatedUse === 'on';
+  if (pgKind === 'jpay' && relayOffDevDedicatedSaved) {
+    const probeMerchant = {
+      internalTargetId: internalTargetId || '',
+      relayOffDevCallbackUrl: relayOffDevCbSaved,
+      relayOffDevResultUrl: relayOffDevRsSaved,
+    };
+    if (!resolveRelayOffDevUrl(probeMerchant, 'callback') || !resolveRelayOffDevUrl(probeMerchant, 'result')) {
+      return res
+        .status(400)
+        .send(
+          t(getLocale(req), 'merchants_relay_off_dev_dedicated_err_urls') ||
+            '개발노티 전용사용: 대체 송부 Callback·Result URL(또는 전산 대상 개발 URL)을 입력하세요.',
+        );
+    }
+  }
+  const enableDevInternalSaved = enableDevInternal === 'on' || relayOffDevDedicatedSaved;
   MERCHANTS.set(merchantId, {
     ...prev,
     merchantId,
@@ -11121,7 +11373,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     internalTargetId: internalTargetId || '',
     enableRelay: enableRelayOn,
     enableInternal: enableInternal === 'on',
-    enableDevInternal: enableDevInternal === 'on',
+    enableDevInternal: enableDevInternalSaved,
     enableDealmaiWebhook: enableDealmaiWebhook === 'on',
     dealmaiPartnerCode: String(rawDealmaiPartnerCode || '').trim(),
     relayOffForwardTarget: relayOffForwardSaved,
@@ -11129,6 +11381,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     relayOffInternalResultUrl: relayOffInternalRsSaved,
     relayOffDevCallbackUrl: relayOffDevCbSaved,
     relayOffDevResultUrl: relayOffDevRsSaved,
+    relayOffDevDedicatedUse: relayOffDevDedicatedSaved,
     relayFormat: fmt,
     jpayRouteCallbackKey: jpayCb,
     jpayRouteResultKey: jpayRs,
@@ -11260,6 +11513,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
   const hubHtmlLogs = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/logs', q, logPg, {
     showEnv: true,
     getEnv: () => logEnvCurrent,
+    req,
   });
 
   const jpaySyncAlert =
@@ -11356,6 +11610,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
         <td class="col-json"><pre>${jsonResult ? highlightLogSearchHtml(jsonResult, logSearchRawPg, esc) : esc('-')}</pre></td>
         <td class="col-noti-state">${highlightLogSearchHtml(resendKindLabel, logSearchRawPg, esc)}</td>
         <td class="col-action">${resendBtn}</td>
+        ${logPg === 'jpay' ? jpayWebhookCellHtml(locale, log, esc) : ''}
         <td class="col-void-refund">${voidRefundBtns}</td>
       </tr>`;
     })
@@ -11488,7 +11743,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
         );
       })()}
       <table>
-        <colgroup><col class="col-date" /><col class="col-time" /><col class="col-narrow" /><col class="col-narrow" /><col class="col-status" /><col class="col-json" /><col class="col-json" /><col class="col-noti-state" /><col class="col-action" /><col class="col-void-refund" /></colgroup>
+        <colgroup><col class="col-date" /><col class="col-time" /><col class="col-narrow" /><col class="col-narrow" /><col class="col-status" /><col class="col-json" /><col class="col-json" /><col class="col-noti-state" /><col class="col-action" />${logPg === 'jpay' ? '<col class="col-narrow" />' : ''}<col class="col-void-refund" /></colgroup>
         <thead>
           <tr>
             <th>${t(locale, 'pg_logs_th_received_date')}</th>
@@ -11500,11 +11755,12 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
             <th>${t(locale, 'pg_logs_json_result')}</th>
             <th>${t(locale, 'pg_logs_th_state')}</th>
             <th>${t(locale, 'pg_logs_th_resend')}</th>
+            ${logPg === 'jpay' ? jpayWebhookThHtml(locale) : ''}
             <th>${t(locale, 'pg_logs_th_void_refund')}</th>
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="10" style="text-align:center;color:#777;">${t(locale, 'pg_logs_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="${logPg === 'jpay' ? 11 : 10}" style="text-align:center;color:#777;">${t(locale, 'pg_logs_empty')}</td></tr>`}
         </tbody>
       </table>
       ${logPagerFooterPg}
@@ -11808,6 +12064,364 @@ function memberCanPage(member, pageKey) {
  * Active: ChillPay = blue, JPAY = green (env follows selected PG). Inactive: neutral gray (no pastel).
  * cfg: { navEnv?: 'sandbox', env?: { show, sandbox, liveUrl, sandboxUrl, highlight }, pgSource?: { show, active, chillpayUrl, jpayUrl } }
  */
+const HUB_NAV_VIEW_SETTINGS_PATH = path.join(CONFIG_DIR, 'hub-nav-view-settings.json');
+
+function loadHubNavViewSettingsFile() {
+  try {
+    const raw = fs.readFileSync(HUB_NAV_VIEW_SETTINGS_PATH, 'utf8');
+    const data = JSON.parse(raw);
+    return data && typeof data === 'object' ? data : {};
+  } catch (e) {
+    if (e && e.code !== 'ENOENT') console.error('[hub-nav] load failed:', (e && e.message) || e);
+    return {};
+  }
+}
+
+function saveHubNavViewSettingsFile(data) {
+  fs.writeFileSync(HUB_NAV_VIEW_SETTINGS_PATH, JSON.stringify(data, null, 2));
+}
+
+function getHubNavScopeKey(group, pg) {
+  const g = group === 'logs' ? 'logs' : 'cr';
+  const p = pg === 'jpay' ? 'jpay' : 'chillpay';
+  return g + ':' + p;
+}
+
+function getMemberIdForHubNav(member) {
+  if (!member) return '';
+  const id = member.id != null ? String(member.id).trim() : '';
+  if (id) return id;
+  return String(member.name || member.userId || '').trim();
+}
+
+function hubNavMemberCan(member, permKey) {
+  const role = member && member.role ? member.role : null;
+  const canSeeMembers = role === ROLES.SUPER_ADMIN || role === ROLES.ADMIN;
+  const perms = member && member.permissions ? member.permissions : PAGE_KEYS;
+  return (
+    canSeeMembers ||
+    perms.includes(permKey) ||
+    (typeof permKey === 'string' && permKey.startsWith('cr_') && perms.includes('cancel_refund'))
+  );
+}
+
+function getDefaultCrHubNavEnabledKeys(pg, member, forceRefundDays) {
+  const keys = [];
+  const chill = pg !== 'jpay';
+  const jpay = pg === 'jpay';
+  if (hubNavMemberCan(member, 'cr_transactions')) {
+    keys.push('tx', 'daily_noti');
+  }
+  if (jpay && hubNavMemberCan(member, 'cr_jpay_followup')) keys.push('jpay_followup');
+  if (chill && hubNavMemberCan(member, 'cr_pg_transactions')) {
+    keys.push('pg_tx', 'daily_pg');
+  }
+  if (hubNavMemberCan(member, 'cr_cancel')) keys.push('cancel');
+  if (hubNavMemberCan(member, 'cr_void')) keys.push('void');
+  if (hubNavMemberCan(member, 'cr_void_summary')) keys.push('void_summary');
+  if (hubNavMemberCan(member, 'cr_refund')) keys.push('refund');
+  if (hubNavMemberCan(member, 'cr_force_refund') && forceRefundDays > 0) keys.push('force_refund');
+  if (hubNavMemberCan(member, 'cr_noti')) keys.push('noti');
+  if (hubNavMemberCan(member, 'cr_void_deleted')) keys.push('void_deleted');
+  return keys;
+}
+
+function getDefaultLogsHubNavEnabledKeys(member) {
+  const keys = [];
+  if (hubNavMemberCan(member, 'pg_result')) keys.push('pg_result');
+  if (hubNavMemberCan(member, 'internal_result')) keys.push('internal_result');
+  if (hubNavMemberCan(member, 'dev_result')) keys.push('dev_result');
+  if (hubNavMemberCan(member, 'dealmai_webhook_result')) keys.push('dealmai_webhook_result');
+  if (hubNavMemberCan(member, 'pg_logs')) keys.push('pg_logs');
+  if (hubNavMemberCan(member, 'internal_logs')) keys.push('internal_logs');
+  if (hubNavMemberCan(member, 'dev_internal_logs')) {
+    keys.push('dev_internal_logs', 'pg_notify_delivery');
+  }
+  if (hubNavMemberCan(member, 'dealmai_webhook_logs')) keys.push('dealmai_webhook_logs');
+  if (hubNavMemberCan(member, 'mail_logs')) keys.push('mail_logs');
+  if (hubNavMemberCan(member, 'traffic_analysis')) keys.push('traffic');
+  return keys;
+}
+
+function getMemberHubNavScopeSettings(member, group, pg) {
+  const memberId = getMemberIdForHubNav(member);
+  if (!memberId) return { enabledKeys: null, helloHidden: false };
+  const file = loadHubNavViewSettingsFile();
+  const byMember = file.byMemberId && file.byMemberId[memberId] ? file.byMemberId[memberId] : {};
+  const scopeKey = getHubNavScopeKey(group, pg);
+  const scope = byMember[scopeKey];
+  if (!scope || typeof scope !== 'object') return { enabledKeys: null, helloHidden: false };
+  const enabledKeys = Array.isArray(scope.enabledKeys) ? scope.enabledKeys.filter((k) => typeof k === 'string') : null;
+  return {
+    enabledKeys: enabledKeys && enabledKeys.length ? enabledKeys : null,
+    helloHidden: !!scope.helloHidden,
+  };
+}
+
+function setMemberHubNavScopeSettings(member, group, pg, enabledKeys, helloHidden) {
+  const memberId = getMemberIdForHubNav(member);
+  if (!memberId) return;
+  const file = loadHubNavViewSettingsFile();
+  if (!file.byMemberId) file.byMemberId = {};
+  if (!file.byMemberId[memberId]) file.byMemberId[memberId] = {};
+  const scopeKey = getHubNavScopeKey(group, pg);
+  file.byMemberId[memberId][scopeKey] = {
+    enabledKeys: Array.isArray(enabledKeys) ? enabledKeys : [],
+    helloHidden: !!helloHidden,
+    updatedAt: new Date().toISOString(),
+  };
+  saveHubNavViewSettingsFile(file);
+}
+
+function getCrHubPgScopeForKey(key) {
+  if (key === 'jpay_followup') return 'jpay';
+  if (key === 'pg_tx' || key === 'daily_pg') return 'chillpay';
+  return 'both';
+}
+
+function hubNavItemVisibleForSessionPg(key, sessionPg) {
+  const scope = getCrHubPgScopeForKey(key);
+  if (scope === 'both') return true;
+  if (scope === 'jpay') return sessionPg === 'jpay';
+  return sessionPg !== 'jpay';
+}
+
+function isHubNavKeyEnabled(member, group, pg, key, defaultKeys) {
+  const scope = getMemberHubNavScopeSettings(member, group, pg);
+  if (!scope.enabledKeys) return defaultKeys.includes(key);
+  return scope.enabledKeys.includes(key);
+}
+
+function hubNavUrlWithEnv(pathOrUrl, pg, env) {
+  let url = withPgSourceInUrl(pathOrUrl, pg === 'jpay' ? 'jpay' : 'chillpay');
+  if (env === 'sandbox') {
+    url += url.indexOf('?') >= 0 ? '&' : '?';
+    url += 'env=sandbox';
+  }
+  return url;
+}
+
+function buildCrHubNavMenuItems(locale, member, pg, env) {
+  const items = [];
+  const pgSrc = pg === 'jpay' ? 'jpay' : 'chillpay';
+  const chill = pgSrc !== 'jpay';
+  const crCfg = loadChillPayTransactionConfig();
+  const forceRefundDays = Number(crCfg.forceRefundWindowDays) >= 0 ? crCfg.forceRefundWindowDays : 0;
+  const add = (key, perm, labelKey, path, pgScope) => {
+    if (!hubNavMemberCan(member, perm)) return;
+    if (pgScope === 'chillpay' && !chill) return;
+    if (pgScope === 'jpay' && pgSrc !== 'jpay') return;
+    const pathname = path.split('?')[0];
+    items.push({
+      key,
+      label: t(locale, labelKey),
+      url: hubNavUrlWithEnv(path, pgSrc, env),
+      paths: [pathname],
+      pgScope: pgScope || 'both',
+    });
+  };
+  add('tx', 'cr_transactions', 'cr_hub_noti_transactions', '/admin/transactions', 'both');
+  add('daily_noti', 'cr_transactions', 'nav_daily_noti_summary', '/admin/daily-noti-summary?period=thisMonth&dateSort=desc', 'both');
+  add('jpay_followup', 'cr_jpay_followup', 'nav_jpay_followup', '/admin/cancel-refund/jpay-followup?source=jpay', 'jpay');
+  add('pg_tx', 'cr_pg_transactions', 'cr_hub_pg_transactions', '/admin/pg-transactions?sort=today', 'chillpay');
+  add('daily_pg', 'cr_pg_transactions', 'nav_daily_pg_summary', '/admin/daily-pg-summary?sort=thisMonth&dateSort=desc', 'chillpay');
+  add('cancel', 'cr_cancel', 'nav_cancel_refund_cancel', '/admin/cancel-refund/cancel', 'both');
+  add('void', 'cr_void', 'nav_cancel_refund_void', '/admin/cancel-refund/void', 'both');
+  add('void_summary', 'cr_void_summary', 'nav_cancel_refund_void_summary', '/admin/cancel-refund/void-summary', 'both');
+  add('refund', 'cr_refund', 'nav_cancel_refund_refund', '/admin/cancel-refund/refund', 'both');
+  if (forceRefundDays > 0) add('force_refund', 'cr_force_refund', 'nav_cancel_refund_force_refund', '/admin/cancel-refund/force-refund', 'both');
+  add('noti', 'cr_noti', 'cr_hub_trade_noti', '/admin/cancel-refund/noti', 'both');
+  add('void_deleted', 'cr_void_deleted', 'cr_void_deleted_list', '/admin/cancel-refund/void-deleted-list', 'both');
+  return items;
+}
+
+function buildLogsHubNavMenuItems(locale, member, pg, env) {
+  const items = [];
+  const pgSrc = pg === 'jpay' ? 'jpay' : 'chillpay';
+  const add = (key, perm, labelKey, path) => {
+    if (!hubNavMemberCan(member, perm)) return;
+    const pathname = path.split('?')[0];
+    items.push({
+      key,
+      label: t(locale, labelKey),
+      url: hubNavUrlWithEnv(path, pgSrc, env),
+      paths: [pathname],
+    });
+  };
+  add('pg_result', 'pg_result', 'nav_pg_result', '/admin/logs-result');
+  add('internal_result', 'internal_result', 'nav_internal_result', '/admin/internal-result');
+  add('dev_result', 'dev_result', 'nav_dev_result', '/admin/dev-internal-result');
+  add('dealmai_webhook_result', 'dealmai_webhook_result', 'nav_dealmai_webhook_result', '/admin/dealmai-webhook-result');
+  add('pg_logs', 'pg_logs', 'nav_pg_noti_log', '/admin/logs');
+  add('internal_logs', 'internal_logs', 'nav_internal_noti_log', '/admin/internal');
+  add('dev_internal_logs', 'dev_internal_logs', 'nav_dev_internal_noti_log', '/admin/dev-internal');
+  if (hubNavMemberCan(member, 'dev_internal_logs')) {
+    items.push({
+      key: 'pg_notify_delivery',
+      label: t(locale, 'nav_pg_notify_delivery'),
+      url: '/admin/pg-notify-delivery',
+      paths: ['/admin/pg-notify-delivery'],
+    });
+  }
+  add('dealmai_webhook_logs', 'dealmai_webhook_logs', 'nav_dealmai_webhook_log', '/admin/dealmai-webhook');
+  add('mail_logs', 'mail_logs', 'nav_mail_logs', '/admin/mail-logs');
+  add('traffic', 'traffic_analysis', 'nav_traffic_analysis', '/admin/traffic');
+  return items;
+}
+
+function filterSidebarHubNav(member, group, sessionPg, hubKey) {
+  const pg = sessionPg === 'jpay' ? 'jpay' : 'chillpay';
+  if (group === 'cr' && !hubNavItemVisibleForSessionPg(hubKey, sessionPg)) return false;
+  const crCfg = loadChillPayTransactionConfig();
+  const forceRefundDays = Number(crCfg.forceRefundWindowDays) >= 0 ? crCfg.forceRefundWindowDays : 0;
+  const defaultKeys =
+    group === 'logs'
+      ? getDefaultLogsHubNavEnabledKeys(member)
+      : getDefaultCrHubNavEnabledKeys(pg, member, forceRefundDays);
+  return isHubNavKeyEnabled(member, group, pg, hubKey, defaultKeys);
+}
+
+function buildHubNavHelloBlockHtml(locale, esc, member, group, pg, menuItems, scopeSettings, currentPath) {
+  if (!menuItems || menuItems.length === 0) return { navHtml: '', panelHtml: '', scriptHtml: '' };
+  const scopeKey = getHubNavScopeKey(group, pg);
+  const scopeId = scopeKey.replace(':', '_');
+  const defaultKeys = menuItems.map((m) => m.key);
+  const enabledSet = scopeSettings.enabledKeys || defaultKeys;
+  const visibleItems = menuItems.filter((m) => enabledSet.includes(m.key));
+  const curPath = (currentPath || '').split('?')[0];
+  const navLinks = visibleItems
+    .map((m) => {
+      const active = m.paths.some((p) => curPath === p || curPath.startsWith(p + '/'));
+      return (
+        '<a href="' +
+        esc(m.url) +
+        '" class="hub-nav-link' +
+        (active ? ' hub-nav-link--active' : '') +
+        '">' +
+        esc(m.label) +
+        '</a>'
+      );
+    })
+    .join('');
+  const checks = menuItems
+    .map((m) => {
+      const on = enabledSet.includes(m.key);
+      return (
+        '<label class="hub-nav-guide-item hub-nav-guide-item--' +
+        (on ? 'on' : 'off') +
+        '"><input type="checkbox" class="hub-nav-guide-check" data-key="' +
+        esc(m.key) +
+        '"' +
+        (on ? ' checked' : '') +
+        '> <span>' +
+        esc(m.label) +
+        '</span></label>'
+      );
+    })
+    .join('');
+  const helloHidden = scopeSettings.helloHidden;
+  const panelStyle = helloHidden ? 'display:none;' : '';
+  const helloCls = helloHidden ? ' btn-hub-nav-hello--restore' : '';
+  const panelHtml =
+    '<div class="hub-nav-guide pg-hello-toggle-zone hub-nav-hello-root" data-hub-scope="' +
+    esc(scopeId) +
+    '" data-hub-group="' +
+    esc(group) +
+    '" data-hub-pg="' +
+    esc(pg) +
+    '" data-hub-default-keys="' +
+    esc(JSON.stringify(defaultKeys)) +
+    '" style="' +
+    panelStyle +
+    '">' +
+    '<div class="hub-nav-guide-head">' +
+    '<span class="hub-nav-guide-title">' +
+    esc(t(locale, 'hub_nav_view_setting')) +
+    '</span>' +
+    '<span class="hub-nav-guide-vbar">|</span>' +
+    '<div class="hub-nav-guide-actions">' +
+    '<button type="button" class="hub-nav-guide-default">' +
+    esc(t(locale, 'hub_nav_default')) +
+    '</button>' +
+    '<button type="button" class="hub-nav-guide-release">' +
+    esc(t(locale, 'hub_nav_release')) +
+    '</button>' +
+    '<button type="button" class="hub-nav-guide-select">' +
+    esc(t(locale, 'hub_nav_select_all')) +
+    '</button>' +
+    '<button type="button" class="hub-nav-guide-save">' +
+    esc(t(locale, 'hub_nav_save')) +
+    '</button>' +
+    '<button type="button" class="hub-nav-guide-restore" title="' +
+    esc(t(locale, 'hub_nav_restore_tip')) +
+    '">' +
+    esc(t(locale, 'hub_nav_restore')) +
+    '</button>' +
+    '</div></div>' +
+    '<div class="hub-nav-guide-list">' +
+    checks +
+    '</div></div>';
+  const helloBtn =
+    '<button type="button" class="btn-hub-nav-hello' +
+    helloCls +
+    '" data-hub-scope="' +
+    esc(scopeId) +
+    '" data-hub-group="' +
+    esc(group) +
+    '" data-hub-pg="' +
+    esc(pg) +
+    '">' +
+    esc(t(locale, 'hub_nav_hello')) +
+    '</button>';
+  const navHtml =
+    '<div class="hub-nav-hello-row">' +
+    (navLinks ? '<div class="hub-nav-links">' + navLinks + '</div>' : '') +
+    helloBtn +
+    '</div>';
+  const scriptHtml = buildHubNavHelloClientScript();
+  return { navHtml, panelHtml, scriptHtml };
+}
+
+function buildHubNavHelloClientScript() {
+  return `<script>(function(){
+if(window.__hubNavHelloInit)return;window.__hubNavHelloInit=1;
+function parseKeys(root){try{return JSON.parse(root.getAttribute('data-hub-default-keys')||'[]');}catch(e){return[];}}
+function getChecks(root){return root.querySelectorAll('.hub-nav-guide-check');}
+function getSelectedKeys(root){var out=[];getChecks(root).forEach(function(c){if(c.checked)out.push(c.getAttribute('data-key'));});return out;}
+function syncItemLabels(root){getChecks(root).forEach(function(c){var lab=c.closest('.hub-nav-guide-item');if(lab)lab.classList.toggle('hub-nav-guide-item--on',c.checked);lab.classList.toggle('hub-nav-guide-item--off',!c.checked);});}
+function setAllChecks(root,on){getChecks(root).forEach(function(c){c.checked=on;});syncItemLabels(root);}
+function setKeys(root,keys){var set={};keys.forEach(function(k){set[k]=1;});getChecks(root).forEach(function(c){c.checked=!!set[c.getAttribute('data-key')];});syncItemLabels(root);}
+function findPanel(scope){return document.querySelector('.hub-nav-hello-root[data-hub-scope="'+scope+'"]');}
+function findHelloBtn(scope){return document.querySelector('.btn-hub-nav-hello[data-hub-scope="'+scope+'"]');}
+function setPanelHidden(scope,hidden){var panel=findPanel(scope);var btn=findHelloBtn(scope);if(panel)panel.style.display=hidden?'none':'';if(btn)btn.classList.toggle('btn-hub-nav-hello--restore',hidden);}
+function postJson(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(body)});}
+document.querySelectorAll('.hub-nav-hello-root').forEach(function(root){
+  var scope=root.getAttribute('data-hub-scope');var group=root.getAttribute('data-hub-group');var pg=root.getAttribute('data-hub-pg');
+  root._hubNavLastSaved=getSelectedKeys(root).slice();
+  var defBtn=root.querySelector('.hub-nav-guide-default');if(defBtn)defBtn.addEventListener('click',function(){setKeys(root,parseKeys(root));});
+  var relBtn=root.querySelector('.hub-nav-guide-release');if(relBtn)relBtn.addEventListener('click',function(){setAllChecks(root,false);});
+  var selBtn=root.querySelector('.hub-nav-guide-select');if(selBtn)selBtn.addEventListener('click',function(){setAllChecks(root,true);});
+  var resBtn=root.querySelector('.hub-nav-guide-restore');if(resBtn)resBtn.addEventListener('click',function(){if(root._hubNavLastSaved)setKeys(root,root._hubNavLastSaved.slice());});
+  var saveBtn=root.querySelector('.hub-nav-guide-save');if(saveBtn)saveBtn.addEventListener('click',function(){
+    var keys=getSelectedKeys(root);var hidden=root.style.display==='none';
+    postJson('/admin/hub-nav-view-settings/save',{group:group,pg:pg,enabledKeys:keys,helloHidden:hidden}).then(function(r){
+      if(!r.ok){alert('Save failed');return;}
+      root._hubNavLastSaved=keys.slice();location.reload();
+    }).catch(function(){alert('Save failed');});
+  });
+  getChecks(root).forEach(function(c){c.addEventListener('change',function(){syncItemLabels(root);});});
+});
+document.querySelectorAll('.btn-hub-nav-hello').forEach(function(btn){
+  var scope=btn.getAttribute('data-hub-scope');var group=btn.getAttribute('data-hub-group');var pg=btn.getAttribute('data-hub-pg');
+  btn.addEventListener('click',function(){
+    var panel=findPanel(scope);var hidden=panel&&panel.style.display==='none';
+  var next=!hidden;setPanelHidden(scope,next);
+  postJson('/admin/hub-nav-view-settings/hello-toggle',{group:group,pg:pg,helloHidden:next});
+  });
+});
+})();</script>`;
+}
+
 function buildCrHubToolbarHtml(locale, esc, member, cfg) {
   const raw = cfg || {};
   const inline = !!raw.inline;
@@ -11889,16 +12503,32 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
   }
   const innerRow =
     '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;font-size:13px;">' + parts.join('') + '</div>';
+  let hubNavBlock = '';
+  if (c.hubNav && c.hubNav.group && c.hubNav.req) {
+    const hn = c.hubNav;
+    const group = hn.group === 'logs' ? 'logs' : 'cr';
+    const pg = hn.pg === 'jpay' ? 'jpay' : 'chillpay';
+    const env = hn.env === 'sandbox' ? 'sandbox' : 'live';
+    const menuItems =
+      group === 'logs'
+        ? buildLogsHubNavMenuItems(locale, member, pg, env)
+        : buildCrHubNavMenuItems(locale, member, pg, env);
+    const scopeSettings = getMemberHubNavScopeSettings(member, group, pg);
+    const helloBlock = buildHubNavHelloBlockHtml(locale, esc, member, group, pg, menuItems, scopeSettings, hn.currentPath || '');
+    hubNavBlock = helloBlock.navHtml + helloBlock.panelHtml + helloBlock.scriptHtml;
+  }
   if (inline) {
     return (
       '<div class="cr-hub-toolbar cr-hub-toolbar--inline" style="display:inline-flex;flex-wrap:wrap;align-items:center;flex:0 1 auto;margin:0;padding:0;border:none;background:transparent;box-shadow:none;">' +
       innerRow +
+      hubNavBlock +
       '</div>'
     );
   }
   return (
     '<div class="cr-hub-toolbar" style="display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:flex-start;gap:10px 14px;margin-bottom:4px;padding:12px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;">' +
     innerRow +
+    hubNavBlock +
     '</div>'
   );
 }
@@ -11927,6 +12557,13 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
       active: logPg === 'jpay' ? 'jpay' : 'chillpay',
       chillpayUrl: pathname + '?' + buildQueryString(qChill),
       jpayUrl: pathname + '?' + buildQueryString(qJpay),
+    },
+    hubNav: {
+      group: 'logs',
+      pg: logPg === 'jpay' ? 'jpay' : 'chillpay',
+      currentPath: pathname,
+      req: o.req,
+      env: currentEnv === 'sandbox' ? 'sandbox' : 'live',
     },
   });
 }
@@ -12161,6 +12798,9 @@ function getTransactionListColumns(txSource) {
   const cols = [];
   for (const col of TRANSACTION_LIST_COLUMNS) {
     cols.push(col);
+    if (col.type === 'fixed' && col.id === 'noti') {
+      cols.push({ type: 'fixed', id: 'webhook' });
+    }
     if (col.type === 'body' && col.keys && (col.keys[0] === 'CustomerId' || col.keys.includes('customerId'))) {
       cols.push(...JPAY_TX_EXTRA_COLUMNS);
     }
@@ -12184,8 +12824,26 @@ function jpayCrExtraCellsHtml(log, esc) {
   );
 }
 
+function jpayWebhookCellHtml(locale, log, esc) {
+  if (getNotiLogPgAcquirer(log) !== 'jpay') {
+    return '<td class="col-narrow">-</td>';
+  }
+  const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+  const whClass = pgNotiLogWebhookRowClass(log);
+  const text = pgNotiLogWebhookDisplayText(locale, log, merchant);
+  return (
+    '<td class="col-narrow">' +
+    (whClass ? '<span class="' + whClass + '">' + esc(text) + '</span>' : esc(text)) +
+    '</td>'
+  );
+}
+
 const JPAY_CR_EXTRA_TH =
   '<th>Customer</th><th>Email</th><th>CardNo</th>';
+
+function jpayWebhookThHtml(locale) {
+  return '<th>' + String(t(locale, 'merchants_dealmai_webhook') || '웹훅').replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</th>';
+}
 
 // 테스트 결제 환경 설정과 동일한 Currency 코드 → 표시용 (JPY, USD, KRW, THB)
 function formatCurrencyForDisplay(val) {
@@ -12575,6 +13233,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     t(locale, 'tx_th_status_raw'),
     t(locale, 'tx_th_status'),
     t(locale, 'tx_th_noti'),
+    ...(txSource === 'jpay' ? [t(locale, 'merchants_dealmai_webhook') || '웹훅'] : []),
     t(locale, 'tx_th_detail_reason'),
   ];
   const txListColumns = getTransactionListColumns(txSource);
@@ -12782,6 +13441,13 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       chillpayUrl: baseUrl + qs({ source: 'chillpay', page: 1 }),
       jpayUrl: baseUrl + qs({ source: 'jpay', page: 1 }),
     },
+    hubNav: {
+      group: 'cr',
+      pg: txSource,
+      currentPath: '/admin/transactions',
+      req,
+      env: getEnvFromReq(req) === 'sandbox' ? 'sandbox' : 'live',
+    },
   });
   const LEGEND_MAX_DESC = 80;
   const truncDesc = (s) => { const t = String(s || '').trim(); return t.length <= LEGEND_MAX_DESC ? t : t.slice(0, LEGEND_MAX_DESC - 1) + '…'; };
@@ -12808,7 +13474,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   const txColDefaults = [
     40, 72, 95, 100, 72, 95, 52, 90,
     ...(txSource === 'jpay' ? [88, 110, 100] : []),
-    120, 88, 80, 78, 52, 48, 68, 52, 200,
+    120, 88, 80, 78, 52, 48, 68, 52, ...(txSource === 'jpay' ? [72] : []), 200,
   ];
   const colgroupHtml = '<colgroup>' + thLabels.map((_, i) => '<col id="tx-col-' + i + '" style="width:' + (txColDefaults[i] || 80) + 'px;min-width:40px;">').join('') + '</colgroup>';
   const thead = '<thead><tr>' + thLabels.map((l, i) => '<th class="col-body-key">' + esc(l) + '<div class="tx-col-resizer" data-col="' + i + '" title="' + esc(t(locale, 'tx_col_resize_title')) + '"></div></th>').join('') + '</tr></thead>';
@@ -12886,7 +13552,15 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
           cells.push('<td class="col-internal-amount">' + esc(formatAmountWithSeparator(internalAmt)) + '</td>');
         } else if (col.id === 'status') cells.push('<td class="col-narrow" style="background:' + rowSt.cellBg + ';color:' + rowSt.color + ';font-weight:600;"><span class="tx-badge ' + esc(badgeClass) + '">' + esc(t(locale, statusKey)) + '</span></td>');
         else if (col.id === 'noti') cells.push('<td class="col-narrow"><span class="tx-badge tx-badge-noti">' + esc(notiLabel) + '</span></td>');
-        else if (col.id === 'void_refund_detail') {
+        else if (col.id === 'webhook') {
+          const whClass = pgNotiLogWebhookRowClass(log);
+          const whText = pgNotiLogWebhookDisplayText(locale, log, merchant);
+          cells.push(
+            '<td class="col-narrow">' +
+              (whClass ? '<span class="' + esc(whClass) + '">' + esc(whText) + '</span>' : esc(whText)) +
+              '</td>',
+          );
+        } else if (col.id === 'void_refund_detail') {
           const normDetailNl = (s) => String(s ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
           let detailHtml = '-';
           if (isVoidedOrRefunded) {
@@ -13574,6 +14248,13 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
       chillpayUrl: baseUrl + qs({ source: 'chillpay' }),
       jpayUrl: baseUrl + qs({ source: 'jpay' }),
     },
+    hubNav: {
+      group: 'cr',
+      pg: txSource,
+      currentPath: '/admin/daily-noti-summary',
+      req,
+      env: env === 'sandbox' ? 'sandbox' : 'live',
+    },
   });
   const thead =
     '<thead><tr><th>' +
@@ -13887,6 +14568,13 @@ app.get('/admin/daily-pg-summary', requireAuth, requirePage('cr_pg_transactions'
       highlight: true,
     },
     pgSource: { show: true, active: 'chillpay', chillpayUrl: '/admin/transactions', jpayUrl: '/admin/transactions?source=jpay', hideJpay: true },
+    hubNav: {
+      group: 'cr',
+      pg: 'chillpay',
+      currentPath: '/admin/daily-pg-summary',
+      req,
+      env: env === 'sandbox' ? 'sandbox' : 'live',
+    },
   });
   const thead =
     '<thead><tr><th>' +
@@ -14893,6 +15581,13 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
       jpayUrl: '/admin/transactions?source=jpay',
       hideJpay: true,
     },
+    hubNav: {
+      group: 'cr',
+      pg: 'chillpay',
+      currentPath: '/admin/pg-transactions',
+      req,
+      env: env === 'sandbox' ? 'sandbox' : 'live',
+    },
   });
   res.send(
     renderCancelRefundPage(
@@ -15194,6 +15889,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
     t(locale, 'tx_th_status_raw'),
     t(locale, 'tx_th_status'),
     t(locale, 'tx_th_noti'),
+    ...(txSourceExport === 'jpay' ? [t(locale, 'merchants_dealmai_webhook') || '웹훅'] : []),
     t(locale, 'tx_th_detail_reason'),
   ];
   const exportVoidRefundByTxId = buildVoidRefundNotiMap(30);
@@ -15285,6 +15981,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
       ps ?? body.returncode ?? '',
       statusLabel,
       notiLabel,
+      ...(txSourceExport === 'jpay' ? [pgNotiLogWebhookDisplayText(locale, log, merchant)] : []),
       detailStr,
     ].map(csvEscape).join(',');
   });
@@ -15786,6 +16483,13 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       chillpayUrl: withPgSourceInUrl('/admin/transactions', 'chillpay'),
       jpayUrl: withPgSourceInUrl('/admin/transactions', 'jpay'),
     },
+    hubNav: {
+      group: 'cr',
+      pg: getSessionPgSource(req),
+      currentPath: '/admin/cancel-refund/cancel',
+      req,
+      env: getEnvFromReq(req) === 'sandbox' ? 'sandbox' : 'live',
+    },
   });
   const rows = displayCancelled.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
@@ -15837,12 +16541,13 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       <td>${esc(amtDisplay)}</td>
       <td>${esc(amtHuman)}</td>
       <td class="col-narrow" style="font-size:11px;">${psLabel}</td>
+      ${jpayWebhookCellHtml(locale, log, esc)}
       <td class="col-action">${resendBtn}</td>
     </tr>`;
   }).join('');
   const helpPg = '<p class="page-desc">' + t(locale, 'cr_help_cancel') + '</p>';
-  const colgroup = '<colgroup><col style="width:8%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:12%;"/><col style="width:10%;"/><col style="width:14%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:10%;"/><col style="width:7%;"/><col style="width:8%;"/><col style="width:15%;"/></colgroup>';
-  const thead = '<thead><tr><th>' + t(locale, 'pg_logs_th_received_date') + '</th><th>' + t(locale, 'pg_logs_th_received_time') + '</th><th>Route No.</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>' + t(locale, 'tx_th_internal_amount') + '</th><th>PaymentStatus</th><th>' + t(locale, 'pg_result_th_resend') + '</th></tr></thead>';
+  const colgroup = '<colgroup><col style="width:8%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:12%;"/><col style="width:10%;"/><col style="width:14%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:10%;"/><col style="width:7%;"/><col style="width:8%;"/><col style="width:6%;"/><col style="width:15%;"/></colgroup>';
+  const thead = '<thead><tr><th>' + t(locale, 'pg_logs_th_received_date') + '</th><th>' + t(locale, 'pg_logs_th_received_time') + '</th><th>Route No.</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>' + t(locale, 'tx_th_internal_amount') + '</th><th>PaymentStatus</th>' + jpayWebhookThHtml(locale) + '<th>' + t(locale, 'pg_result_th_resend') + '</th></tr></thead>';
   res.send(
     renderCancelRefundPage(
       locale,
@@ -16829,12 +17534,13 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
       ${jpayCrExtraCellsHtml(log, esc)}
       <td class="col-narrow">${esc(amount)}</td>
       <td class="col-narrow">${esc(amountHuman)}</td>
+      ${jpayWebhookCellHtml(locale, log, esc)}
       <td class="col-action">${voidHtml}</td>
       <td class="col-action">${manageHtml}</td>
       <td class="col-action">${emailHtml}</td>
     </tr>`;
   }).join('');
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>ICOPAY</th><th>' + t(locale, 'cr_th_void') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_email') + '</th></tr></thead>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>ICOPAY</th>' + jpayWebhookThHtml(locale) + '<th>' + t(locale, 'cr_th_void') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_email') + '</th></tr></thead>';
   const voidNote = '<p class="page-desc">' + t(locale, 'void_note_paragraph') + '</p>';
   const tableContent = voidNote + voidToolbarHtml + syncResultHtml + '<table class="void-list-table">' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterVoid + historyListHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_void'), totalCountVoid), tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
@@ -17618,6 +18324,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
       ${jpayCrExtraCellsHtml(log, esc)}
       <td class="col-narrow">${esc(amount)}</td>
       <td class="col-narrow">${esc(amountHuman)}</td>
+      ${jpayWebhookCellHtml(locale, log, esc)}
       <td class="col-action">${manageHtml}</td>
       <td class="col-action">${action}</td>
     </tr>`;
@@ -17626,7 +18333,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     '<p class="page-desc">' +
     (t(locale, 'cr_force_refund_desc') || '환불거래 기간이 끝난 뒤, 환경설정의 강제환불 가능 기간(일) 안에서만 추가 환불이 가능합니다. 환불거래와 동일하게 ChillPay 환불 API 호출 후 가맹점·전산에 노티를 보냅니다.').replace(/</g, '&lt;') +
     '</p>';
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_transaction_id') + '</th><th>' + t(locale, 'cr_th_order_no') + '</th>' + JPAY_CR_EXTRA_TH + '<th>' + t(locale, 'cr_th_amount') + '</th><th>' + t(locale, 'cr_th_amount_display') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + (t(locale, 'cr_btn_force_refund') || '강제환불') + '</th></tr></thead>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_transaction_id') + '</th><th>' + t(locale, 'cr_th_order_no') + '</th>' + JPAY_CR_EXTRA_TH + '<th>' + t(locale, 'cr_th_amount') + '</th><th>' + t(locale, 'cr_th_amount_display') + '</th>' + jpayWebhookThHtml(locale) + '<th>' + t(locale, 'cr_th_manage') + '</th><th>' + (t(locale, 'cr_btn_force_refund') || '강제환불') + '</th></tr></thead>';
   const tableContent = descHtml + forceRefundToolbarHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterFv;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_force_refund') || '강제환불', totalCountFv), tableContent, alertHtml, req.originalUrl, req.session.member, req, undefined, env));
 });
@@ -18176,11 +18883,12 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
       ${jpayCrExtraCellsHtml(log, esc)}
       <td class="col-narrow">${esc(amount)}</td>
       <td class="col-narrow">${esc(amountHuman)}</td>
+      ${jpayWebhookCellHtml(locale, log, esc)}
       <td class="col-action">${manageHtml}</td>
       <td class="col-action">${refundHtml}</td>
     </tr>`;
   }).join('');
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>ICOPAY</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_refund') + '</th></tr></thead>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>ICOPAY</th>' + jpayWebhookThHtml(locale) + '<th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_refund') + '</th></tr></thead>';
   const tableContent = syncResultHtml + refundToolbarHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterRf + historyListHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_refund'), totalCountRf), tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
 });
@@ -18297,6 +19005,430 @@ app.post('/admin/cancel-refund/refund-request', requireAuth, requirePage('cr_ref
   await sendVoidOrRefundNoti(log, 'refund', 'manual');
   markRefundNotiSent(txId);
   return res.redirect('/admin/cancel-refund/refund?refund=ok&env=' + encodeURIComponent(refundEnv));
+});
+
+function jpayFollowupFilterKindMatches(rowStatus, kind) {
+  if (!rowStatus || rowStatus === 'all') return true;
+  if (rowStatus === 'pending') return kind === 'paid';
+  if (rowStatus === 'void_done') return kind === 'void_auto' || kind === 'void_manual' || kind === 'force_void';
+  if (rowStatus === 'refund_done') {
+    return kind === 'refund_auto' || kind === 'refund_manual' || kind === 'force_refund';
+  }
+  return true;
+}
+
+app.get('/admin/cancel-refund/jpay-followup', requireAuth, requirePage('cr_jpay_followup'), (req, res) => {
+  setSessionPgSource(req, 'jpay');
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const q = req.query || {};
+  const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const env = getEnvFromReq(req);
+  let alertHtml = '';
+  if (q.void === 'ok') {
+    alertHtml += '<div class="alert alert-ok">' + esc(t(locale, 'jpay_followup_alert_void_ok')) + '</div>';
+  } else if (q.void === 'fail' && q.reason) {
+    alertHtml += '<div class="alert alert-fail">' + esc(t(locale, 'jpay_followup_alert_void_fail')) + ': ' + escQ(q.reason) + '</div>';
+  }
+  if (q.refund === 'ok') {
+    alertHtml += '<div class="alert alert-ok">' + esc(t(locale, 'jpay_followup_alert_refund_ok')) + '</div>';
+  } else if (q.refund === 'fail' && q.reason) {
+    alertHtml += '<div class="alert alert-fail">' + esc(t(locale, 'jpay_followup_alert_refund_fail')) + ': ' + escQ(q.reason) + '</div>';
+  }
+  const cfgJf = loadChillPayTransactionConfig();
+  const chillTzJf = (cfgJf && cfgJf.timezone) ? String(cfgJf.timezone).trim() : 'Asia/Bangkok';
+  const voidRefundByTxJf = buildVoidRefundNotiMap(30);
+  const voidRefundByOrderJf = buildVoidRefundNotiOrderNoMap(30);
+  const filteredLogs = getEnvFilteredLogs(req).filter((log) => getNotiLogPgAcquirer(log) === 'jpay');
+  const reversed = [...filteredLogs].slice().reverse();
+  let followList = reversed.filter((log) => {
+    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const txId = notifBodyTxId(body);
+    const isSuccess = isSuccessPaymentBody(body);
+    return !!(txId && isSuccess && log.merchantId && MERCHANTS.get(log.merchantId));
+  });
+  const sortByJf = ['time', 'date', 'route', 'currency', 'status'].includes((q.sort || '').toString()) ? (q.sort || '').toString() : 'time';
+  const sortDirJf = (q.sortDir || 'desc').toString().toLowerCase() === 'asc' ? 'asc' : 'desc';
+  let dateFromJf = (q.dateFrom || '').toString().trim();
+  let dateToJf = (q.dateTo || '').toString().trim();
+  const qPeriodRawJf = q.period != null && String(q.period).trim() !== '' ? String(q.period).trim() : '';
+  const periodJf = normalizeCrToolbarPeriod(qPeriodRawJf || (dateFromJf || dateToJf ? 'all' : 'today'));
+  const searchKwJf = (q.search || '').toString().trim();
+  const searchFieldJf = (q.searchField || 'all').toString();
+  const rowStatusJf = (q.rowStatus || 'pending').toString();
+  const perPageJf = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
+  const pageJf = Math.max(1, parseInt(q.page, 10) || 1);
+  const toYmdJf = (d) => {
+    try {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: chillTzJf, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+    } catch {
+      return '';
+    }
+  };
+  const isoToYmdJf = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return toYmdJf(d);
+  };
+  const parseYmdJf = (s) => {
+    const m = String(s || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const da = Number(m[3]);
+    if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(da)) return null;
+    return new Date(Date.UTC(y, mo - 1, da));
+  };
+  const addDaysYmdJf = (ymdStr, deltaDays) => {
+    const base = parseYmdJf(ymdStr);
+    if (!base) return '';
+    base.setUTCDate(base.getUTCDate() + (Number(deltaDays) || 0));
+    const y = base.getUTCFullYear();
+    const m = String(base.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(base.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+  const getTzDowJf = (d) => {
+    try {
+      const w = new Intl.DateTimeFormat('en-US', { timeZone: chillTzJf, weekday: 'short' }).format(d);
+      const map = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+      return map[w] != null ? map[w] : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const calcPresetRangeJf = (p) => {
+    const now = new Date();
+    const todayYmd = toYmdJf(now);
+    if (!todayYmd) return null;
+    if (p === 'today') return { startDate: todayYmd, endDate: todayYmd };
+    if (p === 'yesterday') {
+      const y = addDaysYmdJf(todayYmd, -1);
+      return y ? { startDate: y, endDate: y } : null;
+    }
+    if (p === 'thisWeek' || p === 'lastWeek') {
+      const dow = getTzDowJf(now);
+      const mondayDiff = dow === 0 ? -6 : 1 - dow;
+      const thisMon = addDaysYmdJf(todayYmd, mondayDiff);
+      if (!thisMon) return null;
+      if (p === 'thisWeek') return { startDate: thisMon, endDate: addDaysYmdJf(thisMon, 6) };
+      const lastSun = addDaysYmdJf(thisMon, -1);
+      if (!lastSun) return null;
+      return { startDate: addDaysYmdJf(lastSun, -6), endDate: lastSun };
+    }
+    if (p === 'thisMonth' || p === 'lastMonth') {
+      const base = parseYmdJf(todayYmd);
+      if (!base) return null;
+      let y = base.getUTCFullYear();
+      let m = base.getUTCMonth();
+      if (p === 'lastMonth') {
+        m -= 1;
+        if (m < 0) { m = 11; y -= 1; }
+      }
+      const start = new Date(Date.UTC(y, m, 1));
+      const end = new Date(Date.UTC(y, m + 1, 0));
+      const startYmd = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}`;
+      const endYmd = `${end.getUTCFullYear()}-${String(end.getUTCMonth() + 1).padStart(2, '0')}-${String(end.getUTCDate()).padStart(2, '0')}`;
+      return { startDate: startYmd, endDate: endYmd };
+    }
+    return null;
+  };
+  if (periodJf && periodJf !== 'all') {
+    const r = calcPresetRangeJf(periodJf);
+    if (r && r.startDate && r.endDate) {
+      dateFromJf = r.startDate;
+      dateToJf = r.endDate;
+    }
+  }
+  if (dateFromJf || dateToJf) {
+    followList = followList.filter((log) => logMatchesNotiTransactionDateRange(log, dateFromJf, dateToJf, chillTzJf));
+  }
+  if (rowStatusJf && rowStatusJf !== 'all') {
+    followList = followList.filter((log) => {
+      const kind = getNotiTransactionFilterKind(log, voidRefundByTxJf, voidRefundByOrderJf);
+      return jpayFollowupFilterKindMatches(rowStatusJf, kind);
+    });
+  }
+  if (searchKwJf) {
+    const kw = searchKwJf.toLowerCase();
+    followList = followList.filter((log) => {
+      const body = parseNotiBodyForDisplay(log);
+      const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+      const routeNo = notiTransactionRouteNoForSearch(log, body, merchant);
+      if (searchFieldJf === 'all') {
+        const str = [
+          log.receivedAtIso || log.receivedAt,
+          body.TransactionId, body.transactionId, body.transaction_id, body.OrderNo, body.orderNo, body.orderid, body.orderID,
+          body.Amount, body.amount, body.true_amount, body.trueAmount,
+          body.memberid, body.memberId, body.customer, body.email, body.cardno,
+          log.merchantId || '', routeNo, jpayMidLabelForLog(log),
+        ].filter(Boolean).join(' ').toLowerCase();
+        return str.indexOf(kw) !== -1;
+      }
+      let val = '';
+      if (searchFieldJf === 'OrderNo') val = (body.OrderNo || body.orderNo || body.orderid || body.orderID || '') + '';
+      else if (searchFieldJf === 'TransactionId') val = (body.TransactionId || body.transactionId || body.transaction_id || '') + '';
+      else if (searchFieldJf === 'Route') val = routeNo + '';
+      else if (searchFieldJf === 'merchant') val = (log.merchantId || '') + '';
+      return val.toLowerCase().indexOf(kw) !== -1;
+    });
+  }
+  const revJf = sortDirJf === 'asc' ? 1 : -1;
+  if (sortByJf === 'route') {
+    followList.sort((a, b) => {
+      const ma = a.merchantId ? MERCHANTS.get(a.merchantId) : null;
+      const mb = b.merchantId ? MERCHANTS.get(b.merchantId) : null;
+      const ra = ma && (ma.routeNo != null && String(ma.routeNo).trim() !== '') ? String(ma.routeNo) : (String(a.routeKey || '').match(/\d+/) || [])[0] || '';
+      const rb = mb && (mb.routeNo != null && String(mb.routeNo).trim() !== '') ? String(mb.routeNo) : (String(b.routeKey || '').match(/\d+/) || [])[0] || '';
+      const c = ra.localeCompare(rb, 'ja');
+      if (c !== 0) return c * revJf;
+      return ((Date.parse(b.receivedAtIso || b.receivedAt) || 0) - (Date.parse(a.receivedAtIso || a.receivedAt) || 0)) * revJf;
+    });
+  } else {
+    followList.sort((a, b) => ((Date.parse(a.receivedAtIso || a.receivedAt) || 0) - (Date.parse(b.receivedAtIso || b.receivedAt) || 0)) * revJf);
+  }
+  const totalCountJf = followList.length;
+  const totalPagesJf = Math.max(1, Math.ceil(totalCountJf / perPageJf));
+  const pageNumJf = Math.min(pageJf, totalPagesJf);
+  const displayJf = followList.slice((pageNumJf - 1) * perPageJf, pageNumJf * perPageJf);
+  const baseUrlJf = '/admin/cancel-refund/jpay-followup';
+  const qsJf = (overrides) => {
+    const o = {
+      env,
+      source: 'jpay',
+      period: periodJf,
+      sort: sortByJf,
+      sortDir: sortDirJf,
+      search: searchKwJf,
+      searchField: searchFieldJf,
+      rowStatus: rowStatusJf,
+      dateFrom: dateFromJf,
+      dateTo: dateToJf,
+      perPage: perPageJf,
+      page: pageNumJf,
+      ...overrides,
+    };
+    const parts = [];
+    if (o.env) parts.push('env=' + encodeURIComponent(o.env));
+    if (o.source) parts.push('source=' + encodeURIComponent(o.source));
+    if (o.period && o.period !== 'today') parts.push('period=' + encodeURIComponent(o.period));
+    if (o.sort && o.sort !== 'time') parts.push('sort=' + encodeURIComponent(o.sort));
+    if (o.sortDir && o.sortDir !== 'desc') parts.push('sortDir=' + encodeURIComponent(o.sortDir));
+    if (o.search) parts.push('search=' + encodeURIComponent(o.search));
+    if (o.searchField && o.searchField !== 'all') parts.push('searchField=' + encodeURIComponent(o.searchField));
+    if (o.rowStatus && o.rowStatus !== 'pending') parts.push('rowStatus=' + encodeURIComponent(o.rowStatus));
+    if (o.dateFrom) parts.push('dateFrom=' + encodeURIComponent(o.dateFrom));
+    if (o.dateTo) parts.push('dateTo=' + encodeURIComponent(o.dateTo));
+    if (o.perPage != null && o.perPage !== CR_LIST_PER_PAGE_DEFAULT) parts.push('perPage=' + encodeURIComponent(o.perPage));
+    if (o.page != null && o.page !== 1) parts.push('page=' + encodeURIComponent(o.page));
+    return parts.length ? '?' + parts.join('&') : '';
+  };
+  const periodOptsJf = [
+    { key: 'today', label: t(locale, 'tx_filter_today') },
+    { key: 'yesterday', label: t(locale, 'tx_filter_yesterday') },
+    { key: 'thisWeek', label: t(locale, 'tx_filter_this_week') },
+    { key: 'lastWeek', label: t(locale, 'tx_filter_last_week') },
+    { key: 'thisMonth', label: t(locale, 'tx_filter_this_month') },
+    { key: 'lastMonth', label: t(locale, 'tx_filter_last_month') },
+    { key: 'all', label: t(locale, 'tx_filter_all') },
+  ];
+  const periodLinksJf = periodOptsJf.map((o) => {
+    const url = baseUrlJf + qsJf({ period: o.key, page: 1 });
+    const active = periodJf === o.key;
+    return '<a href="' + url + '" style="padding:2px 6px;font-size:10px;border-radius:3px;text-decoration:none;white-space:nowrap;background:' + (active ? '#2563eb' : '#e5e7eb') + ';color:' + (active ? '#fff' : '#374151') + ';margin-left:2px;">' + esc(o.label) + '</a>';
+  }).join('');
+  const rowStatusOptsJf = [
+    { key: 'pending', label: t(locale, 'jpay_followup_filter_pending') },
+    { key: 'void_done', label: t(locale, 'jpay_followup_filter_void_done') },
+    { key: 'refund_done', label: t(locale, 'jpay_followup_filter_refund_done') },
+    { key: 'all', label: t(locale, 'tx_filter_status_all') },
+  ].map((x) => '<option value="' + esc(x.key) + '"' + (rowStatusJf === x.key ? ' selected' : '') + '>' + esc(x.label) + '</option>').join('');
+  const dateFormJf =
+    '<form method="get" action="' + baseUrlJf + '" class="tx-date-form">' +
+    '<input type="hidden" name="env" value="' + esc(env) + '" />' +
+    '<input type="hidden" name="source" value="jpay" />' +
+    '<input type="hidden" name="page" value="1" />' +
+    '<input type="hidden" name="sort" value="' + esc(sortByJf) + '" />' +
+    '<input type="hidden" name="sortDir" value="' + esc(sortDirJf) + '" />' +
+    '<input type="hidden" name="search" value="' + esc(searchKwJf) + '" />' +
+    '<input type="hidden" name="searchField" value="' + esc(searchFieldJf) + '" />' +
+    '<input type="hidden" name="rowStatus" value="' + esc(rowStatusJf) + '" />' +
+    '<input type="hidden" name="perPage" value="' + esc(String(perPageJf)) + '" />' +
+    '<input type="hidden" name="period" value="all" />' +
+    '<input type="date" name="dateFrom" value="' + esc(dateFromJf) + '" class="tx-date-input" /><span class="tx-date-sep">~</span><input type="date" name="dateTo" value="' + esc(dateToJf) + '" class="tx-date-input" /><button type="submit" class="tx-date-btn">' + esc(t(locale, 'tx_apply')) + '</button></form>';
+  const searchFormJf =
+    '<form method="get" action="' + baseUrlJf + '" style="display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px;">' +
+    '<input type="hidden" name="env" value="' + esc(env) + '" />' +
+    '<input type="hidden" name="source" value="jpay" />' +
+    '<input type="hidden" name="page" value="1" />' +
+    '<input type="hidden" name="sort" value="' + esc(sortByJf) + '" />' +
+    '<input type="hidden" name="sortDir" value="' + esc(sortDirJf) + '" />' +
+    '<input type="hidden" name="period" value="' + esc(periodJf) + '" />' +
+    '<input type="hidden" name="dateFrom" value="' + esc(dateFromJf) + '" />' +
+    '<input type="hidden" name="dateTo" value="' + esc(dateToJf) + '" />' +
+    '<input type="hidden" name="perPage" value="' + esc(String(perPageJf)) + '" />' +
+    '<input type="text" name="search" value="' + esc(searchKwJf) + '" placeholder="' + esc(t(locale, 'common_search')) + '" style="padding:2px 4px;font-size:10px;width:100px;border:1px solid #d1d5db;border-radius:3px;" />' +
+    '<select name="rowStatus" style="padding:2px 4px;font-size:10px;border:1px solid #d1d5db;border-radius:3px;">' + rowStatusOptsJf + '</select>' +
+    '<button type="submit" style="padding:2px 6px;font-size:10px;background:#2563eb;color:#fff;border:none;border-radius:3px;cursor:pointer;">' + esc(t(locale, 'common_search')) + '</button></form>';
+  const toolbarJf = '<div class="tx-toolbar">' + periodLinksJf + dateFormJf + '<span class="tx-toolbar-sep">|</span>' + searchFormJf + '</div>';
+  const listPagerFooterJf = buildCrListPagerFooterHtml(locale, t, {
+    totalCount: totalCountJf,
+    totalPages: totalPagesJf,
+    pageNum: pageNumJf,
+    perPage: perPageJf,
+    hrefFor: (o) => baseUrlJf + qsJf(o),
+  });
+  const confirmCancel1 = (t(locale, 'jpay_followup_confirm_cancel') || '').replace(/'/g, "\\'");
+  const confirmCancel2 = (t(locale, 'jpay_followup_confirm_cancel_second') || '').replace(/'/g, "\\'");
+  const confirmRefund1 = (t(locale, 'jpay_followup_confirm_refund') || '').replace(/'/g, "\\'");
+  const confirmRefund2 = (t(locale, 'jpay_followup_confirm_refund_second') || '').replace(/'/g, "\\'");
+  const rowsHtml = displayJf.map((log) => {
+    const realIndex = NOTI_LOGS.indexOf(log);
+    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const body = parseNotiBodyForDisplay(log);
+    const txId = notifBodyTxId(body) || '-';
+    const orderNo = notifBodyOrderNo(body) || '-';
+    const amount = body.Amount ?? body.amount ?? body.true_amount ?? body.trueAmount ?? '-';
+    const rawIco = getNotiBodyAmountRawForIcopay(body, 'jpay');
+    let amountHuman = '-';
+    if (rawIco !== '' && rawIco != null) {
+      const ic = computeIcopayAmount(rawIco, body.Currency ?? body.currency, 'jpay');
+      if (Number.isFinite(ic)) amountHuman = formatAmountWithSeparator(ic);
+    }
+    const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const kind = getNotiTransactionFilterKind(log, voidRefundByTxJf, voidRefundByOrderJf);
+    const txIdTrim = String(txId).trim();
+    const hasVoid = !!(txIdTrim && hasVoidNotiSent(txIdTrim)) || kind === 'void_auto' || kind === 'void_manual' || kind === 'force_void';
+    const hasRefund = !!(txIdTrim && hasRefundNotiSent(txIdTrim)) || kind === 'refund_auto' || kind === 'refund_manual' || kind === 'force_refund';
+    let cancelHtml = '';
+    if (hasVoid) {
+      cancelHtml = '<span class="btn-email-disabled">' + esc(t(locale, 'jpay_followup_cancel_done')) + '</span>';
+    } else {
+      cancelHtml =
+        '<form method="post" action="/admin/cancel-refund/jpay-followup-void" style="display:inline;">' +
+        '<input type="hidden" name="index" value="' + realIndex + '" />' +
+        '<input type="hidden" name="env" value="' + esc(env) + '" />' +
+        '<button type="submit" class="btn-void" data-confirm="' + confirmCancel2 + '" data-confirm-second="' + confirmCancel1 + '">' +
+        esc(t(locale, 'jpay_followup_btn_cancel')) +
+        '</button></form>';
+    }
+    let refundHtml = '';
+    if (hasRefund) {
+      refundHtml = '<span class="btn-email-disabled">' + esc(t(locale, 'jpay_followup_refund_done')) + '</span>';
+    } else {
+      refundHtml =
+        '<form method="post" action="/admin/cancel-refund/jpay-followup-refund" style="display:inline;">' +
+        '<input type="hidden" name="index" value="' + realIndex + '" />' +
+        '<input type="hidden" name="env" value="' + esc(env) + '" />' +
+        '<button type="submit" class="btn-refund" data-confirm="' + confirmRefund2 + '" data-confirm-second="' + confirmRefund1 + '">' +
+        esc(t(locale, 'jpay_followup_btn_refund')) +
+        '</button></form>';
+    }
+    const customer = esc(body.customer ?? body.Customer ?? body.customerName ?? '-');
+    const email = esc(body.email ?? body.Email ?? '-');
+    const cardno = esc(body.cardno ?? body.cardNo ?? body.CardNo ?? '-');
+    return (
+      '<tr>' +
+      '<td>' + esc(dt.date) + '</td>' +
+      '<td>' + esc(dt.timeTh) + '</td>' +
+      '<td>' + esc(routeNoDisplay) + '</td>' +
+      '<td>' + esc(log.merchantId || '') + '</td>' +
+      '<td>' + esc(txId) + '</td>' +
+      '<td>' + esc(orderNo) + '</td>' +
+      '<td>' + customer + '</td>' +
+      '<td>' + email + '</td>' +
+      '<td>' + cardno + '</td>' +
+      '<td>' + esc(String(amount)) + '</td>' +
+      '<td>' + esc(amountHuman) + '</td>' +
+      '<td>' + esc(pgNotiLogWebhookDisplayText(locale, log, merchant)) + '</td>' +
+      '<td>' + cancelHtml + '</td>' +
+      '<td>' + refundHtml + '</td>' +
+      '</tr>'
+    );
+  }).join('');
+  const descHtml = '<p class="cr-desc" style="margin:0 0 12px;font-size:13px;color:#4b5563;line-height:1.5;">' + esc(t(locale, 'jpay_followup_desc')) + '</p>';
+  const theadJf =
+    '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>ICOPAY</th>' + jpayWebhookThHtml(locale) + '<th>' + esc(t(locale, 'jpay_followup_th_cancel')) + '</th><th>' + esc(t(locale, 'jpay_followup_th_refund')) + '</th></tr></thead>';
+  const tableContent = descHtml + toolbarJf + '<table class="cr-table">' + theadJf + '<tbody>' + (rowsHtml || '<tr><td colspan="14" style="text-align:center;color:#777;">' + esc(t(locale, 'cr_no_data')) + '</td></tr>') + '</tbody></table>' + listPagerFooterJf;
+  res.send(
+    renderCancelRefundPage(
+      locale,
+      adminUser,
+      appendCrListCountToTitle(t(locale, 'nav_jpay_followup'), totalCountJf),
+      tableContent,
+      alertHtml,
+      req.originalUrl,
+      req.session.member,
+      req,
+      undefined,
+      env,
+    ),
+  );
+});
+
+app.post('/admin/cancel-refund/jpay-followup-void', requireAuth, requirePage('cr_jpay_followup'), async (req, res) => {
+  const locale = getLocale(req);
+  setSessionPgSource(req, 'jpay');
+  const env = getEnvFromReq(req);
+  const index = parseInt(req.body.index, 10);
+  const redirectBase = '/admin/cancel-refund/jpay-followup?source=jpay&env=' + encodeURIComponent(env);
+  if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
+    return res.redirect(redirectBase + '&void=fail&reason=' + encodeURIComponent(t(locale, 'cr_err_invalid_index')));
+  }
+  const log = NOTI_LOGS[index];
+  const member = getMemberForAccessControl(req);
+  if (member && !filterLogByMemberInternalTarget(log, member)) {
+    return res.redirect(redirectBase + '&void=fail&reason=' + encodeURIComponent(t(locale, 'err_forbidden')));
+  }
+  if (getNotiLogPgAcquirer(log) !== 'jpay') {
+    return res.redirect(redirectBase + '&void=fail&reason=' + encodeURIComponent(t(locale, 'err_bad_request')));
+  }
+  const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+  const txId = notifBodyTxId(body);
+  if (!txId) return res.redirect(redirectBase + '&void=fail&reason=' + encodeURIComponent(t(locale, 'cr_err_no_transaction_id')));
+  if (!isSuccessPaymentBody(body)) {
+    return res.redirect(redirectBase + '&void=fail&reason=' + encodeURIComponent(t(locale, 'jpay_followup_err_not_paid')));
+  }
+  if (hasVoidNotiSent(txId)) {
+    return res.redirect(redirectBase + '&void=ok');
+  }
+  const sendResult = await sendVoidOrRefundNoti(log, 'void', 'manual');
+  markVoidNotiSent(txId);
+  return res.redirect(redirectBase + (sendResult.success ? '&void=ok' : '&void=ok&noti=partial'));
+});
+
+app.post('/admin/cancel-refund/jpay-followup-refund', requireAuth, requirePage('cr_jpay_followup'), async (req, res) => {
+  const locale = getLocale(req);
+  setSessionPgSource(req, 'jpay');
+  const env = getEnvFromReq(req);
+  const index = parseInt(req.body.index, 10);
+  const redirectBase = '/admin/cancel-refund/jpay-followup?source=jpay&env=' + encodeURIComponent(env);
+  if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length) {
+    return res.redirect(redirectBase + '&refund=fail&reason=' + encodeURIComponent(t(locale, 'cr_err_invalid_index')));
+  }
+  const log = NOTI_LOGS[index];
+  const member = getMemberForAccessControl(req);
+  if (member && !filterLogByMemberInternalTarget(log, member)) {
+    return res.redirect(redirectBase + '&refund=fail&reason=' + encodeURIComponent(t(locale, 'err_forbidden')));
+  }
+  if (getNotiLogPgAcquirer(log) !== 'jpay') {
+    return res.redirect(redirectBase + '&refund=fail&reason=' + encodeURIComponent(t(locale, 'err_bad_request')));
+  }
+  const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+  const txId = notifBodyTxId(body);
+  if (!txId) return res.redirect(redirectBase + '&refund=fail&reason=' + encodeURIComponent(t(locale, 'cr_err_no_transaction_id')));
+  if (!isSuccessPaymentBody(body)) {
+    return res.redirect(redirectBase + '&refund=fail&reason=' + encodeURIComponent(t(locale, 'jpay_followup_err_not_paid')));
+  }
+  if (hasRefundNotiSent(txId)) {
+    return res.redirect(redirectBase + '&refund=ok');
+  }
+  const sendResult = await sendVoidOrRefundNoti(log, 'refund', 'manual');
+  markRefundNotiSent(txId);
+  return res.redirect(redirectBase + (sendResult.success ? '&refund=ok' : '&refund=ok&noti=partial'));
 });
 
 app.post('/admin/logs/resend', requireAuth, requirePageAny(['pg_logs', 'pg_result']), async (req, res) => {
@@ -18576,6 +19708,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
   const hubHtmlLogsResult = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/logs-result', q, logPgResult, {
     showEnv: true,
     getEnv: () => logEnvResult,
+    req,
   });
 
   const rows = pagedLogsResult
@@ -18625,6 +19758,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
         <td><span class="${relayClass}">${highlightLogSearchHtml(relayLabel, logSearchRaw, esc)}</span></td>
         <td class="col-fail-reason">${failReason ? highlightLogSearchHtml(failReason, logSearchRaw, esc) : '-'}</td>
         <td class="col-noti-kind">${notiKindCell}</td>
+        ${logPgResult === 'jpay' ? jpayWebhookCellHtml(locale, log, esc) : ''}
         <td>${resendBtn}</td>
       </tr>`;
     })
@@ -18740,7 +19874,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
         <colgroup>
           <col id="logs-result-col-0" style="width:7%;" /><col id="logs-result-col-1" style="width:8%;" /><col id="logs-result-col-2" style="width:4%;" /><col id="logs-result-col-3" style="width:4%;" /><col id="logs-result-col-4" style="width:11%;" />
           <col id="logs-result-col-5" style="width:7%;" /><col id="logs-result-col-6" style="width:10%;" /><col id="logs-result-col-7" style="width:8%;" /><col id="logs-result-col-8" style="width:5%;" /><col id="logs-result-col-9" style="width:6%;" />
-          <col id="logs-result-col-10" style="width:5%;" /><col id="logs-result-col-11" style="width:10%;" /><col id="logs-result-col-12" style="width:5%;" /><col id="logs-result-col-13" style="width:10%;" />
+          <col id="logs-result-col-10" style="width:5%;" /><col id="logs-result-col-11" style="width:10%;" /><col id="logs-result-col-12" style="width:5%;" />${logPgResult === 'jpay' ? '<col id="logs-result-col-webhook" style="width:6%;" />' : ''}<col id="logs-result-col-13" style="width:10%;" />
         </colgroup>
         <thead>
           <tr>
@@ -18757,11 +19891,12 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
             <th>${t(locale, 'dev_result_th_success')}<div class="logs-result-resizer" data-col="10" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
             <th>${t(locale, 'cr_th_fail_reason')}<div class="logs-result-resizer" data-col="11" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
             <th>${t(locale, 'logs_result_th_noti_kind')}<div class="logs-result-resizer" data-col="12" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            ${logPgResult === 'jpay' ? '<th>' + (t(locale, 'merchants_dealmai_webhook') || '웹훅') + '</th>' : ''}
             <th>${t(locale, 'pg_logs_th_resend')}<div class="logs-result-resizer" data-col="13" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
           </tr>
         </thead>
         <tbody>
-          ${rows || '<tr><td colspan="14" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
+          ${rows || '<tr><td colspan="' + (logPgResult === 'jpay' ? 15 : 14) + '" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
       ${logPagerFooterResult}
@@ -21873,7 +23008,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
     ? withIndexInternal.filter(({ log }) => internalNotiLogVisibleToMember(log, memberInternal))
     : withIndexInternal;
   filteredReversedInternal = filteredReversedInternal.filter(({ log }) => getInternalLogPgAcquirer(log) === logPgInternal);
-  const hubHtmlInternal = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/internal', qIn, logPgInternal, { showEnv: false });
+  const hubHtmlInternal = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/internal', qIn, logPgInternal, { showEnv: false, req });
   // 날짜/프리셋 필터 + 페이징
   const todayYmd = getBangkokTodayYmd();
   const dr = parseLogDateRangeFromQuery(qIn);
@@ -22110,7 +23245,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
     ? withIndexInternalResult.filter(({ log }) => internalNotiLogVisibleToMember(log, memberInternalResult))
     : withIndexInternalResult;
   filteredReversedInternalResult = filteredReversedInternalResult.filter(({ log }) => getInternalLogPgAcquirer(log) === logPgIntRes);
-  const hubHtmlInternalResult = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/internal-result', q, logPgIntRes, { showEnv: false });
+  const hubHtmlInternalResult = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/internal-result', q, logPgIntRes, { showEnv: false, req });
   // 날짜/프리셋 필터 + 페이징
   const todayYmd = getBangkokTodayYmd();
   const dr = parseLogDateRangeFromQuery(q);
@@ -22315,7 +23450,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
     ? withIndexDev.filter(({ log }) => canAccessInternalTarget(memberDev, log.internalTargetId))
     : withIndexDev;
   filteredReversedDev = filteredReversedDev.filter(({ log }) => getInternalLogPgAcquirer(log) === logPgDev);
-  const hubHtmlDevInternal = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dev-internal', qDev, logPgDev, { showEnv: false });
+  const hubHtmlDevInternal = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dev-internal', qDev, logPgDev, { showEnv: false, req });
   const todayYmdDev = getBangkokTodayYmd();
   const drDev = parseLogDateRangeFromQuery(qDev);
   const startDateStrDev = drDev.startDate;
@@ -22562,7 +23697,7 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
       return true;
     });
   }
-  const hubHtml = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dealmai-webhook', q, logPg, { showEnv: false });
+  const hubHtml = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dealmai-webhook', q, logPg, { showEnv: false, req });
   const perPage = parseAllowedPerPage(q.perPage);
   const totalCount = filtered.length;
   const pageNum = Math.max(1, parseInt(q.page, 10) || 1);
@@ -22653,7 +23788,7 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
       return true;
     });
   }
-  const hubHtml = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dealmai-webhook-result', q, logPg, { showEnv: false });
+  const hubHtml = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dealmai-webhook-result', q, logPg, { showEnv: false, req });
   const okN = logs.filter((l) => String(l.webhookDeliveryStatus || '').toLowerCase() === 'ok').length;
   const failN = logs.filter((l) => String(l.webhookDeliveryStatus || '').toLowerCase() === 'fail').length;
   const skipN = logs.filter((l) => String(l.webhookDeliveryStatus || '').toLowerCase() === 'skip').length;
@@ -22927,7 +24062,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
     ? withIndexDevResult.filter(({ log }) => canAccessInternalTarget(memberDevResult, log.internalTargetId))
     : withIndexDevResult;
   filteredReversedDevResult = filteredReversedDevResult.filter(({ log }) => getInternalLogPgAcquirer(log) === logPgDevRes);
-  const hubHtmlDevResult = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dev-internal-result', q, logPgDevRes, { showEnv: false });
+  const hubHtmlDevResult = buildLogHubToolbarHtml(locale, esc, req.session.member, '/admin/dev-internal-result', q, logPgDevRes, { showEnv: false, req });
   // 날짜/프리셋 필터 + 페이징
   const todayYmd = getBangkokTodayYmd();
   const dr = parseLogDateRangeFromQuery(q);
