@@ -461,14 +461,17 @@ function getFirstAllowedRedirectUrl(permissions) {
   if (!Array.isArray(permissions) || permissions.length === 0) return '/admin/merchants';
   if (permissions.includes('cancel_refund')) {
     const otl = otlIcopayNotiDefaultTransactionsUrl();
-    return otl || '/admin/transactions';
+    return otl || withPgSourceInUrl('/admin/transactions', DEFAULT_PG_SOURCE);
   }
   for (const key of PAGE_KEYS) {
     if (permissions.includes(key) && PAGE_KEY_TO_DEFAULT_URL[key]) {
       if (key === 'cr_transactions') {
         const otl = otlIcopayNotiDefaultTransactionsUrl();
         if (otl) return otl;
+        return withPgSourceInUrl(PAGE_KEY_TO_DEFAULT_URL[key], DEFAULT_PG_SOURCE);
       }
+      if (key === 'pg_logs') return withPgSourceInUrl(PAGE_KEY_TO_DEFAULT_URL[key], DEFAULT_PG_SOURCE);
+      if (key === 'pg_result') return withPgSourceInUrl(PAGE_KEY_TO_DEFAULT_URL[key], DEFAULT_PG_SOURCE);
       return PAGE_KEY_TO_DEFAULT_URL[key];
     }
   }
@@ -522,7 +525,7 @@ function otlIcopayNotiDefaultTransactionsUrl() {
     const site = loadSiteSettings();
     const bundle = ((site.sidebarTitle || '') + ' ' + (site.sidebarSub || '')).toUpperCase();
     if (bundle.includes('OTL') && bundle.includes('ICOPAY')) {
-      return '/admin/transactions?period=today&sort=time&sortDir=desc';
+      return withPgSourceInUrl('/admin/transactions?period=today&sort=time&sortDir=desc', DEFAULT_PG_SOURCE);
     }
   } catch (_) {}
   return null;
@@ -2696,14 +2699,51 @@ function getInternalLogPgAcquirer(log) {
   return 'chillpay';
 }
 
-/** 로그분석 URL 쿼리: source=jpay 또는 ChillPay(기본) 시 source 생략 */
+/** 종합거래·로그분석 PG 기본: JPAY (로그인 직후·세션 미설정 시) */
+const DEFAULT_PG_SOURCE = 'jpay';
+
+function getSessionPgSource(req) {
+  const s = req && req.session && req.session.lastPgSource;
+  if (s === 'jpay' || s === 'chillpay') return s;
+  return DEFAULT_PG_SOURCE;
+}
+
+function setSessionPgSource(req, pg) {
+  if (!req || !req.session) return;
+  if (pg === 'jpay' || pg === 'chillpay') req.session.lastPgSource = pg;
+}
+
+/** path?a=1 에 source=jpay|chillpay 를 넣거나 갱신 */
+function withPgSourceInUrl(pathOrUrl, pg) {
+  const s = pg === 'jpay' ? 'jpay' : 'chillpay';
+  const str = String(pathOrUrl || '');
+  const hashIdx = str.indexOf('#');
+  const hash = hashIdx >= 0 ? str.slice(hashIdx) : '';
+  const pathQ = hashIdx >= 0 ? str.slice(0, hashIdx) : str;
+  const qIdx = pathQ.indexOf('?');
+  const pathname = qIdx >= 0 ? pathQ.slice(0, qIdx) : pathQ;
+  const params = new URLSearchParams(qIdx >= 0 ? pathQ.slice(qIdx + 1) : '');
+  params.set('source', s);
+  const qs = params.toString();
+  return pathname + (qs ? '?' + qs : '') + hash;
+}
+
+function urlWithSessionPgSource(req, pathOrUrl) {
+  return withPgSourceInUrl(pathOrUrl, getSessionPgSource(req));
+}
+
+/** source 쿼리 없으면 세션(또는 기본 JPAY) PG로 리다이렉트 */
+function ensurePgSourceInQuery(req, res) {
+  if (!req || !req.query || req.query.source != null) return false;
+  const pg = getSessionPgSource(req);
+  res.redirect(302, req.path + '?' + buildQueryString({ ...req.query, source: pg }));
+  return true;
+}
+
+/** 로그분석·허브 URL: ChillPay/JPAY 모두 source 쿼리 명시 */
 function logPgQueryWithBase(q, pg, extra) {
   const o = { ...(q || {}), ...(extra || {}) };
-  if (pg === 'chillpay') {
-    delete o.source;
-  } else {
-    o.source = 'jpay';
-  }
+  o.source = pg === 'jpay' ? 'jpay' : 'chillpay';
   return o;
 }
 
@@ -7731,17 +7771,17 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
   if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('dealmai_webhook_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('dealmai_webhook_result') || can('traffic_analysis') || can('mail_logs')) {
     const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/dealmai-webhook-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/dealmai-webhook', '/admin/pg-notify-delivery', '/admin/mail-logs', '/admin/traffic'];
     const logItems = [];
-    if (can('pg_result')) logItems.push(link('/admin/logs-result', t(locale, 'nav_pg_result')));
-    if (can('internal_result')) logItems.push(link('/admin/internal-result', t(locale, 'nav_internal_result')));
-    if (can('dev_result')) logItems.push(link('/admin/dev-internal-result', t(locale, 'nav_dev_result')));
-    if (can('dealmai_webhook_result')) logItems.push(link('/admin/dealmai-webhook-result', t(locale, 'nav_dealmai_webhook_result')));
-    if (can('pg_logs')) logItems.push(link('/admin/logs', t(locale, 'nav_pg_noti_log')));
-    if (can('internal_logs')) logItems.push(link('/admin/internal', t(locale, 'nav_internal_noti_log')));
+    if (can('pg_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs-result'), t(locale, 'nav_pg_result')));
+    if (can('internal_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal-result'), t(locale, 'nav_internal_result')));
+    if (can('dev_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal-result'), t(locale, 'nav_dev_result')));
+    if (can('dealmai_webhook_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook-result'), t(locale, 'nav_dealmai_webhook_result')));
+    if (can('pg_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs'), t(locale, 'nav_pg_noti_log')));
+    if (can('internal_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal'), t(locale, 'nav_internal_noti_log')));
     if (can('dev_internal_logs')) {
-      logItems.push(link('/admin/dev-internal', t(locale, 'nav_dev_internal_noti_log')));
+      logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal'), t(locale, 'nav_dev_internal_noti_log')));
       logItems.push(link('/admin/pg-notify-delivery', t(locale, 'nav_pg_notify_delivery')));
     }
-    if (can('dealmai_webhook_logs')) logItems.push(link('/admin/dealmai-webhook', t(locale, 'nav_dealmai_webhook_log')));
+    if (can('dealmai_webhook_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook'), t(locale, 'nav_dealmai_webhook_log')));
     if (can('mail_logs')) logItems.push(link('/admin/mail-logs', t(locale, 'nav_mail_logs')));
     if (can('traffic_analysis')) logItems.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis')));
     nav.push(navGroup(t(locale, 'nav_logs'), logPaths, logItems.join('')));
@@ -7763,8 +7803,13 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
     const crPaths = ['/admin/transactions', '/admin/daily-noti-summary', '/admin/daily-noti-summary/export', '/admin/pg-transactions', '/admin/daily-pg-summary', '/admin/daily-pg-summary/export', '/admin/cancel-refund/cancel', '/admin/cancel-refund/void', '/admin/cancel-refund/void-summary', '/admin/cancel-refund/refund', '/admin/cancel-refund/force-refund', '/admin/cancel-refund/noti', '/admin/cancel-refund/void-deleted-list'];
     const crLabel = t(locale, 'nav_cancel_refund');
     const crItems = [];
-    if (can('cr_transactions')) crItems.push(link('/admin/transactions', t(locale, 'nav_transaction_list')));
-    if (can('cr_transactions')) crItems.push(link('/admin/daily-noti-summary?period=thisMonth&dateSort=desc', t(locale, 'nav_daily_noti_summary')));
+    const txNavUrl = urlWithSessionPgSource(req, '/admin/transactions');
+    if (can('cr_transactions')) crItems.push(link(txNavUrl, t(locale, 'nav_transaction_list')));
+    if (can('cr_transactions')) {
+      crItems.push(
+        link(urlWithSessionPgSource(req, '/admin/daily-noti-summary?period=thisMonth&dateSort=desc'), t(locale, 'nav_daily_noti_summary')),
+      );
+    }
     if (can('cr_pg_transactions')) crItems.push(link('/admin/pg-transactions?sort=today', t(locale, 'nav_pg_transaction_list')));
     if (can('cr_pg_transactions')) crItems.push(link('/admin/daily-pg-summary?sort=thisMonth&dateSort=desc', t(locale, 'nav_daily_pg_summary')));
     if (can('cr_cancel')) crItems.push(link('/admin/cancel-refund/cancel', t(locale, 'nav_cancel_refund_cancel')));
@@ -7775,7 +7820,7 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
     if (can('cr_noti')) crItems.push(link('/admin/cancel-refund/noti', t(locale, 'nav_cancel_refund_noti'), 'nav-item-small'));
     if (can('cr_void_deleted')) crItems.push(link('/admin/cancel-refund/void-deleted-list', t(locale, 'cr_void_deleted_list')));
     const crOpen = sectionOpen(crPaths);
-    nav.push(`<details class="nav-group"${crOpen ? ' open' : ''}><summary class="nav-group-summary"><a href="/admin/transactions" class="nav-group-summary-link" style="color:inherit;text-decoration:none;" onclick="event.stopPropagation()">${crLabel}</a></summary><div class="nav-group-items">${crItems.join('')}</div></details>`);
+    nav.push(`<details class="nav-group"${crOpen ? ' open' : ''}><summary class="nav-group-summary"><a href="${txNavUrl}" class="nav-group-summary-link" style="color:inherit;text-decoration:none;" onclick="event.stopPropagation()">${crLabel}</a></summary><div class="nav-group-items">${crItems.join('')}</div></details>`);
   }
   if (can('test_config') || can('test_run') || can('test_history')) {
     const testPaths = ['/admin/test-configs', '/admin/test-pay', '/admin/test-recurring', '/admin/test-logs'];
@@ -8039,6 +8084,7 @@ app.post('/admin/login', (req, res) => {
       };
       req.session.adminUser = member.userId;
       req.session.mustSetupOtp = true;
+      setSessionPgSource(req, DEFAULT_PG_SOURCE);
       return res.redirect('/admin/account?forceOtp=1');
     }
 
@@ -8092,6 +8138,7 @@ app.post('/admin/login', (req, res) => {
   req.session.adminUser = member.userId;
   if (member.mustChangePassword) req.session.mustChangePassword = true;
   req.session.mustSetupOtp = false;
+  setSessionPgSource(req, DEFAULT_PG_SOURCE);
   syncSessionHealthAlertPending(req, getLocale(req));
 
   if (member.mustChangePassword) {
@@ -11139,6 +11186,7 @@ app.post('/admin/merchants/delete', requireAuth, requirePage('merchants'), (req,
 
 // PG 노티 로그 페이지 (수신시간 4타임존, 1건 1줄, Json/callback·json/result)
 app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
+  if (ensurePgSourceInQuery(req, res)) return;
   const locale = getLocale(req);
   const q = req.query || {};
   const escQ = (s) => (s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
@@ -11246,8 +11294,9 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
     .map((log, i) => {
       const realIndex = NOTI_LOGS.indexOf(log);
       const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
-      let jsonCallback = log.kind === 'callback' ? JSON.stringify(log.body, null, 2) : '';
-      let jsonResult = log.kind === 'result' ? JSON.stringify(log.body, null, 2) : '';
+      const bodyForDisplayPg = parseNotiBodyForDisplay(log);
+      let jsonCallback = log.kind === 'callback' ? JSON.stringify(bodyForDisplayPg, null, 2) : '';
+      let jsonResult = log.kind === 'result' ? JSON.stringify(bodyForDisplayPg, null, 2) : '';
       if (log.kind === 'callback' && jsonCallback === '{}' && log.rawBody) jsonCallback = String(log.rawBody);
       if (log.kind === 'result' && jsonResult === '{}' && log.rawBody) jsonResult = String(log.rawBody);
       const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -11991,6 +12040,153 @@ function parseNotiBody(log) {
   }
   return {};
 }
+
+/** JPAY 노티·원문·attach 에서 표시용 필드 소스 수집 */
+function jpayCollectNotifyFieldSources(log) {
+  const sources = [];
+  const body = parseNotiBody(log);
+  if (body && typeof body === 'object') sources.push(body);
+  if (log && log.rawBody != null && String(log.rawBody).trim()) {
+    const rawParsed = parseNotiRawBodyToObject(Buffer.from(String(log.rawBody), 'utf8'), log.contentType || '');
+    if (rawParsed && Object.keys(rawParsed).length) sources.push(rawParsed);
+  }
+  const attach = body.attach ?? body.Attach;
+  if (attach != null && String(attach).trim()) {
+    const attachStr = String(attach).trim();
+    try {
+      const aj = JSON.parse(attachStr);
+      if (aj && typeof aj === 'object' && !Array.isArray(aj)) sources.push(aj);
+    } catch {
+      /* attach 가 일반 문자열이면 본문 필드에서만 조회 */
+    }
+  }
+  if (body.customer && typeof body.customer === 'object') sources.push(body.customer);
+  return sources;
+}
+
+function pickFromJpayFieldSources(sources, keys) {
+  for (const src of sources) {
+    const v = getFirstNonEmptyField(src, keys);
+    if (v) return v;
+  }
+  return '';
+}
+
+function pickJpayCustomerNameFromSources(sources) {
+  const first = pickFromJpayFieldSources(sources, [
+    'customer',
+    'Customer',
+    'pay_firstname',
+    'firstname',
+    'firstName',
+    'pay_first_name',
+    'CustomerName',
+    'customerName',
+    'customer_name',
+    'custName',
+    'name',
+    'shipping_firstname',
+  ]);
+  const last = pickFromJpayFieldSources(sources, [
+    'pay_lastname',
+    'lastname',
+    'lastName',
+    'pay_last_name',
+    'shipping_lastname',
+  ]);
+  if (first && last && first !== last) return first + ' ' + last;
+  return first || last;
+}
+
+function pickJpayCustomerEmailFromSources(sources) {
+  return pickFromJpayFieldSources(sources, [
+    'email',
+    'Email',
+    'pay_email_address',
+    'customerEmail',
+    'customer_email',
+    'pay_email',
+  ]);
+}
+
+function pickJpayCardNumberFromSources(sources) {
+  return pickFromJpayFieldSources(sources, [
+    'cardno',
+    'cardNo',
+    'CardNumber',
+    'card_number',
+    'pay_cardno',
+    'pay_card_no',
+    'cardNoMasked',
+    'card_number_masked',
+  ]);
+}
+
+/** JPAY 종합거래 표시용: customer·email·cardno 정규 키 주입 (원본 저장·릴레이는 parseNotiBody 유지) */
+function enrichJpayNotiBodyForDisplay(body, log) {
+  if (!body || typeof body !== 'object') body = {};
+  const out = { ...body };
+  const sources = jpayCollectNotifyFieldSources(log);
+  const customer = pickJpayCustomerNameFromSources(sources);
+  const email = pickJpayCustomerEmailFromSources(sources);
+  const cardno = pickJpayCardNumberFromSources(sources);
+  if (customer && !pickFromJpayFieldSources([out], ['customer', 'Customer', 'CustomerName', 'customerName'])) {
+    out.customer = customer;
+  }
+  if (email && !pickFromJpayFieldSources([out], ['email', 'Email', 'pay_email_address'])) {
+    out.email = email;
+  }
+  if (cardno && !pickFromJpayFieldSources([out], ['cardno', 'cardNo', 'CardNumber', 'pay_cardno'])) {
+    out.cardno = cardno;
+  }
+  return out;
+}
+
+function parseNotiBodyForDisplay(log) {
+  const body = parseNotiBody(log);
+  if (log && getNotiLogPgAcquirer(log) === 'jpay') {
+    return enrichJpayNotiBodyForDisplay(body, log);
+  }
+  return body;
+}
+
+const JPAY_TX_EXTRA_COLUMNS = [
+  { type: 'body', keys: ['customer', 'Customer', 'CustomerName', 'customerName'] },
+  { type: 'body', keys: ['email', 'Email', 'pay_email_address'] },
+  { type: 'body', keys: ['cardno', 'cardNo', 'CardNumber', 'pay_cardno'] },
+];
+
+function getTransactionListColumns(txSource) {
+  if (txSource !== 'jpay') return TRANSACTION_LIST_COLUMNS;
+  const cols = [];
+  for (const col of TRANSACTION_LIST_COLUMNS) {
+    cols.push(col);
+    if (col.type === 'body' && col.keys && (col.keys[0] === 'CustomerId' || col.keys.includes('customerId'))) {
+      cols.push(...JPAY_TX_EXTRA_COLUMNS);
+    }
+  }
+  return cols;
+}
+
+function jpayCrExtraCellsHtml(log, esc) {
+  if (getNotiLogPgAcquirer(log) !== 'jpay') {
+    return '<td class="col-narrow">-</td><td class="col-narrow">-</td><td class="col-narrow">-</td>';
+  }
+  const body = parseNotiBodyForDisplay(log);
+  return (
+    '<td class="col-narrow">' +
+    esc(body.customer || '-') +
+    '</td><td class="col-narrow">' +
+    esc(body.email || '-') +
+    '</td><td class="col-narrow">' +
+    esc(body.cardno || '-') +
+    '</td>'
+  );
+}
+
+const JPAY_CR_EXTRA_TH =
+  '<th>Customer</th><th>Email</th><th>CardNo</th>';
+
 // 테스트 결제 환경 설정과 동일한 Currency 코드 → 표시용 (JPY, USD, KRW, THB)
 function formatCurrencyForDisplay(val) {
   if (val == null || val === '') return null;
@@ -12046,6 +12242,7 @@ const TRANSACTION_SEARCH_FIELDS = [
   { key: 'Description', label: 'Description' },
 ];
 app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req, res) => {
+  if (ensurePgSourceInQuery(req, res)) return;
   const locale = getLocale(req);
   const adminUser = req.session.adminUser || '';
   const q = req.query || {};
@@ -12180,7 +12377,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   if (searchKw) {
     const kw = searchKw.toLowerCase();
     list = list.filter((log) => {
-      const body = parseNotiBody(log);
+      const body = parseNotiBodyForDisplay(log);
       const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
       const routeNo = notiTransactionRouteNoForSearch(log, body, merchant);
       if (searchField === 'all') {
@@ -12190,7 +12387,8 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
           body.Amount, body.amount, body.true_amount, body.trueAmount,
           body.PaymentStatus, body.paymentStatus, body.status, body.returncode, body.PaymentDate, body.paymentDate, body.datetime,
           formatCurrencyForDisplay(body.Currency || body.currency), body.Currency, body.currency,
-          body.CustomerId, body.customerId, body.PaymentDescription, body.paymentDescription, body.Description, body.description,
+          body.CustomerId, body.customerId, body.customer, body.email, body.cardno,
+          body.PaymentDescription, body.paymentDescription, body.Description, body.description,
           body.memberid, body.memberId, body.attach,
           log.merchantId || '', routeNo, jpayMidLabelForLog(log), log.jpayRouteToken || '',
         ].filter(Boolean).join(' ').toLowerCase();
@@ -12368,6 +12566,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     t(locale, 'cr_th_merchant'),
     'Route',
     'CustomerId',
+    ...(txSource === 'jpay' ? ['Customer', 'Email', 'CardNo'] : []),
     'OrderNo',
     'PaymentDate',
     'Amount',
@@ -12378,6 +12577,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     t(locale, 'tx_th_noti'),
     t(locale, 'tx_th_detail_reason'),
   ];
+  const txListColumns = getTransactionListColumns(txSource);
   const voidRefundByTxId = buildVoidRefundNotiMap(30);
   const voidRefundByOrderNo = buildVoidRefundNotiOrderNoMap(30);
   const formatVoidRefundSentAt = (iso) => {
@@ -12605,11 +12805,15 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   })();
   const legendHtml = '<div class="admin-page-desc" style="margin-bottom:16px;"><div class="tx-legend-grid">' + legendCells + '</div></div>';
   const notiRowStatusStyles = { success: { rowBg: '#f0fdf4', cellBg: '#dcfce7', color: '#166534' }, fail: { rowBg: '#fef2f2', cellBg: '#fecaca', color: '#991b1b' }, void: { rowBg: '#fff7ed', cellBg: '#fed7aa', color: '#9a3412' }, refund: { rowBg: '#eff6ff', cellBg: '#bfdbfe', color: '#1e40af' }, other: { rowBg: '#f9fafb', cellBg: '#e5e7eb', color: '#4b5563' } };
-  const txColDefaults = [40, 72, 95, 100, 72, 95, 52, 90, 120, 88, 80, 78, 52, 48, 68, 52, 200];
+  const txColDefaults = [
+    40, 72, 95, 100, 72, 95, 52, 90,
+    ...(txSource === 'jpay' ? [88, 110, 100] : []),
+    120, 88, 80, 78, 52, 48, 68, 52, 200,
+  ];
   const colgroupHtml = '<colgroup>' + thLabels.map((_, i) => '<col id="tx-col-' + i + '" style="width:' + (txColDefaults[i] || 80) + 'px;min-width:40px;">').join('') + '</colgroup>';
   const thead = '<thead><tr>' + thLabels.map((l, i) => '<th class="col-body-key">' + esc(l) + '<div class="tx-col-resizer" data-col="' + i + '" title="' + esc(t(locale, 'tx_col_resize_title')) + '"></div></th>').join('') + '</tr></thead>';
   const rows = list.map((log, index) => {
-    const body = parseNotiBody(log);
+    const body = parseNotiBodyForDisplay(log);
     const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
     const isCancel = isDefinitelyCancelPaymentStatus(ps);
     const isSuccess = isSuccessPaymentBody(body);
@@ -12663,7 +12867,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
     const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
     const cells = [];
-    for (const col of TRANSACTION_LIST_COLUMNS) {
+    for (const col of txListColumns) {
       if (col.type === 'fixed') {
         if (col.id === 'no') cells.push('<td class="col-no">' + esc(String((pageNum - 1) * perPage + index + 1)) + '</td>');
         else if (col.id === 'received_date') cells.push('<td class="col-date">' + esc(dt.date) + '</td>');
@@ -12924,7 +13128,7 @@ function getFilteredNotiLogsForDailySummary(req) {
   if (searchKw) {
     const kw = searchKw.toLowerCase();
     list = list.filter((log) => {
-      const body = parseNotiBody(log);
+      const body = parseNotiBodyForDisplay(log);
       const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
       const routeNo = notiTransactionRouteNoForSearch(log, body, merchant);
       if (searchField === 'all') {
@@ -12953,6 +13157,9 @@ function getFilteredNotiLogsForDailySummary(req) {
           body.currency,
           body.CustomerId,
           body.customerId,
+          body.customer,
+          body.email,
+          body.cardno,
           body.PaymentDescription,
           body.paymentDescription,
           body.Description,
@@ -13208,6 +13415,7 @@ function computeDailyPgSummaryDayRows(req) {
 }
 
 app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions'), (req, res) => {
+  if (ensurePgSourceInQuery(req, res)) return;
   const locale = getLocale(req);
   const adminUser = req.session.adminUser || '';
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -13241,7 +13449,8 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     if (o.notiKind && o.notiKind !== 'call') parts.push('notiKind=' + encodeURIComponent(o.notiKind));
     if (o.dateSort && o.dateSort !== 'desc') parts.push('dateSort=' + encodeURIComponent(o.dateSort));
     if (o.env === 'sandbox') parts.push('env=' + encodeURIComponent('sandbox'));
-    if (o.source === 'jpay') parts.push('source=' + encodeURIComponent('jpay'));
+    if (o.source === 'chillpay') parts.push('source=' + encodeURIComponent('chillpay'));
+    else if (o.source === 'jpay') parts.push('source=' + encodeURIComponent('jpay'));
     return parts.length ? '?' + parts.join('&') : '';
   };
   const exportUrl = baseUrl + '/export' + qs();
@@ -13293,7 +13502,9 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     baseUrl +
     '" style="display:inline-flex;align-items:center;gap:6px;margin-left:8px;flex-wrap:wrap;">' +
     '<input type="hidden" name="period" value="all" />' +
-    (txSource === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+    '<input type="hidden" name="source" value="' +
+    esc(txSource === 'jpay' ? 'jpay' : 'chillpay') +
+    '" />' +
     (env === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : '') +
     '<input type="hidden" name="notiKind" value="' +
     esc(f.notiKindFilter) +
@@ -13443,7 +13654,12 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     esc(t(locale, 'cr_th_merchant')) +
     '","Amt","ICOPAY","CCY","' +
     esc(t(locale, 'tx_th_status')) +
-    '"];var html="<div style=\\"overflow-x:auto;\\"><table class=\\"tx-list-table\\"><thead><tr>"+th.map(function(h){return "<th>"+esc(h)+"</th>";}).join("")+"</tr></thead><tbody>";rows.forEach(function(r,i){html+="<tr><td>"+(i+1)+"</td><td>"+esc(r.d)+"</td><td style=\\"font-size:11px;\\">TH:"+esc(r.th)+"<br><span class=\\"time-jp\\">JP:"+esc(r.jp)+"</span></td><td style=\\"font-size:11px;\\">"+esc(r.txid)+"</td><td style=\\"font-size:11px;\\">"+esc(r.mid)+"</td><td>"+esc(r.amt)+"</td><td>"+esc(r.ico)+"</td><td>"+esc(r.ccy)+"</td><td>"+esc(r.st)+"</td></tr>";});html+="</tbody></table></div>";if(j.truncated)html="<p style=\\"color:#b45309;font-size:12px;margin-bottom:8px;\\">'+esc(t(locale, 'daily_detail_truncated')) +
+    (txSource === 'jpay' ? '","Customer","Email","CardNo' : '') +
+    '"];var html="<div style=\\"overflow-x:auto;\\"><table class=\\"tx-list-table\\"><thead><tr>"+th.map(function(h){return "<th>"+esc(h)+"</th>";}).join("")+"</tr></thead><tbody>";rows.forEach(function(r,i){html+="<tr><td>"+(i+1)+"</td><td>"+esc(r.d)+"</td><td style=\\"font-size:11px;\\">TH:"+esc(r.th)+"<br><span class=\\"time-jp\\">JP:"+esc(r.jp)+"</span></td><td style=\\"font-size:11px;\\">"+esc(r.txid)+"</td><td style=\\"font-size:11px;\\">"+esc(r.mid)+"</td><td>"+esc(r.amt)+"</td><td>"+esc(r.ico)+"</td><td>"+esc(r.ccy)+"</td><td>"+esc(r.st)+"</td>"' +
+    (txSource === 'jpay'
+      ? '+(j.jpay?("<td>"+esc(r.customer)+"</td><td>"+esc(r.email)+"</td><td>"+esc(r.cardno)+"</td>"):"")'
+      : '') +
+    '+"</tr>";});html+="</tbody></table></div>";if(j.truncated)html="<p style=\\"color:#b45309;font-size:12px;margin-bottom:8px;\\">'+esc(t(locale, 'daily_detail_truncated')) +
     ' ("+j.rowCount+")</p>"+html;el.innerHTML=html;}).catch(function(){el.innerHTML="' +
     esc(t(locale, 'daily_detail_failed')) +
     '";});});});})();</script>';
@@ -13527,6 +13743,7 @@ app.get('/admin/api/daily-noti-detail', requireAuth, requirePage('cr_transaction
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return res.status(400).json({ success: false, error: 'bad_date' });
   }
+  const txSourceDetail = parseTxSourceFromReq(req);
   const f = getFilteredNotiLogsForDailySummary(req);
   const chillTz = f.chillTz;
   const voidRefundByTxId = buildVoidRefundNotiMap(30);
@@ -13538,7 +13755,7 @@ app.get('/admin/api/daily-noti-detail', requireAuth, requirePage('cr_transaction
     if (ymd !== date) continue;
     n++;
     if (rows.length >= DAILY_DETAIL_ROW_CAP) break;
-    const body = parseNotiBody(log);
+    const body = parseNotiBodyForDisplay(log);
     const pgK = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
     const rawAmt = getNotiBodyAmountRawForIcopay(body, pgK);
     const ico =
@@ -13546,7 +13763,7 @@ app.get('/admin/api/daily-noti-detail', requireAuth, requirePage('cr_transaction
     const dt = formatNotiLogPaymentDateTimeTHJP(log, chillTz);
     const txid = String(body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '').trim();
     const kind = classifyNotiLogForDailyKind(log, voidRefundByTxId, voidRefundByOrderNo);
-    rows.push({
+    const row = {
       d: dt.date,
       th: dt.timeTh,
       jp: dt.timeJp,
@@ -13556,9 +13773,15 @@ app.get('/admin/api/daily-noti-detail', requireAuth, requirePage('cr_transaction
       ico,
       ccy: formatCurrencyForDisplay(body.Currency || body.currency) || '-',
       st: kind,
-    });
+    };
+    if (txSourceDetail === 'jpay') {
+      row.customer = body.customer || '';
+      row.email = body.email || '';
+      row.cardno = body.cardno || '';
+    }
+    rows.push(row);
   }
-  res.json({ success: true, date, rows, rowCount: n, truncated: n > rows.length });
+  res.json({ success: true, date, rows, rowCount: n, truncated: n > rows.length, jpay: txSourceDetail === 'jpay' });
 });
 
 app.get('/admin/daily-pg-summary', requireAuth, requirePage('cr_pg_transactions'), (req, res) => {
@@ -14868,6 +15091,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
   const searchField = (q.searchField || 'all').toString();
   const dateFrom = (q.dateFrom || '').toString().trim();
   const dateTo = (q.dateTo || '').toString().trim();
+  const txSourceExport = parseTxSourceFromReq(req);
   const notiKindFilter = parseTxNotiKindFilter(req);
   let list = filterTransactionLogsByNotiKind([...getTransactionListLogs(req)].slice().reverse(), notiKindFilter);
   const cfgTxExport = loadChillPayTransactionConfig();
@@ -14878,7 +15102,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
   if (searchKw) {
     const kw = searchKw.toLowerCase();
     list = list.filter((log) => {
-      const body = parseNotiBody(log);
+      const body = parseNotiBodyForDisplay(log);
       const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
       const routeNo = notiTransactionRouteNoForSearch(log, body, merchant);
       if (searchField === 'all') {
@@ -14888,7 +15112,8 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
           body.Amount, body.amount, body.true_amount, body.trueAmount,
           body.PaymentStatus, body.paymentStatus, body.status, body.returncode, body.PaymentDate, body.paymentDate, body.datetime,
           formatCurrencyForDisplay(body.Currency || body.currency), body.Currency, body.currency,
-          body.CustomerId, body.customerId, body.PaymentDescription, body.paymentDescription, body.Description, body.description,
+          body.CustomerId, body.customerId, body.customer, body.email, body.cardno,
+          body.PaymentDescription, body.paymentDescription, body.Description, body.description,
           body.memberid, body.memberId, body.attach,
           log.merchantId || '', routeNo, jpayMidLabelForLog(log), log.jpayRouteToken || '',
         ].filter(Boolean).join(' ').toLowerCase();
@@ -14960,6 +15185,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
     t(locale, 'cr_th_merchant'),
     'Route',
     'CustomerId',
+    ...(txSourceExport === 'jpay' ? ['Customer', 'Email', 'CardNo'] : []),
     'OrderNo',
     'PaymentDate',
     'Amount',
@@ -14983,7 +15209,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
     return s;
   };
   const rows = list.map((log, idx) => {
-    const body = parseNotiBody(log);
+    const body = parseNotiBodyForDisplay(log);
     const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
     const isCancel = isDefinitelyCancelPaymentStatus(ps);
     const isSuccess = isSuccessPaymentBody(body);
@@ -15050,6 +15276,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
       log.merchantId || '',
       routeNo,
       body.CustomerId ?? body.customerId ?? '',
+      ...(txSourceExport === 'jpay' ? [body.customer ?? '', body.email ?? '', body.cardno ?? ''] : []),
       body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID ?? '',
       body.PaymentDate ?? body.paymentDate ?? body.datetime ?? '',
       amountStr,
@@ -15074,11 +15301,18 @@ function getEnvFromReq(req) {
   return (req.query && req.query.env || 'live').toString().toLowerCase() === 'sandbox' ? 'sandbox' : 'live';
 }
 
-/** 노티거래내역 기본: ChillPay + Production (live). source=jpay 일 때만 JPAY */
+/** 노티거래내역·로그분석 PG: URL source 우선, 없으면 세션 마지막 PG, 최초는 JPAY */
 function parseTxSourceFromReq(req) {
-  const s = (req && req.query && req.query.source != null ? String(req.query.source) : '').toLowerCase().trim();
-  if (s === 'jpay') return 'jpay';
-  return 'chillpay';
+  const raw = req && req.query && req.query.source != null ? String(req.query.source).toLowerCase().trim() : '';
+  if (raw === 'jpay') {
+    setSessionPgSource(req, 'jpay');
+    return 'jpay';
+  }
+  if (raw === 'chillpay') {
+    setSessionPgSource(req, 'chillpay');
+    return 'chillpay';
+  }
+  return getSessionPgSource(req);
 }
 
 // 피지거래내역(ChillPay Search Payment) 전용 환경 선택 — 기본은 프로덕션(live), ?env=sandbox 로만 샌드박스
@@ -15548,15 +15782,15 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
     },
     pgSource: {
       show: true,
-      active: 'chillpay',
-      chillpayUrl: '/admin/transactions',
-      jpayUrl: '/admin/transactions?source=jpay',
+      active: getSessionPgSource(req),
+      chillpayUrl: withPgSourceInUrl('/admin/transactions', 'chillpay'),
+      jpayUrl: withPgSourceInUrl('/admin/transactions', 'jpay'),
     },
   });
   const rows = displayCancelled.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
-    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const body = parseNotiBodyForDisplay(log);
     const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
     const jpayRc = getNotiLogPgAcquirer(log) === 'jpay' && isJpaySaleAsyncNotifyBody(body) ? String(body.returncode || '').trim() : '';
     const psLabel =
@@ -15599,6 +15833,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       <td class="col-narrow">${esc(log.merchantId || '')}</td>
       <td>${esc(String(txId))}</td>
       <td>${esc(String(orderNo))}</td>
+      ${jpayCrExtraCellsHtml(log, esc)}
       <td>${esc(amtDisplay)}</td>
       <td>${esc(amtHuman)}</td>
       <td class="col-narrow" style="font-size:11px;">${psLabel}</td>
@@ -15606,8 +15841,8 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
     </tr>`;
   }).join('');
   const helpPg = '<p class="page-desc">' + t(locale, 'cr_help_cancel') + '</p>';
-  const colgroup = '<colgroup><col style="width:8%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:12%;"/><col style="width:10%;"/><col style="width:14%;"/><col style="width:10%;"/><col style="width:7%;"/><col style="width:8%;"/><col style="width:15%;"/></colgroup>';
-  const thead = '<thead><tr><th>' + t(locale, 'pg_logs_th_received_date') + '</th><th>' + t(locale, 'pg_logs_th_received_time') + '</th><th>Route No.</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th><th>Amount</th><th>' + t(locale, 'tx_th_internal_amount') + '</th><th>PaymentStatus</th><th>' + t(locale, 'pg_result_th_resend') + '</th></tr></thead>';
+  const colgroup = '<colgroup><col style="width:8%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:12%;"/><col style="width:10%;"/><col style="width:14%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:10%;"/><col style="width:7%;"/><col style="width:8%;"/><col style="width:15%;"/></colgroup>';
+  const thead = '<thead><tr><th>' + t(locale, 'pg_logs_th_received_date') + '</th><th>' + t(locale, 'pg_logs_th_received_time') + '</th><th>Route No.</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>' + t(locale, 'tx_th_internal_amount') + '</th><th>PaymentStatus</th><th>' + t(locale, 'pg_result_th_resend') + '</th></tr></thead>';
   res.send(
     renderCancelRefundPage(
       locale,
@@ -16489,7 +16724,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
   const rows = displayVoidList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
-    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const body = parseNotiBodyForDisplay(log);
     // 무효요청 버튼 활성화 여부도 동일하게 노티 수신 시각 기준으로 판정
     const baseDate =
       log.receivedAtIso ||
@@ -16591,6 +16826,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
       <td class="col-narrow">${esc(log.merchantId || '')}</td>
       <td class="col-narrow">${esc(txId)}</td>
       <td class="col-narrow">${esc(orderNo)}</td>
+      ${jpayCrExtraCellsHtml(log, esc)}
       <td class="col-narrow">${esc(amount)}</td>
       <td class="col-narrow">${esc(amountHuman)}</td>
       <td class="col-action">${voidHtml}</td>
@@ -16598,7 +16834,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
       <td class="col-action">${emailHtml}</td>
     </tr>`;
   }).join('');
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th><th>Amount</th><th>ICOPAY</th><th>' + t(locale, 'cr_th_void') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_email') + '</th></tr></thead>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>ICOPAY</th><th>' + t(locale, 'cr_th_void') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_email') + '</th></tr></thead>';
   const voidNote = '<p class="page-desc">' + t(locale, 'void_note_paragraph') + '</p>';
   const tableContent = voidNote + voidToolbarHtml + syncResultHtml + '<table class="void-list-table">' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterVoid + historyListHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_void'), totalCountVoid), tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
@@ -17341,7 +17577,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
   const rows = displayForceRefundList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
-    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const body = parseNotiBodyForDisplay(log);
     const txId = notifBodyTxId(body) || '-';
     const orderNo = notifBodyOrderNo(body) || '-';
     const amount = body.Amount ?? body.amount ?? body.total_fee ?? '-';
@@ -17379,6 +17615,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
       <td class="col-narrow">${esc(log.merchantId || '')}</td>
       <td class="col-narrow">${esc(txId)}</td>
       <td class="col-narrow">${esc(orderNo)}</td>
+      ${jpayCrExtraCellsHtml(log, esc)}
       <td class="col-narrow">${esc(amount)}</td>
       <td class="col-narrow">${esc(amountHuman)}</td>
       <td class="col-action">${manageHtml}</td>
@@ -17389,7 +17626,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     '<p class="page-desc">' +
     (t(locale, 'cr_force_refund_desc') || '환불거래 기간이 끝난 뒤, 환경설정의 강제환불 가능 기간(일) 안에서만 추가 환불이 가능합니다. 환불거래와 동일하게 ChillPay 환불 API 호출 후 가맹점·전산에 노티를 보냅니다.').replace(/</g, '&lt;') +
     '</p>';
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_transaction_id') + '</th><th>' + t(locale, 'cr_th_order_no') + '</th><th>' + t(locale, 'cr_th_amount') + '</th><th>' + t(locale, 'cr_th_amount_display') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + (t(locale, 'cr_btn_force_refund') || '강제환불') + '</th></tr></thead>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_transaction_id') + '</th><th>' + t(locale, 'cr_th_order_no') + '</th>' + JPAY_CR_EXTRA_TH + '<th>' + t(locale, 'cr_th_amount') + '</th><th>' + t(locale, 'cr_th_amount_display') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + (t(locale, 'cr_btn_force_refund') || '강제환불') + '</th></tr></thead>';
   const tableContent = descHtml + forceRefundToolbarHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterFv;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_force_refund') || '강제환불', totalCountFv), tableContent, alertHtml, req.originalUrl, req.session.member, req, undefined, env));
 });
@@ -17895,7 +18132,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
   const rows = displayRefundList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
-    const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+    const body = parseNotiBodyForDisplay(log);
     const txId = notifBodyTxId(body) || '-';
     const orderNo = notifBodyOrderNo(body) || '-';
     const amount = body.Amount ?? body.amount ?? body.total_fee ?? '-';
@@ -17936,13 +18173,14 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
       <td class="col-narrow">${esc(log.merchantId || '')}</td>
       <td class="col-narrow">${esc(txId)}</td>
       <td class="col-narrow">${esc(orderNo)}</td>
+      ${jpayCrExtraCellsHtml(log, esc)}
       <td class="col-narrow">${esc(amount)}</td>
       <td class="col-narrow">${esc(amountHuman)}</td>
       <td class="col-action">${manageHtml}</td>
       <td class="col-action">${refundHtml}</td>
     </tr>`;
   }).join('');
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th><th>Amount</th><th>ICOPAY</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_refund') + '</th></tr></thead>';
+  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>ICOPAY</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_refund') + '</th></tr></thead>';
   const tableContent = syncResultHtml + refundToolbarHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterRf + historyListHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_refund'), totalCountRf), tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
 });
@@ -18278,6 +18516,7 @@ app.get('/admin/noti-analysis', requireAuth, requirePage('test_run'), (req, res)
 
 // 피지결과 (요약) 페이지
 app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) => {
+  if (ensurePgSourceInQuery(req, res)) return;
   const locale = getLocale(req);
   const q = req.query || {};
   const logSearchRaw = adminLogFullSearchRaw(q);
@@ -19535,7 +19774,7 @@ app.post('/admin/dealmai-webhook-settings/regenerate-secret', requireAuth, requi
   if (typeof appendConfigChangeLog === 'function') {
     appendConfigChangeLog({
       action: 'dealmai_webhook_settings',
-      detail: 'DEALMAI 웹훅 Secret 재생성',
+      detail: '웹축 환경설정 Secret 재생성',
       actor: req.session.adminUser || 'unknown',
       clientIp: (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '',
     });
@@ -19557,7 +19796,7 @@ app.post('/admin/dealmai-webhook-settings', requireAuth, requirePage('dealmai_we
   if (typeof appendConfigChangeLog === 'function') {
     appendConfigChangeLog({
       action: 'dealmai_webhook_settings',
-      detail: 'DEALMAI 웹훅 URL/Secret 저장',
+      detail: '웹축 환경설정 URL/Secret 저장',
       actor: req.session.adminUser || 'unknown',
       clientIp: (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '',
       payload: { webhookUrl },
@@ -21614,6 +21853,7 @@ app.post('/internal/noti', (req, res) => {
 
 // 전산 노티 로그 페이지
 app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res) => {
+  if (ensurePgSourceInQuery(req, res)) return;
   const locale = getLocale(req);
   const qIn = req.query || {};
   const logPgInternal = parseTxSourceFromReq(req);
@@ -21843,6 +22083,7 @@ app.post('/admin/internal/resend', requireAuth, requirePageAny(['internal_logs',
 
 // 전산결과 (요약) 페이지
 app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (req, res) => {
+  if (ensurePgSourceInQuery(req, res)) return;
   const locale = getLocale(req);
   const q = req.query || {};
   const resendKind = (q.resendKind || 'payment').toString().toLowerCase();
@@ -22054,6 +22295,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
 
 // 개발 노티 로그 페이지
 app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (req, res) => {
+  if (ensurePgSourceInQuery(req, res)) return;
   const locale = getLocale(req);
   const qDev = req.query || {};
   const logPgDev = parseTxSourceFromReq(req);
@@ -22295,6 +22537,7 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
 });
 
 app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs'), (req, res) => {
+  if (ensurePgSourceInQuery(req, res)) return;
   const locale = getLocale(req);
   const q = req.query || {};
   const logPg = parseTxSourceFromReq(req);
@@ -22381,6 +22624,7 @@ ${logPagerFooter}
 });
 
 app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webhook_result'), (req, res) => {
+  if (ensurePgSourceInQuery(req, res)) return;
   const locale = getLocale(req);
   const q = req.query || {};
   const logPg = parseTxSourceFromReq(req);
@@ -22656,6 +22900,7 @@ app.post('/admin/pg-notify-delivery/retry', requireAuth, requirePage('dev_intern
 
 // 개발결과 (요약) 페이지
 app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (req, res) => {
+  if (ensurePgSourceInQuery(req, res)) return;
   const locale = getLocale(req);
   const q = req.query || {};
   const resendKind = (q.resendKind || 'payment').toString().toLowerCase();
@@ -23170,7 +23415,7 @@ function getPostAuthHomeRedirectUrl(req, sessionMember, permissions) {
     }
     if (perms.includes('cr_transactions') || perms.includes('cancel_refund')) {
       const otl = otlIcopayNotiDefaultTransactionsUrl();
-      return otl || (PAGE_KEY_TO_DEFAULT_URL.cr_transactions || '/admin/transactions');
+      return otl || urlWithSessionPgSource(req, PAGE_KEY_TO_DEFAULT_URL.cr_transactions || '/admin/transactions');
     }
     return getFirstAllowedRedirectUrl(perms);
   }
