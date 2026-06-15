@@ -1,0 +1,132 @@
+{
+  "files": {
+    "icopay_dev": "c:\\Users\\ziobi\\Downloads\\결제내역_모든리스트_20260527 (1).xlsx",
+    "noti": "c:\\Users\\ziobi\\Downloads\\transactions-2026-05-26 (1).csv",
+    "pg": "c:\\Users\\ziobi\\Downloads\\pg-transactions-2026-05-26 (1).csv",
+    "internal_xlsx": "c:\\Users\\ziobi\\Downloads\\決済履歴_すべてのリスト_20260526.xlsx"
+  },
+  "counts_total": {
+    "icopay": 105,
+    "noti": 112,
+    "pg": 107,
+    "internal": 0
+  },
+  "counts_2026_05_26": {
+    "icopay_dev": 88,
+    "noti_피지": 90,
+    "chillpay_pg": 107
+  },
+  "status_breakdown_526": {
+    "icopay_dev": {
+      "성공": 72,
+      "실패": 24,
+      "취소": 9
+    },
+    "noti": {
+      "결제": 62,
+      "취소": 8,
+      "실패": 20
+    },
+    "pg": {
+      "Success": 72,
+      "Fail": 26,
+      "Cancel": 9
+    }
+  },
+  "pairwise": {
+    "icopay_dev|noti_피지": {
+      "both": 88,
+      "only_icopay_dev": 17,
+      "only_noti_피지": 2,
+      "sample_only_icopay_dev": [
+        "32862261",
+        "32862294",
+        "32862406",
+        "32862479",
+        "32863685",
+        "32863709",
+        "32863734",
+        "32863774",
+        "32863797",
+        "32863860",
+        "32864877",
+        "32865211",
+        "32866111",
+        "32866266",
+        "32866351",
+        "32867151",
+        "32867232"
+      ],
+      "sample_only_noti_피지": [
+        "32877566",
+        "32877615"
+      ]
+    },
+    "icopay_dev|chillpay_pg": {
+      "both": 105,
+      "only_icopay_dev": 0,
+      "only_chillpay_pg": 2,
+      "sample_only_icopay_dev": [],
+      "sample_only_chillpay_pg": [
+        "32877566",
+        "32877615"
+      ]
+    },
+    "noti_피지|chillpay_pg": {
+      "both": 90,
+      "only_noti_피지": 0,
+      "only_chillpay_pg": 17,
+      "sample_only_noti_피지": [],
+      "sample_only_chillpay_pg": [
+        "32862261",
+        "32862294",
+        "32862406",
+        "32862479",
+        "32863685",
+        "32863709",
+        "32863734",
+        "32863774",
+        "32863797",
+        "32863860",
+        "32864877",
+        "32865211",
+        "32866111",
+        "32866266",
+        "32866351",
+        "32867151",
+        "32867232"
+      ]
+    }
+  },
+  "in_all_sources": 88,
+  "icopay_only_not_noti_nor_pg": [],
+  "pg_only_not_icopay": [
+    "32862261",
+    "32862294",
+    "32862406",
+    "32862479",
+    "32863685",
+    "32863709",
+    "32863734",
+    "32863774",
+    "32863797",
+    "32863860",
+    "32864877",
+    "32865211",
+    "32866111",
+    "32866266",
+    "32866351",
+    "32867151",
+    "32867232",
+    "32877566",
+    "32877615"
+  ],
+  "noti_only_not_icopay": [
+    "32877566",
+    "32877615"
+  ],
+  "noti_and_pg_not_icopay": [
+    "32877566",
+    "32877615"
+  ]
+}

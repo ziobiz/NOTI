@@ -1,0 +1,349 @@
+{
+  "chillpay_xlsx": {
+    "sheet": "บริษัท นาภี เอ็กซ์เชนจ์ จำกัด",
+    "rows": 126,
+    "unique_tx": 125,
+    "tx_col": "Trans. ID",
+    "status_col": "Status",
+    "date_col": "Transaction Date",
+    "columns": [
+      "No",
+      "Trans. ID",
+      "Transaction Date",
+      "Merchant",
+      "_blank",
+      "Customer",
+      "Order No.",
+      "Payment Channel",
+      "Installment Terms",
+      "Route No.",
+      "Amount",
+      "Fee",
+      "Discount",
+      "Net Amount",
+      "Refunded Amount",
+      "Payment Date",
+      "Status",
+      "Settled"
+    ],
+    "status_breakdown": {
+      "Success": 74,
+      "Fail": 24,
+      "Request": 15,
+      "Cancel": 12
+    },
+    "success_count": 74
+  },
+  "noti_csv": {
+    "unique_tx": 112,
+    "success_결제": 74,
+    "status": {
+      "결제": 74,
+      "취소": 12,
+      "실패": 26
+    }
+  },
+  "pg_csv": {
+    "unique_tx": 107,
+    "success": 72,
+    "status": {
+      "Success": 72,
+      "Fail": 26,
+      "Cancel": 9
+    }
+  },
+  "overlap": {
+    "all_three": 72,
+    "chill_and_pg_not_noti": 17,
+    "chill_and_noti_not_pg": 0,
+    "only_chillpay": 36,
+    "only_pg_vs_chill": 18,
+    "only_noti_vs_chill": 40,
+    "pg_and_noti_not_chill": 18
+  },
+  "gaps": {
+    "chill_minus_pg_success": 2,
+    "chill_minus_noti_success": 0,
+    "pg_minus_noti_success": -2
+  },
+  "mismatch_in_overlap": {
+    "chill_vs_pg": 0,
+    "chill_vs_noti": 0,
+    "pg_vs_noti": 0
+  },
+  "only_chill_success_sample": [
+    {
+      "tx": "32859299",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32859303",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32859407",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32859837",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32859886",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32859969",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32859987",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32860335",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32860563",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32861548",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32861668",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    },
+    {
+      "tx": "32861749",
+      "status": "Success",
+      "date": "25/05/2026",
+      "success": true
+    }
+  ],
+  "only_pg_success_not_chill": [
+    {
+      "tx": "32891977",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32892380",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32892418",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32892544",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32892550",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32893022",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32893613",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32893697",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32893720",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32893946",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32894029",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32894469",
+      "status": "Success",
+      "date": "2026-05-26",
+      "success": true
+    }
+  ],
+  "only_noti_success_not_chill": [
+    {
+      "tx": "32891977",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32892380",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32892418",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32892544",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32892550",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32893022",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32893613",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32893697",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32893720",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32893946",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32894029",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    },
+    {
+      "tx": "32894469",
+      "status": "결제",
+      "date": "2026-05-26",
+      "success": true
+    }
+  ],
+  "chill_pg_not_noti_success": [
+    {
+      "tx": "32862261",
+      "chill": "Success",
+      "pg": "Success"
+    },
+    {
+      "tx": "32862406",
+      "chill": "Success",
+      "pg": "Success"
+    },
+    {
+      "tx": "32862479",
+      "chill": "Success",
+      "pg": "Success"
+    },
+    {
+      "tx": "32864877",
+      "chill": "Success",
+      "pg": "Success"
+    },
+    {
+      "tx": "32865211",
+      "chill": "Success",
+      "pg": "Success"
+    },
+    {
+      "tx": "32866111",
+      "chill": "Success",
+      "pg": "Success"
+    },
+    {
+      "tx": "32866266",
+      "chill": "Success",
+      "pg": "Success"
+    },
+    {
+      "tx": "32866351",
+      "chill": "Success",
+      "pg": "Success"
+    },
+    {
+      "tx": "32867151",
+      "chill": "Success",
+      "pg": "Success"
+    },
+    {
+      "tx": "32867232",
+      "chill": "Success",
+      "pg": "Success"
+    }
+  ],
+  "sample_mismatch_chill_pg": []
+}
