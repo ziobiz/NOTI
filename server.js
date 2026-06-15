@@ -1101,12 +1101,80 @@ function getChillpayProductionMidForInternalLinked() {
   }
 }
 
-/** JPAY 고정 노티 슬롯 j1 ~ j20 (/noti/callback/jN) */
-const JPAY_NOTI_SLOT_COUNT = 20;
+/** ChillPay·JPAY PG 노티 경로 번호 상한 (슬롯 입력 UI·라우팅 공통) */
+const PG_NOTI_ROUTE_NUMBER_MAX = 9999;
 
+function normalizePgNotiRouteNumber(raw) {
+  const n = parseInt(String(raw == null ? '' : raw).trim(), 10);
+  if (!Number.isFinite(n) || n < 1 || n > PG_NOTI_ROUTE_NUMBER_MAX) return null;
+  return n;
+}
+
+function extractChillpayRouteNumberFromKey(routeKey) {
+  const m = String(routeKey || '').trim().match(/^(?:callback|result)\/(\d+)$/);
+  if (!m) return null;
+  return normalizePgNotiRouteNumber(m[1]);
+}
+
+function buildChillpayRouteCallbackKey(n) {
+  const num = normalizePgNotiRouteNumber(n);
+  return num ? `callback/${num}` : '';
+}
+
+function buildChillpayRouteResultKey(n) {
+  const num = normalizePgNotiRouteNumber(n);
+  return num ? `result/${num}` : '';
+}
+
+function merchantRouteSortNumber(m) {
+  if (!m || typeof m !== 'object') return 0;
+  const rn = String(m.routeNo || '').trim();
+  if (rn) {
+    const jm = rn.match(/^j(\d+)$/i);
+    if (jm) return parseInt(jm[1], 10) || 0;
+    const n = Number(rn);
+    if (Number.isFinite(n)) return n;
+  }
+  const tok = extractJpayPathToken(String(m.jpayRouteCallbackKey || '').trim());
+  const slot = parseJpayNotiSlotFromToken(tok);
+  if (slot) return slot;
+  const cbN = extractChillpayRouteNumberFromKey(m.routeCallbackKey);
+  if (cbN) return cbN;
+  return 0;
+}
+
+function findNextAvailableChillpayMerchantSlot() {
+  const used = new Set();
+  for (const m of MERCHANTS.values()) {
+    if (!m) continue;
+    if (String(m.jpayRouteCallbackKey || '').trim() || String(m.jpayRouteResultKey || '').trim()) continue;
+    const n = extractChillpayRouteNumberFromKey(m.routeCallbackKey);
+    if (n) used.add(n);
+  }
+  for (let s = 1; s <= PG_NOTI_ROUTE_NUMBER_MAX; s++) {
+    if (!used.has(s)) return s;
+  }
+  return null;
+}
+
+function findNextAvailableJpayMerchantSlot() {
+  const used = new Set();
+  for (const m of MERCHANTS.values()) {
+    if (!m) continue;
+    const tok = extractJpayPathToken(String(m.jpayRouteCallbackKey || '').trim());
+    const slot = parseJpayNotiSlotFromToken(tok);
+    if (slot) used.add(slot);
+  }
+  for (let s = 1; s <= PG_NOTI_ROUTE_NUMBER_MAX; s++) {
+    if (!used.has(s)) return s;
+  }
+  return null;
+}
+
+/** JPAY 노티 슬롯 jN (/noti/callback/jN) */
 function jpayRouteTokenForSlot(slot) {
   const n = parseInt(slot, 10);
-  if (!Number.isFinite(n) || n < 1 || n > JPAY_NOTI_SLOT_COUNT) return '';
+  if (!Number.isFinite(n) || n < 1 || n > PG_NOTI_ROUTE_NUMBER_MAX) return '';
   return 'j' + String(n);
 }
 
@@ -1114,8 +1182,18 @@ function parseJpayNotiSlotFromToken(token) {
   const m = String(token || '').trim().match(/^j(\d+)$/i);
   if (!m) return null;
   const n = parseInt(m[1], 10);
-  if (!Number.isFinite(n) || n < 1 || n > JPAY_NOTI_SLOT_COUNT) return null;
+  if (!Number.isFinite(n) || n < 1 || n > PG_NOTI_ROUTE_NUMBER_MAX) return null;
   return n;
+}
+
+function buildJpayRouteCallbackKey(slot) {
+  const tok = jpayRouteTokenForSlot(slot);
+  return tok ? `jpay/callback/${tok}` : '';
+}
+
+function buildJpayRouteResultKey(slot) {
+  const tok = jpayRouteTokenForSlot(slot);
+  return tok ? `jpay/result/${tok}` : '';
 }
 
 function isJpayNotiPathSegment(no) {
@@ -1449,7 +1527,7 @@ function normalizeJpayProfilesList(arr) {
   const out = [];
   const pushRow = (row) => {
     const slot = row.slot;
-    if (!Number.isFinite(slot) || slot < 1 || slot > JPAY_NOTI_SLOT_COUNT) return;
+    if (!Number.isFinite(slot) || slot < 1 || slot > PG_NOTI_ROUTE_NUMBER_MAX) return;
     const tier = row.tier === 'sandbox' ? 'sandbox' : 'production';
     const merchantName = String(row.merchantName || '').trim();
     const mid = String(row.mid || '').trim();
@@ -1463,7 +1541,7 @@ function normalizeJpayProfilesList(arr) {
     if (!p || typeof p !== 'object') return;
     if (p.tier === 'sandbox' || p.tier === 'production') {
       let slot = parseInt(p.slot, 10);
-      if (!Number.isFinite(slot) || slot < 1 || slot > JPAY_NOTI_SLOT_COUNT) {
+      if (!Number.isFinite(slot) || slot < 1 || slot > PG_NOTI_ROUTE_NUMBER_MAX) {
         slot = parseJpayNotiSlotFromToken(p.routeToken);
       }
       if (!slot) return;
@@ -1478,7 +1556,7 @@ function normalizeJpayProfilesList(arr) {
       return;
     }
     let slot = parseInt(p.slot, 10);
-    if (!Number.isFinite(slot) || slot < 1 || slot > JPAY_NOTI_SLOT_COUNT) {
+    if (!Number.isFinite(slot) || slot < 1 || slot > PG_NOTI_ROUTE_NUMBER_MAX) {
       slot = parseJpayNotiSlotFromToken(p.routeToken);
     }
     if (!slot) return;
@@ -1955,11 +2033,10 @@ function saveTestConfigs() {
   saveJsonConfig(TEST_CONFIGS_CONFIG_PATH, obj);
 }
 
-/** ChillPay `/noti/result/N` 용 경로 번호(1~50). 유효하지 않으면 null */
+/** ChillPay `/noti/result/N` 용 경로 번호. 유효하지 않으면 null */
 function normalizeChillpayPgNotiRouteNoSegment(v) {
-  const n = parseInt(String(v == null ? '' : v).trim(), 10);
-  if (!Number.isFinite(n) || n < 1 || n > 50) return null;
-  return String(n);
+  const n = normalizePgNotiRouteNumber(v);
+  return n ? String(n) : null;
 }
 
 /**
@@ -2068,7 +2145,7 @@ function classifyTrafficNotiPg(pathname) {
   const mj = p.match(/^\/noti\/(callback|result)\/(j\d+)$/i);
   if (mj) {
     const n = parseInt(mj[2].slice(1), 10);
-    if (Number.isFinite(n) && n >= 1 && n <= JPAY_NOTI_SLOT_COUNT) return 'jpay';
+    if (Number.isFinite(n) && n >= 1 && n <= PG_NOTI_ROUTE_NUMBER_MAX) return 'jpay';
   }
   if (p.startsWith('/noti/callback/') || p.startsWith('/noti/result/')) return 'chillpay';
   return 'other';
@@ -7896,7 +7973,32 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
   };
   const nav = [];
   if (can('merchants')) {
-    nav.push(navGroup(t(locale, 'nav_merchant'), ['/admin/merchants'], link('/admin/merchants', t(locale, 'nav_merchant_settings'))));
+    const merchantsRegisterLink = (kind, label) => {
+      const href = `/admin/merchants?kind=${kind}`;
+      let isActive = false;
+      if (currentPath && (currentPath === '/admin/merchants' || currentPath.startsWith('/admin/merchants?'))) {
+        const qIdx = currentPath.indexOf('?');
+        const qs = qIdx >= 0 ? currentPath.slice(qIdx + 1) : '';
+        let k = 'chillpay';
+        if (qs) {
+          try {
+            k = new URLSearchParams(qs).get('kind') || 'chillpay';
+          } catch (_) {}
+        }
+        if (k !== 'jpay') k = 'chillpay';
+        isActive = k === kind;
+      }
+      const clsAttr = isActive ? ' class="active"' : '';
+      return `<a href="${href}"${clsAttr}>${label}</a>`;
+    };
+    nav.push(
+      navGroup(
+        t(locale, 'nav_merchant'),
+        ['/admin/merchants'],
+        merchantsRegisterLink('chillpay', t(locale, 'merchants_nav_register_chillpay')) +
+          merchantsRegisterLink('jpay', t(locale, 'merchants_nav_register_jpay')),
+      ),
+    );
   }
   if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('dealmai_webhook_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('dealmai_webhook_result') || can('traffic_analysis') || can('mail_logs')) {
     const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/dealmai-webhook-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/dealmai-webhook', '/admin/pg-notify-delivery', '/admin/mail-logs', '/admin/traffic'];
@@ -9145,7 +9247,7 @@ app.post('/admin/settings/jpay-profiles/add', requireAuth, requireSettingsOrRedi
   const list = loadJpayProfiles();
   const used = new Set(list.filter((p) => p.tier === tier).map((p) => p.slot));
   let newSlot = null;
-  for (let s = 1; s <= JPAY_NOTI_SLOT_COUNT; s++) {
+  for (let s = 1; s <= PG_NOTI_ROUTE_NUMBER_MAX; s++) {
     if (!used.has(s)) {
       newSlot = s;
       break;
@@ -9178,7 +9280,7 @@ app.post('/admin/settings/jpay-profiles', requireAuth, requireSettingsOrRedirect
     const slotStr = req.body && req.body[`jp_slot_${i}`];
     if (slotStr === undefined || slotStr === null || String(slotStr).trim() === '') break;
     const slot = parseInt(slotStr, 10);
-    if (!Number.isFinite(slot) || slot < 1 || slot > JPAY_NOTI_SLOT_COUNT) continue;
+    if (!Number.isFinite(slot) || slot < 1 || slot > PG_NOTI_ROUTE_NUMBER_MAX) continue;
     const del = req.body[`jp_delete_${i}`];
     if (del === 'on' || del === '1' || del === true) continue;
     let id = (req.body[`jp_id_${i}`] != null ? String(req.body[`jp_id_${i}`]) : '').trim();
@@ -10158,8 +10260,23 @@ app.post('/admin/forgot', (req, res) => {
   return res.send(t(locale, 'forgot_success') + ' <a href="/admin/login">' + t(locale, 'login_submit') + '</a>');
 });
 
+/** 가맹점 목록 Route 열 표시 (JPAY jN·ChillPay 숫자) */
+function merchantListRouteNoCell(m) {
+  if (!m || typeof m !== 'object') return '';
+  const rn = String(m.routeNo || '').trim();
+  if (rn) return rn;
+  const tok = extractJpayPathToken(String(m.jpayRouteCallbackKey || '').trim());
+  if (tok) return tok;
+  const cbN = extractChillpayRouteNumberFromKey(m.routeCallbackKey);
+  if (cbN) return String(cbN);
+  return '';
+}
+
 // 가맹점 목록 + 등록 폼
 app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) => {
+  if (!req.query.kind) {
+    return res.redirect('/admin/merchants?kind=chillpay');
+  }
   const locale = getLocale(req);
   const clientIp =
     (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
@@ -10184,36 +10301,16 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   const confirmSaveMsg = (t(locale, 'merchants_confirm_save') || '').replace(/'/g, "\\'");
   const confirmSaveJpayMsg = (t(locale, 'merchants_confirm_save_jpay') || t(locale, 'merchants_confirm_save') || '').replace(/'/g, "\\'");
   const notiHost = 'https://noti.icopay.net';
-  const callbackNumberOptions = Array.from({ length: 50 }, (_, i) => {
-    const n = i + 1;
-    const value = `callback/${n}`;
-    return `<option value="${value}">${n} (/noti/callback/${n})</option>`;
-  }).join('');
-
-  const resultNumberOptions = Array.from({ length: 50 }, (_, i) => {
-    const n = i + 1;
-    const value = `result/${n}`;
-    return `<option value="${value}">${n} (/noti/result/${n})</option>`;
-  }).join('');
-
-  const jpayRouteSelectOptionsCb =
-    `<option value="">${t(locale, 'merchants_select_no')}</option>` +
-    Array.from({ length: JPAY_NOTI_SLOT_COUNT }, (_, i) => {
-      const n = i + 1;
-      const tok = jpayRouteTokenForSlot(n);
-      const rkCb = `jpay/callback/${tok}`;
-      const urlCb = `${notiHost}/noti/callback/${tok}`;
-      return `<option value="${escAttr(rkCb)}">${escAttr(tok)} (${escAttr(urlCb)})</option>`;
-    }).join('');
-  const jpayRouteSelectOptionsRs =
-    `<option value="">${t(locale, 'merchants_select_no')}</option>` +
-    Array.from({ length: JPAY_NOTI_SLOT_COUNT }, (_, i) => {
-      const n = i + 1;
-      const tok = jpayRouteTokenForSlot(n);
-      const rkRs = `jpay/result/${tok}`;
-      const urlRs = `${notiHost}/noti/result/${tok}`;
-      return `<option value="${escAttr(rkRs)}">${escAttr(tok)} (${escAttr(urlRs)})</option>`;
-    }).join('');
+  const pgRouteMax = PG_NOTI_ROUTE_NUMBER_MAX;
+  const nextJpaySlot = findNextAvailableJpayMerchantSlot() || 1;
+  const nextChillSlot = findNextAvailableChillpayMerchantSlot() || 1;
+  const jpayRouteNoDefault = jpayRouteTokenForSlot(nextJpaySlot);
+  const registerKind = parseMerchantsRegisterKind(req);
+  const registerHeading =
+    registerKind === 'jpay'
+      ? t(locale, 'merchants_nav_register_jpay')
+      : t(locale, 'merchants_nav_register_chillpay');
+  const registerJpay = registerKind === 'jpay';
 
   const sortType = (req.query.sort || 'recent').toString();
   const sortedEntries = getSortedMerchantEntries(sortType);
@@ -10228,6 +10325,46 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       devResultUrl: String(tg.devResultUrl || '').trim(),
     })),
   );
+
+  const merchantsEmptyMsg = t(locale, 'merchants_empty');
+  const merchantsListQueryBase = `kind=${registerKind}`;
+  const merchantsSortHref = (sort) => `/admin/merchants?${merchantsListQueryBase}&sort=${sort}`;
+  const merchantsColResizeTitle = escAttr(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절');
+  const merchantsColWidths = [90, 150, 150, 150, 150, 70, 90, 100, 88, 96, 56, 50, 50, 50, 50, 88, 80];
+  const merchantsColLabels = [
+    t(locale, 'cr_th_merchant'),
+    t(locale, 'merchants_th_pg_callurl'),
+    t(locale, 'merchants_th_pg_reurl'),
+    t(locale, 'merchants_th_origin_cburl'),
+    t(locale, 'merchants_th_origin_reurl'),
+    t(locale, 'merchants_th_route'),
+    'CustomerId',
+    t(locale, 'merchants_th_target'),
+    t(locale, 'merchants_th_pg_acquirer'),
+    t(locale, 'merchants_th_noti_mode'),
+    t(locale, 'merchants_th_recurring'),
+    t(locale, 'merchants_relay'),
+    t(locale, 'merchants_internal'),
+    t(locale, 'common_dev'),
+    t(locale, 'merchants_dealmai_webhook'),
+    t(locale, 'merchants_th_dealmai_partner'),
+    t(locale, 'members_manage'),
+  ];
+  const merchantsColgroupHtml =
+    '<colgroup>' +
+    merchantsColWidths
+      .map((w, i) => `<col id="merchants-col-${i}" style="width:${w}px;min-width:40px;">`)
+      .join('') +
+    '</colgroup>';
+  const merchantsTheadHtml =
+    '<thead><tr>' +
+    merchantsColLabels
+      .map(
+        (label, i) =>
+          `<th>${label}<div class="merchants-col-resizer" data-col="${i}" title="${merchantsColResizeTitle}"></div></th>`,
+      )
+      .join('') +
+    '</tr></thead>';
 
   const rows = Array.from(sortedEntries)
     .map(([id, m]) => {
@@ -10255,7 +10392,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       const pgCbDisplay = jpayCbKey ? jnotiFromKey(jpayCbKey) : cbDisplay;
       const pgRsDisplay = jpayRsKey ? jnotiFromKey(jpayRsKey) : rsDisplay;
       const listPg = resolveMerchantListPgAcquirer(m);
-      const merchantPgKind = jpayCbKey || jpayRsKey ? 'jpay' : 'chillpay';
+      const merchantPgKind = listPg;
       const cbUrl = m.callbackUrl || '';
       const rsUrl = m.resultUrl || '';
       const relay = m.enableRelay === false ? 'N' : 'Y';
@@ -10275,15 +10412,15 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <td class="cell-url">${pgRsDisplay || '-'}</td>
         <td class="cell-url">${cbUrl}</td>
         <td class="cell-url">${rsUrl}</td>
-        <td>${m.routeNo || ''}</td>
+        <td>${merchantListRouteNoCell(m)}</td>
         <td>${m.internalCustomerId || ''}</td>
         <td>${internalTargetId}</td>
-        <td style="font-weight:600;color:${listPg === 'jpay' ? '#7c3aed' : '#0369a1'};">${
+        <td class="cell-pg-acquirer" style="font-weight:600;color:${listPg === 'jpay' ? '#7c3aed' : '#0369a1'};">${
           listPg === 'jpay'
             ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
             : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
         }</td>
-        <td style="width:96px;vertical-align:middle;">${merchantNotiStyleCellHtml(locale, m)}</td>
+        <td class="cell-noti-mode">${merchantNotiStyleCellHtml(locale, m)}</td>
         <td>${String(merchantChillpayRecurringCell(m))
           .replace(/&/g, '&amp;')
           .replace(/</g, '&lt;')
@@ -10304,7 +10441,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
               data-route-result-key="${rsKey}"
               data-callback-url="${cbUrl}"
               data-result-url="${rsUrl}"
-              data-route-no="${m.routeNo || ''}"
+              data-route-no="${merchantListRouteNoCell(m)}"
               data-internal-customer-id="${m.internalCustomerId || ''}"
               data-enable-relay="${relay}"
               data-enable-internal="${internal}"
@@ -10402,9 +10539,32 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
     .topbar span { margin-right:12px; }
     .content { display:flex; flex-direction:column; gap:16px; }
     .card { background:#ffffff; padding:18px 22px; border-radius:10px; box-shadow:0 10px 25px rgba(15,23,42,0.06); margin-bottom:8px; border:1px solid #e5e7eb; }
-    .cell-url { word-break: break-all; overflow-wrap: break-word; white-space: normal; max-width: 200px; text-align: center; }
-    .merchants-table-wrap { overflow-x: auto; }
-    .merchants-table-wrap table { min-width: 1180px; }
+    .merchants-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .merchants-list-table { table-layout: fixed; width: 100%; min-width: 1180px; background:#ffffff; border-radius:8px; border-collapse: collapse; }
+    .merchants-list-table th, .merchants-list-table td {
+      border: 1px solid #e5e7eb;
+      padding: 4px 6px;
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-align: center;
+      vertical-align: middle;
+    }
+    .merchants-list-table th { background: #e5f0ff; color:#1f2937; position: relative; }
+    .merchants-list-table tr:nth-child(even) { background:#f9fafb; }
+    .merchants-list-table td.cell-url {
+      word-break: break-all;
+      overflow-wrap: anywhere;
+      white-space: normal;
+      text-align: center;
+      font-size: 11px;
+      line-height: 1.35;
+      overflow: hidden;
+    }
+    .merchants-list-table td.actions-cell { white-space: normal; overflow: visible; }
+    .merchants-col-resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 1; }
+    .merchants-col-resizer:hover { background: rgba(37, 99, 235, 0.2); }
   </style>
 </head>
 <body>
@@ -10416,8 +10576,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
     <div class="card">
       <h1>${t(locale, 'merchants_title')}</h1>
       <p class="admin-page-desc">${t(locale, 'merchants_desc')}</p>
-      <h2>${t(locale, 'merchants_register')}</h2>
-      <form id="merchant-form" method="post" action="/admin/merchants" onsubmit="return (function(){ var j=document.getElementById('merchant-pg-jpay')&&document.getElementById('merchant-pg-jpay').checked; return confirm(j ? '${confirmSaveJpayMsg}' : '${confirmSaveMsg}'); })();">
+      <h2 id="merchant-register-section">${registerHeading}</h2>
+      <form id="merchant-form" method="post" action="/admin/merchants" onsubmit="return (function(){ var h=document.getElementById('merchant-pg-kind-hidden'); return confirm(h&&h.value==='jpay' ? '${confirmSaveJpayMsg}' : '${confirmSaveMsg}'); })();">
         <input type="hidden" name="originalMerchantId" id="originalMerchantId" value="" />
         <label>
           ${t(locale, 'merchants_id')} (<code>merchantId</code>)
@@ -10440,63 +10600,62 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         </label>
         <p class="admin-page-desc">${t(locale, 'merchants_subscription_service_hint')}</p>
         </div>
-        <div style="margin-top:16px;padding:12px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
-          <div style="font-size:13px;font-weight:700;color:#1e293b;margin-bottom:8px;">${t(locale, 'merchants_pg_route_title')}</div>
-          <label style="display:inline-flex;align-items:center;gap:8px;margin-right:20px;">
-            <input type="radio" name="merchantPgKind" id="merchant-pg-chillpay" value="chillpay" checked />
-            <span>${t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY'}</span>
-          </label>
-          <label style="display:inline-flex;align-items:center;gap:8px;">
-            <input type="radio" name="merchantPgKind" id="merchant-pg-jpay" value="jpay" />
-            <span>${t(locale, 'merchants_pg_provider_jpay') || 'JPAY'}</span>
-          </label>
-          <p class="admin-page-desc">${t(locale, 'merchants_pg_route_hint')}</p>
+        <input type="hidden" name="merchantPgKind" id="merchant-pg-kind-hidden" value="${registerKind}" />
+        <div id="merch-pg-chillpay-block" style="display:${registerJpay ? 'none' : 'block'};">
+        <label>
+          ${t(locale, 'merchants_label_chillpay_pg_slot_no')}
+          <div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap;">
+            <span style="font-size:12px;color:#4b5563;white-space:nowrap;">${notiHost}/noti/callback/</span>
+            <input type="number" name="chillSlotNo" id="chill-slot-no" min="1" max="${pgRouteMax}" step="1" value="${nextChillSlot}" style="width:96px;margin-top:0;" placeholder="1" />
+            <span style="font-size:12px;color:#6b7280;">${t(locale, 'merchants_chillpay_slot_same_hint')}</span>
+            <input type="hidden" name="routeCallbackKey" id="route-callback-key-hidden" value="" />
+            <input type="hidden" name="routeResultKey" id="route-result-key-hidden" value="" />
+          </div>
+        </label>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;">
+          <div style="flex:1;min-width:200px;">
+            <div style="font-size:12px;color:#4b5563;margin-bottom:4px;">${t(locale, 'merchants_label_chillpay_pg_callback_preview')}</div>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="text" id="callback-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;margin-top:0;" placeholder="${t(locale, 'merchants_url_placeholder')}" />
+              <button type="button" id="copy-callback-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;margin-top:0;">${t(locale, 'merchants_btn_copy')}</button>
+            </div>
+          </div>
+          <div style="flex:1;min-width:200px;">
+            <div style="font-size:12px;color:#4b5563;margin-bottom:4px;">${t(locale, 'merchants_label_chillpay_pg_result_preview')}</div>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="text" id="result-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;margin-top:0;" placeholder="${t(locale, 'merchants_url_placeholder')}" />
+              <button type="button" id="copy-result-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;margin-top:0;">${t(locale, 'merchants_btn_copy')}</button>
+            </div>
+          </div>
         </div>
-        <div id="merch-pg-chillpay-block">
-        <label>
-          ${t(locale, 'merchants_label_pg_callback_no')}
-          <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
-            <select name="routeCallbackKey" id="route-callback-select" style="width:140px;">
-              <option value="">${t(locale, 'merchants_select_no')}</option>
-              ${callbackNumberOptions}
-            </select>
-            <input type="text" id="callback-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;" placeholder="${t(locale, 'merchants_url_placeholder')}" />
-            <button type="button" id="copy-callback-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;">${t(locale, 'merchants_btn_copy')}</button>
-          </div>
-        </label>
-        <label>
-          ${t(locale, 'merchants_label_pg_result_no')}
-          <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
-            <select name="routeResultKey" id="route-result-select" style="width:140px;">
-              <option value="">${t(locale, 'merchants_select_no')}</option>
-              ${resultNumberOptions}
-            </select>
-            <input type="text" id="result-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;" placeholder="${t(locale, 'merchants_url_placeholder')}" />
-            <button type="button" id="copy-result-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;">${t(locale, 'merchants_btn_copy')}</button>
-          </div>
-        </label>
         </div>
-        <div id="merch-pg-jpay-block" style="display:none;">
+        <div id="merch-pg-jpay-block" style="display:${registerJpay ? 'block' : 'none'};">
         <label>
-          ${t(locale, 'merchants_label_jpay_pg_callback_no')}
-          <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
-            <select name="jpayRouteCallbackKey" id="jpay-callback-select" style="flex:1;max-width:100%;">
-              ${jpayRouteSelectOptionsCb}
-            </select>
-            <input type="text" id="jpay-callback-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;" placeholder="${t(locale, 'merchants_url_placeholder')}" />
-            <button type="button" id="copy-jpay-callback-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;">${t(locale, 'merchants_btn_copy')}</button>
+          ${t(locale, 'merchants_label_jpay_pg_slot_no')}
+          <div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap;">
+            <span style="font-size:12px;color:#4b5563;white-space:nowrap;">${notiHost}/noti/callback/j</span>
+            <input type="number" name="jpaySlotNo" id="jpay-slot-no" min="1" max="${pgRouteMax}" step="1" value="${nextJpaySlot}" style="width:96px;margin-top:0;" placeholder="1" />
+            <span style="font-size:12px;color:#6b7280;">${t(locale, 'merchants_jpay_slot_same_hint')}</span>
+            <input type="hidden" name="jpayRouteCallbackKey" id="jpay-callback-key-hidden" value="" />
+            <input type="hidden" name="jpayRouteResultKey" id="jpay-result-key-hidden" value="" />
           </div>
         </label>
-        <label>
-          ${t(locale, 'merchants_label_jpay_pg_result_no')}
-          <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
-            <select name="jpayRouteResultKey" id="jpay-result-select" style="flex:1;max-width:100%;">
-              ${jpayRouteSelectOptionsRs}
-            </select>
-            <input type="text" id="jpay-result-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;" placeholder="${t(locale, 'merchants_url_placeholder')}" />
-            <button type="button" id="copy-jpay-result-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;">${t(locale, 'merchants_btn_copy')}</button>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;">
+          <div style="flex:1;min-width:200px;">
+            <div style="font-size:12px;color:#4b5563;margin-bottom:4px;">${t(locale, 'merchants_label_jpay_pg_callback_preview')}</div>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="text" id="jpay-callback-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;margin-top:0;" placeholder="${t(locale, 'merchants_url_placeholder')}" />
+              <button type="button" id="copy-jpay-callback-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;margin-top:0;">${t(locale, 'merchants_btn_copy')}</button>
+            </div>
           </div>
-        </label>
+          <div style="flex:1;min-width:200px;">
+            <div style="font-size:12px;color:#4b5563;margin-bottom:4px;">${t(locale, 'merchants_label_jpay_pg_result_preview')}</div>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="text" id="jpay-result-url-preview" readonly style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;background:#f9fafb;font-size:12px;margin-top:0;" placeholder="${t(locale, 'merchants_url_placeholder')}" />
+              <button type="button" id="copy-jpay-result-url" style="padding:6px 10px;font-size:12px;background:#6b7280;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;margin-top:0;">${t(locale, 'merchants_btn_copy')}</button>
+            </div>
+          </div>
+        </div>
         <p class="admin-page-desc">${t(locale, 'merchants_jpay_internal_target_hint')}</p>
         <p class="admin-page-desc">${t(locale, 'merchants_jpay_flow_ab_hint')}</p>
         </div>
@@ -10589,15 +10748,17 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         </label>
         </div>
         <div id="merch-chillpay-route-fields">
-        <label>
+        <label id="merch-route-no-wrap">
           ${t(locale, 'merchants_label_route_no')}
           <input type="text" name="routeNo" id="merchant-route-no" />
         </label>
-        <label>
+        <label id="merch-internal-customer-wrap">
           ${t(locale, 'merchants_label_internal_customer_id_hint')}
           <input type="text" name="internalCustomerId" id="merchant-internal-customer-id" />
         </label>
         </div>
+        <p id="merch-chillpay-route-auto-hint" class="admin-page-desc">${t(locale, 'merchants_chillpay_route_auto_hint')}</p>
+        <p id="merch-jpay-route-auto-hint" class="admin-page-desc" style="display:none;">${t(locale, 'merchants_jpay_route_auto_hint')}</p>
         <div id="route-warning" style="margin-top:10px;font-size:12px;color:#b91c1c;display:none;background:#fef2f2;border:1px solid #fecaca;padding:8px 10px;border-radius:6px;"></div>
         <label>
           <input type="checkbox" name="enableInternal" checked />
@@ -10622,39 +10783,22 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       <h2>${t(locale, 'merchants_list')}</h2>
       <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:12px;">
         <span style="font-size:13px;color:#374151;">${t(locale, 'merchants_sort_label')}:</span>
-        <a href="/admin/merchants?sort=recent" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'recent' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'recent' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_recent')}">${t(locale, 'merchants_sort_recent')}</a>
-        <a href="/admin/merchants?sort=past" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'past' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'past' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_past')}">${t(locale, 'merchants_sort_past')}</a>
-        <a href="/admin/merchants?sort=route_asc" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'route_asc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'route_asc' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_route_asc_title')}">${t(locale, 'merchants_sort_route_asc')}</a>
-        <a href="/admin/merchants?sort=route_desc" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'route_desc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'route_desc' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_route_desc')}">${t(locale, 'merchants_sort_route_desc')}</a>
-        <a href="/admin/merchants?sort=target" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'target' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'target' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_target')}">${t(locale, 'merchants_sort_target')}</a>
+        <a href="${merchantsSortHref('recent')}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'recent' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'recent' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_recent')}">${t(locale, 'merchants_sort_recent')}</a>
+        <a href="${merchantsSortHref('past')}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'past' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'past' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_past')}">${t(locale, 'merchants_sort_past')}</a>
+        <a href="${merchantsSortHref('route_asc')}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'route_asc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'route_asc' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_route_asc_title')}">${t(locale, 'merchants_sort_route_asc')}</a>
+        <a href="${merchantsSortHref('route_desc')}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'route_desc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'route_desc' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_route_desc')}">${t(locale, 'merchants_sort_route_desc')}</a>
+        <a href="${merchantsSortHref('partner_asc')}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'partner_asc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'partner_asc' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_partner_asc_title')}">${t(locale, 'merchants_sort_partner_asc')}</a>
+        <a href="${merchantsSortHref('partner_desc')}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'partner_desc' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'partner_desc' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_partner_desc')}">${t(locale, 'merchants_sort_partner_desc')}</a>
+        <a href="${merchantsSortHref('target')}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:${sortType === 'target' ? '#2563eb' : '#e5e7eb'};color:${sortType === 'target' ? '#fff' : '#374151'};" title="${t(locale, 'merchants_sort_target')}">${t(locale, 'merchants_sort_target')}</a>
         <a href="/admin/merchants/export?sort=${sortType}" style="padding:6px 12px;font-size:13px;border-radius:6px;text-decoration:none;background:#166534;color:#fff;margin-left:8px;" download>${t(locale, 'merchants_export_excel')}</a>
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th style="width:90px;">${t(locale, 'cr_th_merchant')}</th>
-            <th class="cell-url">${t(locale, 'merchants_th_pg_callurl')}</th>
-            <th class="cell-url">${t(locale, 'merchants_th_pg_reurl')}</th>
-            <th class="cell-url">${t(locale, 'merchants_th_origin_cburl')}</th>
-            <th class="cell-url">${t(locale, 'merchants_th_origin_reurl')}</th>
-            <th style="width:70px;">${t(locale, 'merchants_th_route')}</th>
-            <th style="width:90px;">CustomerId</th>
-            <th style="width:100px;">${t(locale, 'merchants_th_target')}</th>
-            <th style="width:88px;">${t(locale, 'merchants_th_pg_acquirer')}</th>
-            <th style="width:96px;">${t(locale, 'merchants_th_noti_mode')}</th>
-            <th style="width:56px;">${t(locale, 'merchants_th_recurring')}</th>
-            <th style="width:50px;">${t(locale, 'merchants_relay')}</th>
-            <th style="width:50px;">${t(locale, 'merchants_internal')}</th>
-            <th style="width:50px;">${t(locale, 'common_dev')}</th>
-            <th style="width:50px;">${t(locale, 'merchants_dealmai_webhook')}</th>
-            <th style="width:88px;">${t(locale, 'merchants_th_dealmai_partner')}</th>
-            <th class="actions-cell" style="width:80px;">${t(locale, 'members_manage')}</th>
-          </tr>
-        </thead>
+      <table class="merchants-list-table">
+        ${merchantsColgroupHtml}
+        ${merchantsTheadHtml}
         <tbody>
           ${
             rows ||
-            `<tr><td colspan="17" style="text-align:center;color:#777;">${t(locale, 'merchants_empty')}</td></tr>`
+            `<tr><td colspan="17" style="text-align:center;color:#777;">${merchantsEmptyMsg}</td></tr>`
           }
         </tbody>
       </table>
@@ -10663,18 +10807,58 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   </div>
   <script>
     (function () {
-      var cbSelect = document.getElementById('route-callback-select');
-      var rsSelect = document.getElementById('route-result-select');
-      var radChill = document.getElementById('merchant-pg-chillpay');
-      var radJpay = document.getElementById('merchant-pg-jpay');
+      var merchantsTable = document.querySelector('.merchants-list-table');
+      if (merchantsTable) {
+        var cols = merchantsTable.querySelectorAll('col');
+        var headers = merchantsTable.querySelectorAll('thead th');
+        var resizer = null;
+        var startX = 0;
+        var startW = 0;
+        var colIdx = 0;
+        function onMove(e) {
+          if (resizer == null) return;
+          var dx = e.clientX - startX;
+          var newW = Math.max(40, startW + dx);
+          if (cols[colIdx]) cols[colIdx].style.width = newW + 'px';
+        }
+        function onUp() {
+          resizer = null;
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+        }
+        merchantsTable.querySelectorAll('.merchants-col-resizer').forEach(function (el) {
+          el.addEventListener('mousedown', function (e) {
+            e.preventDefault();
+            colIdx = parseInt(el.getAttribute('data-col'), 10);
+            startX = e.clientX;
+            startW = headers[colIdx] ? headers[colIdx].offsetWidth : 80;
+            resizer = el;
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+          });
+        });
+      }
+    })();
+  </script>
+  <script>
+    (function () {
+      var chillSlotNo = document.getElementById('chill-slot-no');
+      var chillCbKeyH = document.getElementById('route-callback-key-hidden');
+      var chillRsKeyH = document.getElementById('route-result-key-hidden');
+      var pgKindHidden = document.getElementById('merchant-pg-kind-hidden');
       var blockChill = document.getElementById('merch-pg-chillpay-block');
       var blockJpay = document.getElementById('merch-pg-jpay-block');
       var cbPreview = document.getElementById('callback-url-preview');
       var rsPreview = document.getElementById('result-url-preview');
       var cbCopyBtn = document.getElementById('copy-callback-url');
       var rsCopyBtn = document.getElementById('copy-result-url');
-      var jpayCbSelect = document.getElementById('jpay-callback-select');
-      var jpayRsSelect = document.getElementById('jpay-result-select');
+      var jpaySlotNo = document.getElementById('jpay-slot-no');
+      var jpayCbKeyH = document.getElementById('jpay-callback-key-hidden');
+      var jpayRsKeyH = document.getElementById('jpay-result-key-hidden');
       var jpayCbPreview = document.getElementById('jpay-callback-url-preview');
       var jpayRsPreview = document.getElementById('jpay-result-url-preview');
       var jpayCbCopyBtn = document.getElementById('copy-jpay-callback-url');
@@ -10682,18 +10866,36 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       var warningBox = document.getElementById('route-warning');
       var form = document.getElementById('merchant-form');
       var editButtons = document.querySelectorAll('.edit-merchant');
+      var defaultJpaySlot = ${nextJpaySlot};
+      var defaultJpayRouteToken = '${escAttr(jpayRouteNoDefault)}';
       var chillpayRedirectRouteNos = ${chillpayRedirectRouteNosJson};
       var chillpayRedirectHostedMsg = ${chillpayRedirectAlertJson};
       var internalTargetsRelayOff = ${internalTargetsRelayOffJson};
 
-      function routeNoFromCbSelectVal(val) {
+      function isMerchantJpay() {
+        return pgKindHidden && pgKindHidden.value === 'jpay';
+      }
+
+      function chillNoFromRouteKey(val) {
+        if (!val) return '';
+        var m = String(val).match(/^(?:callback|result)\\/(\\d+)$/i);
+        return m ? m[1] : '';
+      }
+      function jpayNoFromRouteKey(val) {
+        if (!val) return '';
+        var m = String(val).match(/^jpay\\/(?:callback|result)\\/(j\\d+)$/i);
+        if (!m) return '';
+        var tm = m[1].match(/^j(\\d+)$/i);
+        return tm ? tm[1] : '';
+      }
+      function routeNoFromCbNo(val) {
         if (!val) return null;
-        var m = String(val).match(/callback\\/(\\d+)/i);
-        return m ? parseInt(m[1], 10) : null;
+        var n = parseInt(String(val).trim(), 10);
+        return Number.isFinite(n) ? n : null;
       }
       function maybeAlertChillpayRedirectHosted() {
-        if (!cbSelect || !radChill || !radChill.checked) return;
-        var n = routeNoFromCbSelectVal(cbSelect.value);
+        if (!chillSlotNo || isMerchantJpay()) return;
+        var n = routeNoFromCbNo(chillSlotNo.value);
         if (n == null || !chillpayRedirectRouteNos || !chillpayRedirectRouteNos.length) return;
         if (chillpayRedirectRouteNos.indexOf(n) !== -1) {
           alert(chillpayRedirectHostedMsg);
@@ -10702,6 +10904,32 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 
       // 항상 이 도메인 기준으로 전체 주소 생성
       var baseUrl = 'https://noti.icopay.net';
+
+      function syncChillpayRouteKeys() {
+        var slot = chillSlotNo && chillSlotNo.value ? String(chillSlotNo.value).trim() : '';
+        if (chillCbKeyH) chillCbKeyH.value = slot ? 'callback/' + slot : '';
+        if (chillRsKeyH) chillRsKeyH.value = slot ? 'result/' + slot : '';
+        syncRouteNoAuto();
+      }
+
+      function syncRouteNoAuto() {
+        var rn = document.getElementById('merchant-route-no');
+        if (!rn) return;
+        var j = isMerchantJpay();
+        if (j && jpaySlotNo && jpaySlotNo.value) {
+          rn.value = 'j' + String(jpaySlotNo.value).trim();
+        } else if (!j && chillSlotNo && chillSlotNo.value) {
+          rn.value = String(chillSlotNo.value).trim();
+        }
+      }
+
+      function syncJpayRouteKeys() {
+        var slot = jpaySlotNo && jpaySlotNo.value ? String(jpaySlotNo.value).trim() : '';
+        var tok = slot ? 'j' + slot : '';
+        if (jpayCbKeyH) jpayCbKeyH.value = tok ? 'jpay/callback/' + tok : '';
+        if (jpayRsKeyH) jpayRsKeyH.value = tok ? 'jpay/result/' + tok : '';
+        syncRouteNoAuto();
+      }
 
       function findInternalTargetRelayOff(tid) {
         if (!tid || !internalTargetsRelayOff || !internalTargetsRelayOff.length) return null;
@@ -10729,7 +10957,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var dedCb = document.getElementById('merchant-relay-off-dev-dedicated');
         var devInternalCheckbox = form && form.querySelector('input[name="enableDevInternal"]');
         var rsIn = document.getElementById('merchant-result-url');
-        var jpayOn = radJpay && radJpay.checked;
+        var jpayOn = isMerchantJpay();
         var dedOn = dedCb && dedCb.checked;
         if (dedOn && devInternalCheckbox) devInternalCheckbox.checked = true;
         if (rsIn && jpayOn && dedOn) {
@@ -10763,21 +10991,28 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       }
 
       function syncPgBlocks() {
-        var j = radJpay && radJpay.checked;
+        var j = isMerchantJpay();
         if (blockChill) blockChill.style.display = j ? 'none' : 'block';
         if (blockJpay) blockJpay.style.display = j ? 'block' : 'none';
-        if (cbSelect) cbSelect.disabled = !!j;
-        if (rsSelect) rsSelect.disabled = !!j;
-        if (jpayCbSelect) jpayCbSelect.disabled = !j;
-        if (jpayRsSelect) jpayRsSelect.disabled = !j;
+        if (chillSlotNo) chillSlotNo.disabled = !!j;
+        if (jpaySlotNo) jpaySlotNo.disabled = !j;
         var wrapRoute = document.getElementById('merch-chillpay-route-fields');
+        var routeNoWrap = document.getElementById('merch-route-no-wrap');
+        var cidWrap = document.getElementById('merch-internal-customer-wrap');
+        var chillRouteHint = document.getElementById('merch-chillpay-route-auto-hint');
+        var jpayRouteHint = document.getElementById('merch-jpay-route-auto-hint');
         var rn = document.getElementById('merchant-route-no');
         var cid = document.getElementById('merchant-internal-customer-id');
         var subWrap = document.getElementById('merch-subscription-service-wrap');
-        if (wrapRoute) wrapRoute.style.display = j ? 'none' : 'block';
-        if (rn) rn.disabled = !!j;
+        if (wrapRoute) wrapRoute.style.display = 'block';
+        if (routeNoWrap) routeNoWrap.style.display = 'block';
+        if (cidWrap) cidWrap.style.display = j ? 'none' : 'block';
+        if (chillRouteHint) chillRouteHint.style.display = j ? 'none' : 'block';
+        if (jpayRouteHint) jpayRouteHint.style.display = j ? 'block' : 'none';
+        if (rn) rn.readOnly = true;
         if (cid) cid.disabled = !!j;
         if (subWrap) subWrap.style.display = j ? 'none' : 'block';
+        syncRouteNoAuto();
       }
 
       function jnotiUrlFromRouteKey(rk) {
@@ -10788,10 +11023,12 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       }
 
       function updatePreviews() {
-        var cb = cbSelect && cbSelect.value; // 예: "callback/8"
-        var rs = rsSelect && rsSelect.value; // 예: "result/8"
-        var jcb = jpayCbSelect && jpayCbSelect.value;
-        var jrs = jpayRsSelect && jpayRsSelect.value;
+        syncChillpayRouteKeys();
+        syncJpayRouteKeys();
+        var cb = chillCbKeyH && chillCbKeyH.value;
+        var rs = chillRsKeyH && chillRsKeyH.value;
+        var jcb = jpayCbKeyH && jpayCbKeyH.value;
+        var jrs = jpayRsKeyH && jpayRsKeyH.value;
 
         if (cbPreview) {
           cbPreview.value = cb ? baseUrl + '/noti/' + cb : '';
@@ -10806,15 +11043,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           jpayRsPreview.value = jnotiUrlFromRouteKey(jrs);
         }
 
-        // 경고 박스는 간단히만 사용: 둘 다 비어 있으면 숨김
         if (warningBox) {
-          if (!cb && !rs) {
-            warningBox.style.display = 'none';
-            warningBox.innerHTML = '';
-          } else {
-            warningBox.style.display = 'none';
-            warningBox.innerHTML = '';
-          }
+          warningBox.style.display = 'none';
+          warningBox.innerHTML = '';
         }
       }
 
@@ -10829,16 +11060,17 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         alert('${(t(locale, 'merchants_copied') || '').replace(/'/g, "\\'")}');
       }
 
-      if (cbSelect)
-        cbSelect.addEventListener('change', function () {
+      if (chillSlotNo)
+        chillSlotNo.addEventListener('change', function () {
           maybeAlertChillpayRedirectHosted();
           updatePreviews();
         });
-      if (rsSelect) rsSelect.addEventListener('change', updatePreviews);
-      if (jpayCbSelect) jpayCbSelect.addEventListener('change', updatePreviews);
-      if (jpayRsSelect) jpayRsSelect.addEventListener('change', updatePreviews);
-      if (radChill) radChill.addEventListener('change', function () { syncPgBlocks(); updatePreviews(); });
-      if (radJpay) radJpay.addEventListener('change', function () { syncPgBlocks(); updatePreviews(); });
+      if (chillSlotNo)
+        chillSlotNo.addEventListener('input', function () {
+          updatePreviews();
+        });
+      if (jpaySlotNo) jpaySlotNo.addEventListener('change', updatePreviews);
+      if (jpaySlotNo) jpaySlotNo.addEventListener('input', updatePreviews);
       var relayCbEl = document.getElementById('merchant-enable-relay');
       if (relayCbEl) relayCbEl.addEventListener('change', syncRelayMerchantUrls);
       var rofSelectEl = document.getElementById('merchant-relay-off-forward');
@@ -10902,6 +11134,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 
       if (form) {
         form.addEventListener('submit', function (e) {
+          syncChillpayRouteKeys();
+          syncJpayRouteKeys();
           var ok = window.confirm('${(t(locale, 'merchants_confirm_save_config') || '').replace(/'/g, "\\'")}');
           if (!ok) {
             e.preventDefault();
@@ -10918,9 +11152,13 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var routeNoInput = form.querySelector('input[name="routeNo"]');
         var internalCustomerInput = form.querySelector('input[name="internalCustomerId"]');
         var pgKind = (button.dataset.merchantPgKind || 'chillpay').toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
-        if (radChill && radJpay) {
-          if (pgKind === 'jpay') { radJpay.checked = true; radChill.checked = false; }
-          else { radChill.checked = true; radJpay.checked = false; }
+        if (pgKindHidden) pgKindHidden.value = pgKind;
+        var registerHeadingEl = document.getElementById('merchant-register-section');
+        if (registerHeadingEl) {
+          registerHeadingEl.textContent =
+            pgKind === 'jpay'
+              ? '${(t(locale, 'merchants_nav_register_jpay') || 'JPAY 등록').replace(/'/g, "\\'")}'
+              : '${(t(locale, 'merchants_nav_register_chillpay') || 'CHILLPAY 등록').replace(/'/g, "\\'")}';
         }
         syncPgBlocks();
         var relayCheckbox = form.querySelector('input[name="enableRelay"]');
@@ -10940,7 +11178,18 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         }
         if (cbUrlInput) cbUrlInput.value = button.dataset.callbackUrl || '';
         if (rsUrlInput) rsUrlInput.value = button.dataset.resultUrl || '';
-        if (routeNoInput) routeNoInput.value = button.dataset.routeNo || '';
+        if (routeNoInput) {
+          var rnVal = button.dataset.routeNo || '';
+          if (!rnVal && pgKind === 'jpay') {
+            rnVal = jpayNoFromRouteKey(button.dataset.jpayRouteCallbackKey || '')
+              ? 'j' + jpayNoFromRouteKey(button.dataset.jpayRouteCallbackKey || '')
+              : '';
+          }
+          if (!rnVal && pgKind === 'chillpay') {
+            rnVal = chillNoFromRouteKey(button.dataset.routeCallbackKey || '');
+          }
+          routeNoInput.value = rnVal;
+        }
         if (internalCustomerInput)
           internalCustomerInput.value = button.dataset.internalCustomerId || '';
 
@@ -10979,10 +11228,15 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var rdmSelect = form.querySelector('select[name="resultDeliveryMode"]');
         if (rdmSelect) rdmSelect.value = button.dataset.resultDeliveryMode || 'auto';
 
-        if (cbSelect) cbSelect.value = button.dataset.routeCallbackKey || '';
-        if (rsSelect) rsSelect.value = button.dataset.routeResultKey || '';
-        if (jpayCbSelect) jpayCbSelect.value = button.dataset.jpayRouteCallbackKey || '';
-        if (jpayRsSelect) jpayRsSelect.value = button.dataset.jpayRouteResultKey || '';
+        if (chillSlotNo) {
+          var cn = chillNoFromRouteKey(button.dataset.routeCallbackKey || '');
+          var rn = chillNoFromRouteKey(button.dataset.routeResultKey || '');
+          chillSlotNo.value = cn || rn || '${nextChillSlot}';
+        }
+        if (jpaySlotNo) {
+          var jn = jpayNoFromRouteKey(button.dataset.jpayRouteCallbackKey || '');
+          jpaySlotNo.value = jn || defaultJpaySlot;
+        }
 
         var recSel = document.getElementById('merchant-chillpay-recurring');
         if (recSel) recSel.value = (button.dataset.chillpayRecurring || 'N') === 'Y' ? 'Y' : 'N';
@@ -11009,21 +11263,40 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 </html>`);
 });
 
+function parseMerchantsRegisterKind(req) {
+  const raw = req && req.query && req.query.kind ? String(req.query.kind).toLowerCase().trim() : '';
+  return raw === 'jpay' ? 'jpay' : 'chillpay';
+}
+
+function merchantsRegisterKindUrl(kind) {
+  return `/admin/merchants?kind=${kind === 'jpay' ? 'jpay' : 'chillpay'}`;
+}
+
 /**
- * 가맹점 목록 PG 구분: 전산 **등록대상**(internalTargetId)의 pgProvider 우선,
- * 미선택·미등록 시 노티 수신 경로(jpay/callback/… vs callback/N)로 판별.
+ * 가맹점 PG 구분: 저장된 merchantPgKind → JPAY/ChillPay 노티 경로 → routeNo(jN) → 등록대상 pgProvider
  */
-function resolveMerchantListPgAcquirer(m) {
+function inferMerchantPgKind(m) {
   if (!m || typeof m !== 'object') return 'chillpay';
+  const saved = String(m.merchantPgKind || '').toLowerCase().trim();
+  if (saved === 'jpay' || saved === 'chillpay') return saved;
+  const jpayCb = String(m.jpayRouteCallbackKey || '').trim();
+  const jpayRs = String(m.jpayRouteResultKey || '').trim();
+  if (jpayCb || jpayRs) return 'jpay';
+  const chillCb = String(m.routeCallbackKey || '').trim();
+  const chillRs = String(m.routeResultKey || '').trim();
+  if (chillCb || chillRs) return 'chillpay';
+  const rn = String(m.routeNo || '').trim();
+  if (/^j\d+$/i.test(rn)) return 'jpay';
   const tid = String(m.internalTargetId || '').trim();
   if (tid && INTERNAL_TARGETS.has(tid)) {
     const pg = String(INTERNAL_TARGETS.get(tid).pgProvider || '').toLowerCase().trim();
     if (pg === 'jpay' || pg === 'chillpay') return pg;
   }
-  const jpayCb = String(m.jpayRouteCallbackKey || '').trim();
-  const jpayRs = String(m.jpayRouteResultKey || '').trim();
-  if (jpayCb || jpayRs) return 'jpay';
   return 'chillpay';
+}
+
+function resolveMerchantListPgAcquirer(m) {
+  return inferMerchantPgKind(m);
 }
 
 /** 가맹점 목록: ChillPay 결제 방식(A/B). JPAY는 표시용 대시 */
@@ -11107,20 +11380,35 @@ function merchantNotiStyleCsvSummary(locale, m) {
 }
 
 // 가맹점 목록 Excel(CSV) 내보내기 (현재 정렬 기준)
+
 function getSortedMerchantEntries(sortType) {
   let entries = [...MERCHANTS.entries()];
   if (sortType === 'recent') entries.reverse();
   else if (sortType === 'route_asc') {
     entries.sort((a, b) => {
-      const na = Number(a[1].routeNo) || 0;
-      const nb = Number(b[1].routeNo) || 0;
+      const na = merchantRouteSortNumber(a[1]);
+      const nb = merchantRouteSortNumber(b[1]);
       return na - nb || String(a[0]).localeCompare(b[0]);
     });
   } else if (sortType === 'route_desc') {
     entries.sort((a, b) => {
-      const na = Number(a[1].routeNo) || 0;
-      const nb = Number(b[1].routeNo) || 0;
+      const na = merchantRouteSortNumber(a[1]);
+      const nb = merchantRouteSortNumber(b[1]);
       return nb - na || String(a[0]).localeCompare(b[0]);
+    });
+  } else if (sortType === 'partner_asc') {
+    entries.sort((a, b) => {
+      const pa = merchantDealmaiPartnerCell(a[1]);
+      const pb = merchantDealmaiPartnerCell(b[1]);
+      const cmp = pa.localeCompare(pb, undefined, { sensitivity: 'base', numeric: true });
+      return cmp !== 0 ? cmp : String(a[0]).localeCompare(b[0]);
+    });
+  } else if (sortType === 'partner_desc') {
+    entries.sort((a, b) => {
+      const pa = merchantDealmaiPartnerCell(a[1]);
+      const pb = merchantDealmaiPartnerCell(b[1]);
+      const cmp = pb.localeCompare(pa, undefined, { sensitivity: 'base', numeric: true });
+      return cmp !== 0 ? cmp : String(a[0]).localeCompare(b[0]);
     });
   } else if (sortType === 'target') {
     // 등록대상(internalTargetId) 기준으로 묶어서 리스트: 동일 등록대상끼리 인접
@@ -11194,7 +11482,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
         rsDisplay,
         m.callbackUrl || '',
         m.resultUrl || '',
-        m.routeNo || '',
+        merchantListRouteNoCell(m),
         m.internalCustomerId || '',
         m.internalTargetId || '',
         pgKind === 'jpay'
@@ -11222,8 +11510,11 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
   const {
     merchantId: rawMerchantId,
     originalMerchantId,
-    routeCallbackKey,
-    routeResultKey,
+    routeCallbackKey: rawRouteCallbackKey,
+    routeResultKey: rawRouteResultKey,
+    pgCallbackNo: rawPgCallbackNo,
+    pgResultNo: rawPgResultNo,
+    chillSlotNo: rawChillSlotNo,
     callbackUrl,
     resultUrl,
     routeNo,
@@ -11237,37 +11528,43 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     relayFormat,
     relayEnrichmentMode: rawRelayEnrichmentMode,
     resultDeliveryMode: rawResultDeliveryMode,
-    jpayRouteCallbackKey,
-    jpayRouteResultKey,
+    jpayRouteCallbackKey: rawJpayRouteCallbackKey,
+    jpayRouteResultKey: rawJpayRouteResultKey,
+    jpaySlotNo: rawJpaySlotNo,
     merchantPgKind: rawPgKind,
     chillpayRecurring: rawChillpayRecurring,
   } = req.body;
 
   const merchantId = (rawMerchantId || '').trim();
   const origId = (originalMerchantId || '').trim();
-  let chillCb = (routeCallbackKey || '').trim();
-  let jpayCb = (jpayRouteCallbackKey || '').trim();
-  let jpayRs = (jpayRouteResultKey || '').trim();
   const pgKind = String(rawPgKind || '').toLowerCase().trim() === 'jpay' ? 'jpay' : 'chillpay';
+  let chillCb = '';
+  let chillRs = '';
+  let jpayCb = '';
+  let jpayRs = '';
   if (pgKind === 'jpay') {
-    chillCb = '';
+    const slot =
+      normalizePgNotiRouteNumber(rawJpaySlotNo) ||
+      parseJpayNotiSlotFromToken(extractJpayPathToken(String(rawJpayRouteCallbackKey || '').trim()));
+    if (!slot) {
+      return res.status(400).send(t(getLocale(req), 'merchants_err_jpay_routes') || 'JPAY: callback/result 노티 경로 번호를 입력하세요.');
+    }
+    jpayCb = buildJpayRouteCallbackKey(slot);
+    jpayRs = buildJpayRouteResultKey(slot);
     if (!jpayCb || !jpayRs) {
-      return res.status(400).send(t(getLocale(req), 'merchants_err_jpay_routes') || 'JPAY: callback/result 노티 경로를 모두 선택하세요.');
-    }
-    const tokCb = extractJpayPathToken(jpayCb);
-    const tokRs = extractJpayPathToken(jpayRs);
-    if (!tokCb || tokCb !== tokRs) {
-      return res.status(400).send(t(getLocale(req), 'merchants_err_jpay_same_token') || 'JPAY: callback과 result는 동일한 토큰(환경)을 선택해야 합니다.');
-    }
-    if (!parseJpayNotiSlotFromToken(tokCb)) {
       return res.status(400).send(t(getLocale(req), 'merchants_err_jpay_unknown_token') || 'JPAY: 허용되지 않은 노티 경로입니다.');
     }
   } else {
-    jpayCb = '';
-    jpayRs = '';
-    if (!chillCb) {
-      return res.status(400).send(t(getLocale(req), 'merchants_err_chillpay_callback') || 'ChillPay: PG callback 번호를 선택하세요.');
+    const slot =
+      normalizePgNotiRouteNumber(rawChillSlotNo) ||
+      normalizePgNotiRouteNumber(rawPgCallbackNo) ||
+      extractChillpayRouteNumberFromKey(String(rawRouteCallbackKey || '').trim()) ||
+      extractChillpayRouteNumberFromKey(String(rawRouteResultKey || '').trim());
+    if (!slot) {
+      return res.status(400).send(t(getLocale(req), 'merchants_err_chillpay_callback') || 'ChillPay: PG 노티 슬롯 번호를 입력하세요.');
     }
+    chillCb = buildChillpayRouteCallbackKey(slot);
+    chillRs = buildChillpayRouteResultKey(slot);
   }
 
   const actor = req.session.adminUser || 'unknown';
@@ -11314,7 +11611,17 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
   // 릴레이 OFF여도 저장: 브라우저 복귀(302/폼 POST)용. 서버 릴레이·무효환불 가맹점 POST는 enableRelay 일 때만 사용.
   const cbSaved = String(callbackUrl || '').trim();
   const rsSaved = String(resultUrl || '').trim();
-  const rnSaved = pgKind === 'jpay' ? '' : String(routeNo || '').trim();
+  const jpaySlotSaved =
+    pgKind === 'jpay' ? parseJpayNotiSlotFromToken(extractJpayPathToken(jpayCb)) : null;
+  const chillCbN =
+    pgKind === 'chillpay'
+      ? normalizePgNotiRouteNumber(rawPgCallbackNo) || extractChillpayRouteNumberFromKey(chillCb)
+      : null;
+  const rnManual = String(routeNo || '').trim();
+  const rnSaved =
+    pgKind === 'jpay'
+      ? rnManual || (jpaySlotSaved ? jpayRouteTokenForSlot(jpaySlotSaved) : '')
+      : rnManual || (chillCbN ? String(chillCbN) : '');
   const icSaved = pgKind === 'jpay' ? '' : String(internalCustomerId || '').trim();
   const recRaw = String(rawChillpayRecurring || '').trim().toUpperCase();
   const chillpayRecurringYn = pgKind === 'jpay' ? 'N' : recRaw === 'Y' ? 'Y' : 'N';
@@ -11359,10 +11666,10 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     ...prev,
     merchantId,
     routeCallbackKey: chillCb,
-    routeResultKey: (routeResultKey || '').trim(),
+    routeResultKey: chillRs,
     callbackUrl: cbSaved,
     resultUrl: rsSaved,
-    routeNo: pgKind === 'jpay' ? '' : rnSaved || '7',
+    routeNo: pgKind === 'jpay' ? rnSaved : rnSaved || '7',
     internalCustomerId: pgKind === 'jpay' ? '' : icSaved || 'M035594',
     internalTargetId: internalTargetId || '',
     enableRelay: enableRelayOn,
@@ -11381,6 +11688,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     jpayRouteResultKey: jpayRs,
     jpayCallbackUrl: '',
     jpayResultUrl: '',
+    merchantPgKind: pgKind,
     chillpayRecurring: chillpayRecurringYn,
     resultDeliveryMode: resultDeliveryModeSaved,
     relayEnrichmentMode: relayEnrichmentModeSaved,
@@ -11396,7 +11704,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     before,
     after: MERCHANTS.get(merchantId),
   });
-  res.redirect('/admin/merchants');
+  res.redirect(merchantsRegisterKindUrl(pgKind));
 });
 
 // 가맹점 삭제 처리
@@ -11414,7 +11722,7 @@ app.post('/admin/merchants/delete', requireAuth, requirePage('merchants'), (req,
   const before = MERCHANTS.get(merchantId) || null;
 
   if (!before) {
-    return res.redirect('/admin/merchants');
+    return res.redirect(merchantsRegisterKindUrl('chillpay'));
   }
 
   MERCHANTS.delete(merchantId);
@@ -11428,7 +11736,7 @@ app.post('/admin/merchants/delete', requireAuth, requirePage('merchants'), (req,
     before,
   });
 
-  return res.redirect('/admin/merchants');
+  return res.redirect(merchantsRegisterKindUrl(inferMerchantPgKind(before)));
 });
 
 // PG 노티 로그 페이지 (수신시간 4타임존, 1건 1줄, Json/callback·json/result)
