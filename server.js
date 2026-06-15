@@ -132,6 +132,22 @@ const ADMIN_LOG_FILTER_BAR_CSS = `
     }
 `;
 
+const ADMIN_LIST_COL_GUIDE_CSS = `
+    .list-col-guide { margin:8px 0 12px; padding:10px 12px; border:1px solid #e2e8f0; border-radius:8px; background:#f8fafc; box-sizing:border-box; }
+    .list-col-guide-head { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; margin-bottom:8px; }
+    .list-col-guide-title { font-size:12px; font-weight:800; color:#1e293b; letter-spacing:0.04em; }
+    .list-col-guide-vbar { color:#94a3b8; font-weight:500; }
+    .list-col-guide-actions { display:flex; flex-wrap:wrap; gap:6px; }
+    .list-col-guide-actions button { padding:3px 10px; font-size:11px; border-radius:5px; cursor:pointer; border:1px solid #cbd5e1; background:#fff; color:#475569; }
+    .list-col-guide-actions button.list-col-guide-save { background:#2563eb; color:#fff; border-color:#1d4ed8; }
+    .list-col-guide-list { display:flex; flex-wrap:wrap; gap:6px 12px; }
+    .list-col-guide-item { font-size:12px; color:#374151; display:inline-flex; align-items:center; gap:4px; }
+    .list-col-guide-item--off { opacity:0.55; }
+    .btn-list-col-hello { padding:4px 12px; font-size:12px; font-weight:700; border-radius:6px; border:1px solid #94a3b8; background:#f8fafc; color:#334155; cursor:pointer; margin-left:6px; }
+    .btn-list-col-hello:hover { background:#e2e8f0; }
+    .btn-list-col-hello--restore { background:#fef3c7; border-color:#f59e0b; color:#92400e; }
+`;
+
 /** 관리자 레이아웃 공통: 사이드바·네비·상단바·main (getAdminSidebar 앞에 삽입) */
 const ADMIN_LAYOUT_SHELL_CSS = `
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
@@ -186,7 +202,7 @@ const ADMIN_LAYOUT_SHELL_CSS = `
     .hub-nav-guide-list { display:flex; flex-wrap:wrap; gap:6px 12px; }
     .hub-nav-guide-item { font-size:12px; color:#374151; display:inline-flex; align-items:center; gap:4px; }
     .hub-nav-guide-item--off { opacity:0.55; }
-    .cr-hub-toolbar--inline .hub-nav-links, .cr-hub-toolbar--inline .hub-nav-hello-row, .cr-hub-toolbar--inline .hub-nav-guide { margin-top:6px; }
+    ${ADMIN_LIST_COL_GUIDE_CSS}
 `;
 
 /** multipart/form-data (파일 필드 제외, 텍스트 필드만) */
@@ -7872,9 +7888,6 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
   const canSeeMembers = role === ROLES.SUPER_ADMIN || role === ROLES.ADMIN;
   const perms = member && member.permissions ? member.permissions : PAGE_KEYS;
   const can = (key) => canSeeMembers || perms.includes(key) || (typeof key === 'string' && key.startsWith('cr_') && perms.includes('cancel_refund'));
-  const sessionPg = req && getSessionPgSource(req);
-  const hubCr = (hubKey) => filterSidebarHubNav(member, 'cr', sessionPg, hubKey);
-  const hubLog = (hubKey) => filterSidebarHubNav(member, 'logs', sessionPg, hubKey);
   const sectionOpen = (paths) => paths.some((p) => pathMatch(p));
   // 왼쪽 메뉴: 섹션별로 접었다 펼치는 드롭다운 구조
   const navGroup = (sectionTitle, paths, itemsHtml) => {
@@ -7888,19 +7901,19 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
   if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('dealmai_webhook_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('dealmai_webhook_result') || can('traffic_analysis') || can('mail_logs')) {
     const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/dealmai-webhook-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/dealmai-webhook', '/admin/pg-notify-delivery', '/admin/mail-logs', '/admin/traffic'];
     const logItems = [];
-    if (can('pg_result') && hubLog('pg_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs-result'), t(locale, 'nav_pg_result')));
-    if (can('internal_result') && hubLog('internal_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal-result'), t(locale, 'nav_internal_result')));
-    if (can('dev_result') && hubLog('dev_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal-result'), t(locale, 'nav_dev_result')));
-    if (can('dealmai_webhook_result') && hubLog('dealmai_webhook_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook-result'), t(locale, 'nav_dealmai_webhook_result')));
-    if (can('pg_logs') && hubLog('pg_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs'), t(locale, 'nav_pg_noti_log')));
-    if (can('internal_logs') && hubLog('internal_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal'), t(locale, 'nav_internal_noti_log')));
+    if (can('pg_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs-result'), t(locale, 'nav_pg_result')));
+    if (can('internal_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal-result'), t(locale, 'nav_internal_result')));
+    if (can('dev_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal-result'), t(locale, 'nav_dev_result')));
+    if (can('dealmai_webhook_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook-result'), t(locale, 'nav_dealmai_webhook_result')));
+    if (can('pg_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs'), t(locale, 'nav_pg_noti_log')));
+    if (can('internal_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal'), t(locale, 'nav_internal_noti_log')));
     if (can('dev_internal_logs')) {
-      if (hubLog('dev_internal_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal'), t(locale, 'nav_dev_internal_noti_log')));
-      if (hubLog('pg_notify_delivery')) logItems.push(link('/admin/pg-notify-delivery', t(locale, 'nav_pg_notify_delivery')));
+      logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal'), t(locale, 'nav_dev_internal_noti_log')));
+      logItems.push(link('/admin/pg-notify-delivery', t(locale, 'nav_pg_notify_delivery')));
     }
-    if (can('dealmai_webhook_logs') && hubLog('dealmai_webhook_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook'), t(locale, 'nav_dealmai_webhook_log')));
-    if (can('mail_logs') && hubLog('mail_logs')) logItems.push(link('/admin/mail-logs', t(locale, 'nav_mail_logs')));
-    if (can('traffic_analysis') && hubLog('traffic')) logItems.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis')));
+    if (can('dealmai_webhook_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook'), t(locale, 'nav_dealmai_webhook_log')));
+    if (can('mail_logs')) logItems.push(link('/admin/mail-logs', t(locale, 'nav_mail_logs')));
+    if (can('traffic_analysis')) logItems.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis')));
     nav.push(navGroup(t(locale, 'nav_logs'), logPaths, logItems.join('')));
   }
   if (can('internal_targets') || can('internal_noti_settings') || can('dev_internal_noti_settings') || can('dealmai_webhook_settings') || can('test_run')) {
@@ -7921,24 +7934,24 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
     const crLabel = t(locale, 'nav_cancel_refund');
     const crItems = [];
     const txNavUrl = urlWithSessionPgSource(req, '/admin/transactions');
-    if (can('cr_transactions') && hubCr('tx')) crItems.push(link(txNavUrl, t(locale, 'nav_transaction_list')));
-    if (can('cr_transactions') && hubCr('daily_noti')) {
+    if (can('cr_transactions')) crItems.push(link(txNavUrl, t(locale, 'nav_transaction_list')));
+    if (can('cr_transactions')) {
       crItems.push(
         link(urlWithSessionPgSource(req, '/admin/daily-noti-summary?period=thisMonth&dateSort=desc'), t(locale, 'nav_daily_noti_summary')),
       );
     }
-    if (can('cr_jpay_followup') && hubCr('jpay_followup')) {
+    if (can('cr_jpay_followup')) {
       crItems.push(link('/admin/cancel-refund/jpay-followup?source=jpay', t(locale, 'nav_jpay_followup')));
     }
-    if (can('cr_pg_transactions') && hubCr('pg_tx')) crItems.push(link('/admin/pg-transactions?sort=today', t(locale, 'nav_pg_transaction_list')));
-    if (can('cr_pg_transactions') && hubCr('daily_pg')) crItems.push(link('/admin/daily-pg-summary?sort=thisMonth&dateSort=desc', t(locale, 'nav_daily_pg_summary')));
-    if (can('cr_cancel') && hubCr('cancel')) crItems.push(link('/admin/cancel-refund/cancel', t(locale, 'nav_cancel_refund_cancel')));
-    if (can('cr_void') && hubCr('void')) crItems.push(link('/admin/cancel-refund/void', t(locale, 'nav_cancel_refund_void')));
-    if (can('cr_void_summary') && hubCr('void_summary')) crItems.push(link('/admin/cancel-refund/void-summary', t(locale, 'nav_cancel_refund_void_summary')));
-    if (can('cr_refund') && hubCr('refund')) crItems.push(link('/admin/cancel-refund/refund', t(locale, 'nav_cancel_refund_refund')));
-    if (can('cr_force_refund') && forceRefundDaysNav > 0 && hubCr('force_refund')) crItems.push(link('/admin/cancel-refund/force-refund', t(locale, 'nav_cancel_refund_force_refund')));
-    if (can('cr_noti') && hubCr('noti')) crItems.push(link('/admin/cancel-refund/noti', t(locale, 'nav_cancel_refund_noti'), 'nav-item-small'));
-    if (can('cr_void_deleted') && hubCr('void_deleted')) crItems.push(link('/admin/cancel-refund/void-deleted-list', t(locale, 'cr_void_deleted_list')));
+    if (can('cr_pg_transactions')) crItems.push(link('/admin/pg-transactions?sort=today', t(locale, 'nav_pg_transaction_list')));
+    if (can('cr_pg_transactions')) crItems.push(link('/admin/daily-pg-summary?sort=thisMonth&dateSort=desc', t(locale, 'nav_daily_pg_summary')));
+    if (can('cr_cancel')) crItems.push(link('/admin/cancel-refund/cancel', t(locale, 'nav_cancel_refund_cancel')));
+    if (can('cr_void')) crItems.push(link('/admin/cancel-refund/void', t(locale, 'nav_cancel_refund_void')));
+    if (can('cr_void_summary')) crItems.push(link('/admin/cancel-refund/void-summary', t(locale, 'nav_cancel_refund_void_summary')));
+    if (can('cr_refund')) crItems.push(link('/admin/cancel-refund/refund', t(locale, 'nav_cancel_refund_refund')));
+    if (can('cr_force_refund') && forceRefundDaysNav > 0) crItems.push(link('/admin/cancel-refund/force-refund', t(locale, 'nav_cancel_refund_force_refund')));
+    if (can('cr_noti')) crItems.push(link('/admin/cancel-refund/noti', t(locale, 'nav_cancel_refund_noti'), 'nav-item-small'));
+    if (can('cr_void_deleted')) crItems.push(link('/admin/cancel-refund/void-deleted-list', t(locale, 'cr_void_deleted_list')));
     const crOpen = sectionOpen(crPaths);
     nav.push(`<details class="nav-group"${crOpen ? ' open' : ''}><summary class="nav-group-summary"><a href="${txNavUrl}" class="nav-group-summary-link" style="color:inherit;text-decoration:none;" onclick="event.stopPropagation()">${crLabel}</a></summary><div class="nav-group-items">${crItems.join('')}</div></details>`);
   }
@@ -8362,11 +8375,11 @@ function applyMemberSession(req, member) {
   if (member.mustChangePassword) req.session.mustChangePassword = true;
 }
 
-function parseHubNavSaveBody(body) {
-  const group = String((body && body.group) || '').trim();
+function parseListColViewSaveBody(body) {
+  const pageId = String((body && body.pageId) || '').trim();
   const pg = String((body && body.pg) || '').trim();
-  if (group !== 'cr' && group !== 'logs') return null;
-  if (pg !== 'jpay' && pg !== 'chillpay') return null;
+  if (!pageId) return null;
+  if (pg !== 'jpay' && pg !== 'chillpay' && pg !== 'none') return null;
   let enabledKeys = null;
   if (body && body.enabledKeys != null) {
     if (Array.isArray(body.enabledKeys)) enabledKeys = body.enabledKeys.map((k) => String(k).trim()).filter(Boolean);
@@ -8381,48 +8394,29 @@ function parseHubNavSaveBody(body) {
   }
   const helloHidden =
     body && body.helloHidden != null && (body.helloHidden === true || body.helloHidden === '1' || body.helloHidden === 1);
-  return { group, pg, enabledKeys, helloHidden };
+  return { pageId, pg, enabledKeys, helloHidden };
 }
 
-app.post('/admin/hub-nav-view-settings/save', requireAuth, (req, res) => {
+app.post('/admin/list-column-view-settings/save', requireAuth, (req, res) => {
   const member = req.session && req.session.member;
   if (!member) return res.status(401).json({ ok: false });
-  const parsed = parseHubNavSaveBody(req.body || {});
+  const parsed = parseListColViewSaveBody(req.body || {});
   if (!parsed) return res.status(400).json({ ok: false, error: 'invalid' });
-  const scopeBefore = getMemberHubNavScopeSettings(member, parsed.group, parsed.pg);
-  const keysToSave =
-    parsed.enabledKeys != null
-      ? parsed.enabledKeys
-      : scopeBefore.enabledKeys ||
-        (parsed.group === 'logs'
-          ? getDefaultLogsHubNavEnabledKeys(member)
-          : getDefaultCrHubNavEnabledKeys(
-              parsed.pg,
-              member,
-              Number(loadChillPayTransactionConfig().forceRefundWindowDays) >= 0 ? loadChillPayTransactionConfig().forceRefundWindowDays : 0,
-            ));
+  const scopeBefore = getMemberListColViewSettings(member, parsed.pageId, parsed.pg);
+  const keysToSave = parsed.enabledKeys != null ? parsed.enabledKeys : scopeBefore.enabledKeys || [];
   const helloToSave = parsed.helloHidden != null ? parsed.helloHidden : scopeBefore.helloHidden;
-  setMemberHubNavScopeSettings(member, parsed.group, parsed.pg, keysToSave, helloToSave);
-  if (req.headers.accept && String(req.headers.accept).indexOf('application/json') !== -1) {
-    return res.json({ ok: true });
-  }
-  const back = String((req.body && req.body.back) || req.get('Referer') || '/admin/merchants');
-  return res.redirect(back);
+  setMemberListColViewSettings(member, parsed.pageId, parsed.pg, keysToSave, helloToSave);
+  return res.json({ ok: true });
 });
 
-app.post('/admin/hub-nav-view-settings/hello-toggle', requireAuth, (req, res) => {
+app.post('/admin/list-column-view-settings/hello-toggle', requireAuth, (req, res) => {
   const member = req.session && req.session.member;
   if (!member) return res.status(401).json({ ok: false });
-  const parsed = parseHubNavSaveBody(req.body || {});
+  const parsed = parseListColViewSaveBody(req.body || {});
   if (!parsed || parsed.helloHidden == null) return res.status(400).json({ ok: false, error: 'invalid' });
-  const scope = getMemberHubNavScopeSettings(member, parsed.group, parsed.pg);
-  const forceRefundDays = Number(loadChillPayTransactionConfig().forceRefundWindowDays) >= 0 ? loadChillPayTransactionConfig().forceRefundWindowDays : 0;
-  const keys =
-    scope.enabledKeys ||
-    (parsed.group === 'logs'
-      ? getDefaultLogsHubNavEnabledKeys(member)
-      : getDefaultCrHubNavEnabledKeys(parsed.pg, member, forceRefundDays));
-  setMemberHubNavScopeSettings(member, parsed.group, parsed.pg, keys, parsed.helloHidden);
+  const scope = getMemberListColViewSettings(member, parsed.pageId, parsed.pg);
+  const keys = scope.enabledKeys || [];
+  setMemberListColViewSettings(member, parsed.pageId, parsed.pg, keys, parsed.helloHidden);
   return res.json({ ok: true });
 });
 
@@ -11515,6 +11509,12 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
     getEnv: () => logEnvCurrent,
     req,
   });
+  const pgLogsColDefs = getPgLogsListColumnDefs(locale, logPg);
+  const pgLogsColFiltered = filterListColDefs(req.session.member, 'pg_logs', logPg, pgLogsColDefs);
+  const pgLogsColHello = buildListColHelloHtml(locale, esc, req.session.member, 'pg_logs', logPg, pgLogsColDefs, '.pg-logs-table');
+  const pgLogsTheadHtml = pgLogsColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
 
   const jpaySyncAlert =
     logPg === 'jpay' && (q.jpaySync === 'ok' || q.jpaySync === '1')
@@ -11600,19 +11600,34 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
         : windowType === 'void_manual'
         ? '<span class="label-manual">' + highlightLogSearchHtml(t(locale, 'pg_logs_label_manual'), logSearchRawPg, esc) + '</span>'
         : '';
-      return `<tr>
-        <td class="col-date">${highlightLogSearchHtml(dt.date, logSearchRawPg, esc)}</td>
-        <td class="col-time">TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawPg, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawPg, esc)}</span></td>
-        <td class="col-narrow">${highlightLogSearchHtml(log.routeKey || '', logSearchRawPg, esc)}</td>
-        <td class="col-narrow">${highlightLogSearchHtml(log.merchantId || '', logSearchRawPg, esc)}</td>
-        <td class="col-status"><span class="${relayClass}">${highlightLogSearchHtml(relayLabel, logSearchRawPg, esc)}</span>${relayStatus === 'fail' && relayFailReason ? `<br /><span class="relay-fail-reason" title="${esc(relayFailReason)}">${highlightLogSearchHtml(relayFailReason, logSearchRawPg, esc)}</span>` : ''}</td>
-        <td class="col-json"><pre>${jsonCallback ? highlightLogSearchHtml(jsonCallback, logSearchRawPg, esc) : esc('-')}</pre></td>
-        <td class="col-json"><pre>${jsonResult ? highlightLogSearchHtml(jsonResult, logSearchRawPg, esc) : esc('-')}</pre></td>
-        <td class="col-noti-state">${highlightLogSearchHtml(resendKindLabel, logSearchRawPg, esc)}</td>
-        <td class="col-action">${resendBtn}</td>
-        ${logPg === 'jpay' ? jpayWebhookCellHtml(locale, log, esc) : ''}
-        <td class="col-void-refund">${voidRefundBtns}</td>
-      </tr>`;
+      const rowCells = {
+        received_date: '<td class="col-date">' + highlightLogSearchHtml(dt.date, logSearchRawPg, esc) + '</td>',
+        received_time:
+          '<td class="col-time">TH: ' +
+          highlightLogSearchHtml(dt.timeTh, logSearchRawPg, esc) +
+          '<br><span class="time-jp">JP: ' +
+          highlightLogSearchHtml(dt.timeJp, logSearchRawPg, esc) +
+          '</span></td>',
+        route: '<td class="col-narrow">' + highlightLogSearchHtml(log.routeKey || '', logSearchRawPg, esc) + '</td>',
+        merchant_id: '<td class="col-narrow">' + highlightLogSearchHtml(log.merchantId || '', logSearchRawPg, esc) + '</td>',
+        relay_status:
+          '<td class="col-status"><span class="' +
+          relayClass +
+          '">' +
+          highlightLogSearchHtml(relayLabel, logSearchRawPg, esc) +
+          '</span>' +
+          (relayStatus === 'fail' && relayFailReason
+            ? '<br /><span class="relay-fail-reason" title="' + esc(relayFailReason) + '">' + highlightLogSearchHtml(relayFailReason, logSearchRawPg, esc) + '</span>'
+            : '') +
+          '</td>',
+        callback_json: '<td class="col-json"><pre>' + (jsonCallback ? highlightLogSearchHtml(jsonCallback, logSearchRawPg, esc) : esc('-')) + '</pre></td>',
+        result_json: '<td class="col-json"><pre>' + (jsonResult ? highlightLogSearchHtml(jsonResult, logSearchRawPg, esc) : esc('-')) + '</pre></td>',
+        noti_state: '<td class="col-noti-state">' + highlightLogSearchHtml(resendKindLabel, logSearchRawPg, esc) + '</td>',
+        resend: '<td class="col-action">' + resendBtn + '</td>',
+        webhook: jpayWebhookCellHtml(locale, log, esc),
+        void_refund: '<td class="col-void-refund">' + voidRefundBtns + '</td>',
+      };
+      return '<tr>' + pgLogsColFiltered.map((c) => rowCells[c.key] || '').join('') + '</tr>';
     })
     .join('');
 
@@ -11712,6 +11727,8 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       ${jpaySyncAlert}
       <h1 class="cr-page-title">${esc(t(locale, 'nav_pg_noti_log'))}</h1>
       ${hubHtmlLogs}
+      <div style="margin:8px 0;display:flex;flex-wrap:wrap;align-items:center;gap:8px;">${pgLogsColHello.helloBtn}</div>
+      ${pgLogsColHello.panelHtml}
       ${jpayLogsNoticeHtml}
       <p class="admin-page-desc">${t(locale, 'pg_logs_desc_full')}</p>
       ${(() => {
@@ -11742,28 +11759,18 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
           '</form>'
         );
       })()}
-      <table>
-        <colgroup><col class="col-date" /><col class="col-time" /><col class="col-narrow" /><col class="col-narrow" /><col class="col-status" /><col class="col-json" /><col class="col-json" /><col class="col-noti-state" /><col class="col-action" />${logPg === 'jpay' ? '<col class="col-narrow" />' : ''}<col class="col-void-refund" /></colgroup>
+      <table class="pg-logs-table list-view-table">
         <thead>
           <tr>
-            <th>${t(locale, 'pg_logs_th_received_date')}</th>
-            <th>${t(locale, 'pg_logs_th_received_time')}</th>
-            <th>${t(locale, 'pg_logs_route_key')}</th>
-            <th>${t(locale, 'pg_logs_merchant_id')}</th>
-            <th>${t(locale, 'pg_logs_th_merchant_recv')}</th>
-            <th>${t(locale, 'pg_logs_json_callback')}</th>
-            <th>${t(locale, 'pg_logs_json_result')}</th>
-            <th>${t(locale, 'pg_logs_th_state')}</th>
-            <th>${t(locale, 'pg_logs_th_resend')}</th>
-            ${logPg === 'jpay' ? jpayWebhookThHtml(locale) : ''}
-            <th>${t(locale, 'pg_logs_th_void_refund')}</th>
+            ${pgLogsTheadHtml}
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="${logPg === 'jpay' ? 11 : 10}" style="text-align:center;color:#777;">${t(locale, 'pg_logs_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="${pgLogsColFiltered.length}" style="text-align:center;color:#777;">${t(locale, 'pg_logs_empty')}</td></tr>`}
         </tbody>
       </table>
       ${logPagerFooterPg}
+      ${pgLogsColHello.scriptHtml}
       </div>
     </main>
   </div>
@@ -12064,91 +12071,41 @@ function memberCanPage(member, pageKey) {
  * Active: ChillPay = blue, JPAY = green (env follows selected PG). Inactive: neutral gray (no pastel).
  * cfg: { navEnv?: 'sandbox', env?: { show, sandbox, liveUrl, sandboxUrl, highlight }, pgSource?: { show, active, chillpayUrl, jpayUrl } }
  */
-const HUB_NAV_VIEW_SETTINGS_PATH = path.join(CONFIG_DIR, 'hub-nav-view-settings.json');
+const LIST_COL_VIEW_SETTINGS_PATH = path.join(CONFIG_DIR, 'list-column-view-settings.json');
 
-function loadHubNavViewSettingsFile() {
+function loadListColViewSettingsFile() {
   try {
-    const raw = fs.readFileSync(HUB_NAV_VIEW_SETTINGS_PATH, 'utf8');
+    const raw = fs.readFileSync(LIST_COL_VIEW_SETTINGS_PATH, 'utf8');
     const data = JSON.parse(raw);
     return data && typeof data === 'object' ? data : {};
   } catch (e) {
-    if (e && e.code !== 'ENOENT') console.error('[hub-nav] load failed:', (e && e.message) || e);
+    if (e && e.code !== 'ENOENT') console.error('[list-col-view] load failed:', (e && e.message) || e);
     return {};
   }
 }
 
-function saveHubNavViewSettingsFile(data) {
-  fs.writeFileSync(HUB_NAV_VIEW_SETTINGS_PATH, JSON.stringify(data, null, 2));
+function saveListColViewSettingsFile(data) {
+  fs.writeFileSync(LIST_COL_VIEW_SETTINGS_PATH, JSON.stringify(data, null, 2));
 }
 
-function getHubNavScopeKey(group, pg) {
-  const g = group === 'logs' ? 'logs' : 'cr';
-  const p = pg === 'jpay' ? 'jpay' : 'chillpay';
-  return g + ':' + p;
+function getListColViewScopeKey(pageId, pg) {
+  const p = pg === 'jpay' ? 'jpay' : pg === 'none' ? 'none' : 'chillpay';
+  return String(pageId || 'page').trim() + ':' + p;
 }
 
-function getMemberIdForHubNav(member) {
+function getMemberIdForListColView(member) {
   if (!member) return '';
   const id = member.id != null ? String(member.id).trim() : '';
   if (id) return id;
   return String(member.name || member.userId || '').trim();
 }
 
-function hubNavMemberCan(member, permKey) {
-  const role = member && member.role ? member.role : null;
-  const canSeeMembers = role === ROLES.SUPER_ADMIN || role === ROLES.ADMIN;
-  const perms = member && member.permissions ? member.permissions : PAGE_KEYS;
-  return (
-    canSeeMembers ||
-    perms.includes(permKey) ||
-    (typeof permKey === 'string' && permKey.startsWith('cr_') && perms.includes('cancel_refund'))
-  );
-}
-
-function getDefaultCrHubNavEnabledKeys(pg, member, forceRefundDays) {
-  const keys = [];
-  const chill = pg !== 'jpay';
-  const jpay = pg === 'jpay';
-  if (hubNavMemberCan(member, 'cr_transactions')) {
-    keys.push('tx', 'daily_noti');
-  }
-  if (jpay && hubNavMemberCan(member, 'cr_jpay_followup')) keys.push('jpay_followup');
-  if (chill && hubNavMemberCan(member, 'cr_pg_transactions')) {
-    keys.push('pg_tx', 'daily_pg');
-  }
-  if (hubNavMemberCan(member, 'cr_cancel')) keys.push('cancel');
-  if (hubNavMemberCan(member, 'cr_void')) keys.push('void');
-  if (hubNavMemberCan(member, 'cr_void_summary')) keys.push('void_summary');
-  if (hubNavMemberCan(member, 'cr_refund')) keys.push('refund');
-  if (hubNavMemberCan(member, 'cr_force_refund') && forceRefundDays > 0) keys.push('force_refund');
-  if (hubNavMemberCan(member, 'cr_noti')) keys.push('noti');
-  if (hubNavMemberCan(member, 'cr_void_deleted')) keys.push('void_deleted');
-  return keys;
-}
-
-function getDefaultLogsHubNavEnabledKeys(member) {
-  const keys = [];
-  if (hubNavMemberCan(member, 'pg_result')) keys.push('pg_result');
-  if (hubNavMemberCan(member, 'internal_result')) keys.push('internal_result');
-  if (hubNavMemberCan(member, 'dev_result')) keys.push('dev_result');
-  if (hubNavMemberCan(member, 'dealmai_webhook_result')) keys.push('dealmai_webhook_result');
-  if (hubNavMemberCan(member, 'pg_logs')) keys.push('pg_logs');
-  if (hubNavMemberCan(member, 'internal_logs')) keys.push('internal_logs');
-  if (hubNavMemberCan(member, 'dev_internal_logs')) {
-    keys.push('dev_internal_logs', 'pg_notify_delivery');
-  }
-  if (hubNavMemberCan(member, 'dealmai_webhook_logs')) keys.push('dealmai_webhook_logs');
-  if (hubNavMemberCan(member, 'mail_logs')) keys.push('mail_logs');
-  if (hubNavMemberCan(member, 'traffic_analysis')) keys.push('traffic');
-  return keys;
-}
-
-function getMemberHubNavScopeSettings(member, group, pg) {
-  const memberId = getMemberIdForHubNav(member);
+function getMemberListColViewSettings(member, pageId, pg) {
+  const memberId = getMemberIdForListColView(member);
   if (!memberId) return { enabledKeys: null, helloHidden: false };
-  const file = loadHubNavViewSettingsFile();
+  const file = loadListColViewSettingsFile();
   const byMember = file.byMemberId && file.byMemberId[memberId] ? file.byMemberId[memberId] : {};
-  const scopeKey = getHubNavScopeKey(group, pg);
+  const scopeKey = getListColViewScopeKey(pageId, pg);
   const scope = byMember[scopeKey];
   if (!scope || typeof scope !== 'object') return { enabledKeys: null, helloHidden: false };
   const enabledKeys = Array.isArray(scope.enabledKeys) ? scope.enabledKeys.filter((k) => typeof k === 'string') : null;
@@ -12158,265 +12115,157 @@ function getMemberHubNavScopeSettings(member, group, pg) {
   };
 }
 
-function setMemberHubNavScopeSettings(member, group, pg, enabledKeys, helloHidden) {
-  const memberId = getMemberIdForHubNav(member);
+function setMemberListColViewSettings(member, pageId, pg, enabledKeys, helloHidden) {
+  const memberId = getMemberIdForListColView(member);
   if (!memberId) return;
-  const file = loadHubNavViewSettingsFile();
+  const file = loadListColViewSettingsFile();
   if (!file.byMemberId) file.byMemberId = {};
   if (!file.byMemberId[memberId]) file.byMemberId[memberId] = {};
-  const scopeKey = getHubNavScopeKey(group, pg);
+  const scopeKey = getListColViewScopeKey(pageId, pg);
   file.byMemberId[memberId][scopeKey] = {
     enabledKeys: Array.isArray(enabledKeys) ? enabledKeys : [],
     helloHidden: !!helloHidden,
     updatedAt: new Date().toISOString(),
   };
-  saveHubNavViewSettingsFile(file);
+  saveListColViewSettingsFile(file);
 }
 
-function getCrHubPgScopeForKey(key) {
-  if (key === 'jpay_followup') return 'jpay';
-  if (key === 'pg_tx' || key === 'daily_pg') return 'chillpay';
-  return 'both';
+function getDefaultListColKeys(columnDefs) {
+  return (columnDefs || []).map((c) => c.key);
 }
 
-function hubNavItemVisibleForSessionPg(key, sessionPg) {
-  const scope = getCrHubPgScopeForKey(key);
-  if (scope === 'both') return true;
-  if (scope === 'jpay') return sessionPg === 'jpay';
-  return sessionPg !== 'jpay';
+function getEnabledListColKeys(member, pageId, pg, columnDefs) {
+  const scope = getMemberListColViewSettings(member, pageId, pg);
+  const defaultKeys = getDefaultListColKeys(columnDefs);
+  if (!scope.enabledKeys) return defaultKeys;
+  return defaultKeys.filter((k) => scope.enabledKeys.includes(k));
 }
 
-function isHubNavKeyEnabled(member, group, pg, key, defaultKeys) {
-  const scope = getMemberHubNavScopeSettings(member, group, pg);
-  if (!scope.enabledKeys) return defaultKeys.includes(key);
-  return scope.enabledKeys.includes(key);
+function filterListColDefs(member, pageId, pg, columnDefs) {
+  const enabled = getEnabledListColKeys(member, pageId, pg, columnDefs);
+  const set = {};
+  enabled.forEach((k) => { set[k] = 1; });
+  return (columnDefs || []).filter((c) => set[c.key]);
 }
 
-function hubNavUrlWithEnv(pathOrUrl, pg, env) {
-  let url = withPgSourceInUrl(pathOrUrl, pg === 'jpay' ? 'jpay' : 'chillpay');
-  if (env === 'sandbox') {
-    url += url.indexOf('?') >= 0 ? '&' : '?';
-    url += 'env=sandbox';
-  }
-  return url;
-}
-
-function buildCrHubNavMenuItems(locale, member, pg, env) {
-  const items = [];
-  const pgSrc = pg === 'jpay' ? 'jpay' : 'chillpay';
-  const chill = pgSrc !== 'jpay';
-  const crCfg = loadChillPayTransactionConfig();
-  const forceRefundDays = Number(crCfg.forceRefundWindowDays) >= 0 ? crCfg.forceRefundWindowDays : 0;
-  const add = (key, perm, labelKey, path, pgScope) => {
-    if (!hubNavMemberCan(member, perm)) return;
-    if (pgScope === 'chillpay' && !chill) return;
-    if (pgScope === 'jpay' && pgSrc !== 'jpay') return;
-    const pathname = path.split('?')[0];
-    items.push({
-      key,
-      label: t(locale, labelKey),
-      url: hubNavUrlWithEnv(path, pgSrc, env),
-      paths: [pathname],
-      pgScope: pgScope || 'both',
-    });
-  };
-  add('tx', 'cr_transactions', 'cr_hub_noti_transactions', '/admin/transactions', 'both');
-  add('daily_noti', 'cr_transactions', 'nav_daily_noti_summary', '/admin/daily-noti-summary?period=thisMonth&dateSort=desc', 'both');
-  add('jpay_followup', 'cr_jpay_followup', 'nav_jpay_followup', '/admin/cancel-refund/jpay-followup?source=jpay', 'jpay');
-  add('pg_tx', 'cr_pg_transactions', 'cr_hub_pg_transactions', '/admin/pg-transactions?sort=today', 'chillpay');
-  add('daily_pg', 'cr_pg_transactions', 'nav_daily_pg_summary', '/admin/daily-pg-summary?sort=thisMonth&dateSort=desc', 'chillpay');
-  add('cancel', 'cr_cancel', 'nav_cancel_refund_cancel', '/admin/cancel-refund/cancel', 'both');
-  add('void', 'cr_void', 'nav_cancel_refund_void', '/admin/cancel-refund/void', 'both');
-  add('void_summary', 'cr_void_summary', 'nav_cancel_refund_void_summary', '/admin/cancel-refund/void-summary', 'both');
-  add('refund', 'cr_refund', 'nav_cancel_refund_refund', '/admin/cancel-refund/refund', 'both');
-  if (forceRefundDays > 0) add('force_refund', 'cr_force_refund', 'nav_cancel_refund_force_refund', '/admin/cancel-refund/force-refund', 'both');
-  add('noti', 'cr_noti', 'cr_hub_trade_noti', '/admin/cancel-refund/noti', 'both');
-  add('void_deleted', 'cr_void_deleted', 'cr_void_deleted_list', '/admin/cancel-refund/void-deleted-list', 'both');
-  return items;
-}
-
-function buildLogsHubNavMenuItems(locale, member, pg, env) {
-  const items = [];
-  const pgSrc = pg === 'jpay' ? 'jpay' : 'chillpay';
-  const add = (key, perm, labelKey, path) => {
-    if (!hubNavMemberCan(member, perm)) return;
-    const pathname = path.split('?')[0];
-    items.push({
-      key,
-      label: t(locale, labelKey),
-      url: hubNavUrlWithEnv(path, pgSrc, env),
-      paths: [pathname],
-    });
-  };
-  add('pg_result', 'pg_result', 'nav_pg_result', '/admin/logs-result');
-  add('internal_result', 'internal_result', 'nav_internal_result', '/admin/internal-result');
-  add('dev_result', 'dev_result', 'nav_dev_result', '/admin/dev-internal-result');
-  add('dealmai_webhook_result', 'dealmai_webhook_result', 'nav_dealmai_webhook_result', '/admin/dealmai-webhook-result');
-  add('pg_logs', 'pg_logs', 'nav_pg_noti_log', '/admin/logs');
-  add('internal_logs', 'internal_logs', 'nav_internal_noti_log', '/admin/internal');
-  add('dev_internal_logs', 'dev_internal_logs', 'nav_dev_internal_noti_log', '/admin/dev-internal');
-  if (hubNavMemberCan(member, 'dev_internal_logs')) {
-    items.push({
-      key: 'pg_notify_delivery',
-      label: t(locale, 'nav_pg_notify_delivery'),
-      url: '/admin/pg-notify-delivery',
-      paths: ['/admin/pg-notify-delivery'],
-    });
-  }
-  add('dealmai_webhook_logs', 'dealmai_webhook_logs', 'nav_dealmai_webhook_log', '/admin/dealmai-webhook');
-  add('mail_logs', 'mail_logs', 'nav_mail_logs', '/admin/mail-logs');
-  add('traffic', 'traffic_analysis', 'nav_traffic_analysis', '/admin/traffic');
-  return items;
-}
-
-function filterSidebarHubNav(member, group, sessionPg, hubKey) {
-  const pg = sessionPg === 'jpay' ? 'jpay' : 'chillpay';
-  if (group === 'cr' && !hubNavItemVisibleForSessionPg(hubKey, sessionPg)) return false;
-  const crCfg = loadChillPayTransactionConfig();
-  const forceRefundDays = Number(crCfg.forceRefundWindowDays) >= 0 ? crCfg.forceRefundWindowDays : 0;
-  const defaultKeys =
-    group === 'logs'
-      ? getDefaultLogsHubNavEnabledKeys(member)
-      : getDefaultCrHubNavEnabledKeys(pg, member, forceRefundDays);
-  return isHubNavKeyEnabled(member, group, pg, hubKey, defaultKeys);
-}
-
-function buildHubNavHelloBlockHtml(locale, esc, member, group, pg, menuItems, scopeSettings, currentPath) {
-  if (!menuItems || menuItems.length === 0) return { navHtml: '', panelHtml: '', scriptHtml: '' };
-  const scopeKey = getHubNavScopeKey(group, pg);
+function buildListColHelloHtml(locale, esc, member, pageId, pg, columnDefs, tableSelector) {
+  if (!columnDefs || columnDefs.length === 0) return { helloBtn: '', panelHtml: '', scriptHtml: '' };
+  const scopeKey = getListColViewScopeKey(pageId, pg);
   const scopeId = scopeKey.replace(':', '_');
-  const defaultKeys = menuItems.map((m) => m.key);
-  const enabledSet = scopeSettings.enabledKeys || defaultKeys;
-  const visibleItems = menuItems.filter((m) => enabledSet.includes(m.key));
-  const curPath = (currentPath || '').split('?')[0];
-  const navLinks = visibleItems
-    .map((m) => {
-      const active = m.paths.some((p) => curPath === p || curPath.startsWith(p + '/'));
+  const scope = getMemberListColViewSettings(member, pageId, pg);
+  const defaultKeys = getDefaultListColKeys(columnDefs);
+  const enabledSet = scope.enabledKeys || defaultKeys;
+  const checks = columnDefs
+    .map((c) => {
+      const on = enabledSet.includes(c.key);
       return (
-        '<a href="' +
-        esc(m.url) +
-        '" class="hub-nav-link' +
-        (active ? ' hub-nav-link--active' : '') +
-        '">' +
-        esc(m.label) +
-        '</a>'
-      );
-    })
-    .join('');
-  const checks = menuItems
-    .map((m) => {
-      const on = enabledSet.includes(m.key);
-      return (
-        '<label class="hub-nav-guide-item hub-nav-guide-item--' +
+        '<label class="list-col-guide-item list-col-guide-item--' +
         (on ? 'on' : 'off') +
-        '"><input type="checkbox" class="hub-nav-guide-check" data-key="' +
-        esc(m.key) +
+        '"><input type="checkbox" class="list-col-guide-check" data-key="' +
+        esc(c.key) +
         '"' +
         (on ? ' checked' : '') +
         '> <span>' +
-        esc(m.label) +
+        esc(c.label) +
         '</span></label>'
       );
     })
     .join('');
-  const helloHidden = scopeSettings.helloHidden;
-  const panelStyle = helloHidden ? 'display:none;' : '';
-  const helloCls = helloHidden ? ' btn-hub-nav-hello--restore' : '';
+  const panelStyle = scope.helloHidden ? 'display:none;' : '';
+  const helloCls = scope.helloHidden ? ' btn-list-col-hello--restore' : '';
   const panelHtml =
-    '<div class="hub-nav-guide pg-hello-toggle-zone hub-nav-hello-root" data-hub-scope="' +
+    '<div class="list-col-guide pg-hello-toggle-zone list-col-hello-root" data-list-scope="' +
     esc(scopeId) +
-    '" data-hub-group="' +
-    esc(group) +
-    '" data-hub-pg="' +
+    '" data-page-id="' +
+    esc(pageId) +
+    '" data-list-pg="' +
     esc(pg) +
-    '" data-hub-default-keys="' +
+    '" data-table-selector="' +
+    esc(tableSelector || '.list-view-table') +
+    '" data-default-keys="' +
     esc(JSON.stringify(defaultKeys)) +
     '" style="' +
     panelStyle +
     '">' +
-    '<div class="hub-nav-guide-head">' +
-    '<span class="hub-nav-guide-title">' +
+    '<div class="list-col-guide-head">' +
+    '<span class="list-col-guide-title">' +
     esc(t(locale, 'hub_nav_view_setting')) +
     '</span>' +
-    '<span class="hub-nav-guide-vbar">|</span>' +
-    '<div class="hub-nav-guide-actions">' +
-    '<button type="button" class="hub-nav-guide-default">' +
+    '<span class="list-col-guide-vbar">|</span>' +
+    '<div class="list-col-guide-actions">' +
+    '<button type="button" class="list-col-guide-default">' +
     esc(t(locale, 'hub_nav_default')) +
     '</button>' +
-    '<button type="button" class="hub-nav-guide-release">' +
+    '<button type="button" class="list-col-guide-release">' +
     esc(t(locale, 'hub_nav_release')) +
     '</button>' +
-    '<button type="button" class="hub-nav-guide-select">' +
+    '<button type="button" class="list-col-guide-select">' +
     esc(t(locale, 'hub_nav_select_all')) +
     '</button>' +
-    '<button type="button" class="hub-nav-guide-save">' +
+    '<button type="button" class="list-col-guide-save">' +
     esc(t(locale, 'hub_nav_save')) +
     '</button>' +
-    '<button type="button" class="hub-nav-guide-restore" title="' +
+    '<button type="button" class="list-col-guide-restore" title="' +
     esc(t(locale, 'hub_nav_restore_tip')) +
     '">' +
     esc(t(locale, 'hub_nav_restore')) +
     '</button>' +
     '</div></div>' +
-    '<div class="hub-nav-guide-list">' +
+    '<div class="list-col-guide-list">' +
     checks +
     '</div></div>';
   const helloBtn =
-    '<button type="button" class="btn-hub-nav-hello' +
+    '<button type="button" class="btn-list-col-hello' +
     helloCls +
-    '" data-hub-scope="' +
+    '" data-list-scope="' +
     esc(scopeId) +
-    '" data-hub-group="' +
-    esc(group) +
-    '" data-hub-pg="' +
+    '" data-page-id="' +
+    esc(pageId) +
+    '" data-list-pg="' +
     esc(pg) +
     '">' +
     esc(t(locale, 'hub_nav_hello')) +
     '</button>';
-  const navHtml =
-    '<div class="hub-nav-hello-row">' +
-    (navLinks ? '<div class="hub-nav-links">' + navLinks + '</div>' : '') +
-    helloBtn +
-    '</div>';
-  const scriptHtml = buildHubNavHelloClientScript();
-  return { navHtml, panelHtml, scriptHtml };
+  return { helloBtn, panelHtml, scriptHtml: buildListColViewClientScript() };
 }
 
-function buildHubNavHelloClientScript() {
+function buildListColViewClientScript() {
   return `<script>(function(){
-if(window.__hubNavHelloInit)return;window.__hubNavHelloInit=1;
-function parseKeys(root){try{return JSON.parse(root.getAttribute('data-hub-default-keys')||'[]');}catch(e){return[];}}
-function getChecks(root){return root.querySelectorAll('.hub-nav-guide-check');}
+if(window.__listColViewInit)return;window.__listColViewInit=1;
+function parseKeys(root){try{return JSON.parse(root.getAttribute('data-default-keys')||'[]');}catch(e){return[];}}
+function getChecks(root){return root.querySelectorAll('.list-col-guide-check');}
 function getSelectedKeys(root){var out=[];getChecks(root).forEach(function(c){if(c.checked)out.push(c.getAttribute('data-key'));});return out;}
-function syncItemLabels(root){getChecks(root).forEach(function(c){var lab=c.closest('.hub-nav-guide-item');if(lab)lab.classList.toggle('hub-nav-guide-item--on',c.checked);lab.classList.toggle('hub-nav-guide-item--off',!c.checked);});}
-function setAllChecks(root,on){getChecks(root).forEach(function(c){c.checked=on;});syncItemLabels(root);}
-function setKeys(root,keys){var set={};keys.forEach(function(k){set[k]=1;});getChecks(root).forEach(function(c){c.checked=!!set[c.getAttribute('data-key')];});syncItemLabels(root);}
-function findPanel(scope){return document.querySelector('.hub-nav-hello-root[data-hub-scope="'+scope+'"]');}
-function findHelloBtn(scope){return document.querySelector('.btn-hub-nav-hello[data-hub-scope="'+scope+'"]');}
-function setPanelHidden(scope,hidden){var panel=findPanel(scope);var btn=findHelloBtn(scope);if(panel)panel.style.display=hidden?'none':'';if(btn)btn.classList.toggle('btn-hub-nav-hello--restore',hidden);}
+function syncLabels(root){getChecks(root).forEach(function(c){var lab=c.closest('.list-col-guide-item');if(lab){lab.classList.toggle('list-col-guide-item--on',c.checked);lab.classList.toggle('list-col-guide-item--off',!c.checked);}});}
+function setAllChecks(root,on){getChecks(root).forEach(function(c){c.checked=on;});syncLabels(root);}
+function setKeys(root,keys){var set={};keys.forEach(function(k){set[k]=1;});getChecks(root).forEach(function(c){c.checked=!!set[c.getAttribute('data-key')];});syncLabels(root);}
+function applyTableCols(table,keys){if(!table)return;var set={};keys.forEach(function(k){set[k]=1;});var ths=table.querySelectorAll('thead th');ths.forEach(function(th,i){var key=th.getAttribute('data-col-key');var show=!key||set[key];th.style.display=show?'':'none';table.querySelectorAll('tbody tr').forEach(function(tr){var td=tr.children[i];if(td)td.style.display=show?'':'none';});});}
+function findPanel(scope){return document.querySelector('.list-col-hello-root[data-list-scope="'+scope+'"]');}
+function findHelloBtn(scope){return document.querySelector('.btn-list-col-hello[data-list-scope="'+scope+'"]');}
+function setPanelHidden(scope,hidden){var panel=findPanel(scope);var btn=findHelloBtn(scope);if(panel)panel.style.display=hidden?'none':'';if(btn)btn.classList.toggle('btn-list-col-hello--restore',hidden);}
 function postJson(url,body){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(body)});}
-document.querySelectorAll('.hub-nav-hello-root').forEach(function(root){
-  var scope=root.getAttribute('data-hub-scope');var group=root.getAttribute('data-hub-group');var pg=root.getAttribute('data-hub-pg');
-  root._hubNavLastSaved=getSelectedKeys(root).slice();
-  var defBtn=root.querySelector('.hub-nav-guide-default');if(defBtn)defBtn.addEventListener('click',function(){setKeys(root,parseKeys(root));});
-  var relBtn=root.querySelector('.hub-nav-guide-release');if(relBtn)relBtn.addEventListener('click',function(){setAllChecks(root,false);});
-  var selBtn=root.querySelector('.hub-nav-guide-select');if(selBtn)selBtn.addEventListener('click',function(){setAllChecks(root,true);});
-  var resBtn=root.querySelector('.hub-nav-guide-restore');if(resBtn)resBtn.addEventListener('click',function(){if(root._hubNavLastSaved)setKeys(root,root._hubNavLastSaved.slice());});
-  var saveBtn=root.querySelector('.hub-nav-guide-save');if(saveBtn)saveBtn.addEventListener('click',function(){
+document.querySelectorAll('.list-col-hello-root').forEach(function(root){
+  var scope=root.getAttribute('data-list-scope');var pageId=root.getAttribute('data-page-id');var pg=root.getAttribute('data-list-pg');
+  var tableSel=root.getAttribute('data-table-selector')||'.list-view-table';var table=document.querySelector(tableSel);
+  root._listColLastSaved=getSelectedKeys(root).slice();
+  applyTableCols(table,root._listColLastSaved);
+  var defBtn=root.querySelector('.list-col-guide-default');if(defBtn)defBtn.addEventListener('click',function(){setKeys(root,parseKeys(root));applyTableCols(table,getSelectedKeys(root));});
+  var relBtn=root.querySelector('.list-col-guide-release');if(relBtn)relBtn.addEventListener('click',function(){setAllChecks(root,false);applyTableCols(table,getSelectedKeys(root));});
+  var selBtn=root.querySelector('.list-col-guide-select');if(selBtn)selBtn.addEventListener('click',function(){setAllChecks(root,true);applyTableCols(table,getSelectedKeys(root));});
+  var resBtn=root.querySelector('.list-col-guide-restore');if(resBtn)resBtn.addEventListener('click',function(){if(root._listColLastSaved){setKeys(root,root._listColLastSaved.slice());applyTableCols(table,root._listColLastSaved.slice());}});
+  getChecks(root).forEach(function(c){c.addEventListener('change',function(){syncLabels(root);applyTableCols(table,getSelectedKeys(root));});});
+  var saveBtn=root.querySelector('.list-col-guide-save');if(saveBtn)saveBtn.addEventListener('click',function(){
     var keys=getSelectedKeys(root);var hidden=root.style.display==='none';
-    postJson('/admin/hub-nav-view-settings/save',{group:group,pg:pg,enabledKeys:keys,helloHidden:hidden}).then(function(r){
+    postJson('/admin/list-column-view-settings/save',{pageId:pageId,pg:pg,enabledKeys:keys,helloHidden:hidden}).then(function(r){
       if(!r.ok){alert('Save failed');return;}
-      root._hubNavLastSaved=keys.slice();location.reload();
+      root._listColLastSaved=keys.slice();location.reload();
     }).catch(function(){alert('Save failed');});
   });
-  getChecks(root).forEach(function(c){c.addEventListener('change',function(){syncItemLabels(root);});});
 });
-document.querySelectorAll('.btn-hub-nav-hello').forEach(function(btn){
-  var scope=btn.getAttribute('data-hub-scope');var group=btn.getAttribute('data-hub-group');var pg=btn.getAttribute('data-hub-pg');
+document.querySelectorAll('.btn-list-col-hello').forEach(function(btn){
+  var scope=btn.getAttribute('data-list-scope');var pageId=btn.getAttribute('data-page-id');var pg=btn.getAttribute('data-list-pg');
   btn.addEventListener('click',function(){
-    var panel=findPanel(scope);var hidden=panel&&panel.style.display==='none';
-  var next=!hidden;setPanelHidden(scope,next);
-  postJson('/admin/hub-nav-view-settings/hello-toggle',{group:group,pg:pg,helloHidden:next});
+    var panel=findPanel(scope);var hidden=panel&&panel.style.display==='none';var next=!hidden;setPanelHidden(scope,next);
+    postJson('/admin/list-column-view-settings/hello-toggle',{pageId:pageId,pg:pg,helloHidden:next});
   });
 });
 })();</script>`;
@@ -12503,32 +12352,16 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
   }
   const innerRow =
     '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;font-size:13px;">' + parts.join('') + '</div>';
-  let hubNavBlock = '';
-  if (c.hubNav && c.hubNav.group && c.hubNav.req) {
-    const hn = c.hubNav;
-    const group = hn.group === 'logs' ? 'logs' : 'cr';
-    const pg = hn.pg === 'jpay' ? 'jpay' : 'chillpay';
-    const env = hn.env === 'sandbox' ? 'sandbox' : 'live';
-    const menuItems =
-      group === 'logs'
-        ? buildLogsHubNavMenuItems(locale, member, pg, env)
-        : buildCrHubNavMenuItems(locale, member, pg, env);
-    const scopeSettings = getMemberHubNavScopeSettings(member, group, pg);
-    const helloBlock = buildHubNavHelloBlockHtml(locale, esc, member, group, pg, menuItems, scopeSettings, hn.currentPath || '');
-    hubNavBlock = helloBlock.navHtml + helloBlock.panelHtml + helloBlock.scriptHtml;
-  }
   if (inline) {
     return (
       '<div class="cr-hub-toolbar cr-hub-toolbar--inline" style="display:inline-flex;flex-wrap:wrap;align-items:center;flex:0 1 auto;margin:0;padding:0;border:none;background:transparent;box-shadow:none;">' +
       innerRow +
-      hubNavBlock +
       '</div>'
     );
   }
   return (
     '<div class="cr-hub-toolbar" style="display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:flex-start;gap:10px 14px;margin-bottom:4px;padding:12px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;">' +
     innerRow +
-    hubNavBlock +
     '</div>'
   );
 }
@@ -12557,13 +12390,6 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
       active: logPg === 'jpay' ? 'jpay' : 'chillpay',
       chillpayUrl: pathname + '?' + buildQueryString(qChill),
       jpayUrl: pathname + '?' + buildQueryString(qJpay),
-    },
-    hubNav: {
-      group: 'logs',
-      pg: logPg === 'jpay' ? 'jpay' : 'chillpay',
-      currentPath: pathname,
-      req: o.req,
-      env: currentEnv === 'sandbox' ? 'sandbox' : 'live',
     },
   });
 }
@@ -12806,6 +12632,369 @@ function getTransactionListColumns(txSource) {
     }
   }
   return cols;
+}
+
+function transactionListColumnKey(col) {
+  if (!col) return 'col';
+  if (col.type === 'fixed') return col.id;
+  const keys = col.keys || [];
+  if (keys.some((k) => k === 'customer' || k === 'Customer' || k === 'CustomerName' || k === 'customerName')) return 'customer';
+  if (keys.some((k) => /^email$/i.test(k) || k === 'pay_email_address')) return 'email';
+  if (keys.some((k) => /cardno|cardNo|CardNumber|pay_cardno/i.test(String(k)))) return 'cardno';
+  return keys[0] || 'body';
+}
+
+function transactionListColumnLabel(locale, col) {
+  if (col.type === 'fixed') {
+    const map = {
+      no: t(locale, 'tx_th_no'),
+      received_date: t(locale, 'cr_th_trade_date'),
+      received_time: t(locale, 'cr_th_trade_time'),
+      pg_acquirer: t(locale, 'tx_th_acquirer'),
+      merchant: t(locale, 'cr_th_merchant'),
+      route_no: 'Route',
+      internal_amount: t(locale, 'tx_th_internal_amount'),
+      status: t(locale, 'tx_th_status'),
+      noti: t(locale, 'tx_th_noti'),
+      webhook: t(locale, 'merchants_dealmai_webhook') || '웹훅',
+      void_refund_detail: t(locale, 'tx_th_detail_reason'),
+    };
+    return map[col.id] || col.id;
+  }
+  const k = col.keys && col.keys[0];
+  if (k === 'customer' || (col.keys && col.keys.includes('customer'))) return 'Customer';
+  if (k === 'email' || (col.keys && col.keys.includes('email'))) return 'Email';
+  if (/cardno|cardNo/i.test(k || '') || (col.keys && col.keys.some((x) => /card/i.test(x)))) return 'CardNo';
+  if (k === 'CustomerId' || k === 'customerId') return 'CustomerId';
+  if (k === 'PaymentStatus' || k === 'paymentStatus' || k === 'status' || k === 'returncode') return t(locale, 'tx_th_status_raw');
+  return k || 'col';
+}
+
+function getTransactionListColumnDefs(locale, txSource) {
+  return getTransactionListColumns(txSource).map((col) => ({
+    key: transactionListColumnKey(col),
+    label: transactionListColumnLabel(locale, col),
+  }));
+}
+
+function getPgLogsListColumnDefs(locale, logPg) {
+  const cols = [
+    { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
+    { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
+    { key: 'route', label: t(locale, 'pg_logs_route_key') },
+    { key: 'merchant_id', label: t(locale, 'pg_logs_merchant_id') },
+    { key: 'relay_status', label: t(locale, 'pg_logs_th_merchant_recv') },
+    { key: 'callback_json', label: t(locale, 'pg_logs_json_callback') },
+    { key: 'result_json', label: t(locale, 'pg_logs_json_result') },
+    { key: 'noti_state', label: t(locale, 'pg_logs_th_state') },
+    { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+  ];
+  if (logPg === 'jpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
+  cols.push({ key: 'void_refund', label: t(locale, 'pg_logs_th_void_refund') });
+  return cols;
+}
+
+function getCrCancelListColumnDefs(locale, pg) {
+  const cols = [
+    { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
+    { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
+    { key: 'route', label: 'Route No.' },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'order_no', label: 'OrderNo' },
+  ];
+  if (pg === 'jpay') {
+    cols.push({ key: 'customer', label: 'Customer' }, { key: 'email', label: 'Email' }, { key: 'cardno', label: 'CardNo' });
+  }
+  cols.push(
+    { key: 'amount', label: 'Amount' },
+    { key: 'icopay', label: t(locale, 'tx_th_internal_amount') },
+    { key: 'payment_status', label: 'PaymentStatus' },
+  );
+  if (pg === 'jpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
+  cols.push({ key: 'resend', label: t(locale, 'pg_result_th_resend') });
+  return cols;
+}
+
+function getLogsResultListColumnDefs(locale, logPg) {
+  const cols = [
+    { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
+    { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
+    { key: 'route', label: 'route' },
+    { key: 'env', label: t(locale, 'common_env') },
+    { key: 'merchant_id', label: 'merchant id' },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'order_no', label: 'OrderNo' },
+    { key: 'amount', label: 'Amount' },
+    { key: 'currency', label: 'Currency' },
+    { key: 'icopay', label: 'ICOPAY' },
+    { key: 'success', label: t(locale, 'dev_result_th_success') },
+    { key: 'fail_reason', label: t(locale, 'cr_th_fail_reason') },
+    { key: 'noti_kind', label: t(locale, 'logs_result_th_noti_kind') },
+  ];
+  if (logPg === 'jpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
+  cols.push({ key: 'resend', label: t(locale, 'pg_logs_th_resend') });
+  return cols;
+}
+
+function appendJpayCrListExtraColDefs(cols) {
+  cols.push({ key: 'customer', label: 'Customer' }, { key: 'email', label: 'Email' }, { key: 'cardno', label: 'CardNo' });
+}
+
+function appendJpayWebhookColDef(cols, locale) {
+  cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
+}
+
+function joinListColCells(colFiltered, cellMap) {
+  return (colFiltered || []).map((c) => cellMap[c.key] || '').join('');
+}
+
+function getCrVoidListColumnDefs(locale, pg) {
+  const cols = [
+    { key: 'received_date', label: t(locale, 'cr_th_received_date') },
+    { key: 'received_time', label: t(locale, 'cr_th_received_time') },
+    { key: 'sent_date', label: t(locale, 'cr_th_sent_date') },
+    { key: 'sent_time', label: t(locale, 'cr_th_sent_time') },
+    { key: 'route', label: t(locale, 'cr_th_route_no') },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'order_no', label: 'OrderNo' },
+  ];
+  if (pg === 'jpay') appendJpayCrListExtraColDefs(cols);
+  cols.push({ key: 'amount', label: 'Amount' }, { key: 'icopay', label: 'ICOPAY' });
+  if (pg === 'jpay') appendJpayWebhookColDef(cols, locale);
+  cols.push(
+    { key: 'void_action', label: t(locale, 'cr_th_void') },
+    { key: 'manage', label: t(locale, 'cr_th_manage') },
+    { key: 'email_send', label: t(locale, 'cr_th_email') },
+  );
+  return cols;
+}
+
+function getCrRefundListColumnDefs(locale, pg) {
+  const cols = [
+    { key: 'received_date', label: t(locale, 'cr_th_received_date') },
+    { key: 'received_time', label: t(locale, 'cr_th_received_time') },
+    { key: 'sent_date', label: t(locale, 'cr_th_sent_date') },
+    { key: 'sent_time', label: t(locale, 'cr_th_sent_time') },
+    { key: 'route', label: t(locale, 'cr_th_route_no') },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'order_no', label: 'OrderNo' },
+  ];
+  if (pg === 'jpay') appendJpayCrListExtraColDefs(cols);
+  cols.push({ key: 'amount', label: 'Amount' }, { key: 'icopay', label: 'ICOPAY' });
+  if (pg === 'jpay') appendJpayWebhookColDef(cols, locale);
+  cols.push({ key: 'manage', label: t(locale, 'cr_th_manage') }, { key: 'refund_action', label: t(locale, 'cr_th_refund') });
+  return cols;
+}
+
+function getCrForceRefundListColumnDefs(locale, pg) {
+  const cols = [
+    { key: 'received_date', label: t(locale, 'cr_th_received_date') },
+    { key: 'received_time', label: t(locale, 'cr_th_received_time') },
+    { key: 'route', label: t(locale, 'cr_th_route_no') },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'transaction_id', label: t(locale, 'cr_th_transaction_id') },
+    { key: 'order_no', label: t(locale, 'cr_th_order_no') },
+  ];
+  if (pg === 'jpay') appendJpayCrListExtraColDefs(cols);
+  cols.push(
+    { key: 'amount', label: t(locale, 'cr_th_amount') },
+    { key: 'icopay', label: t(locale, 'cr_th_amount_display') },
+  );
+  if (pg === 'jpay') appendJpayWebhookColDef(cols, locale);
+  cols.push(
+    { key: 'manage', label: t(locale, 'cr_th_manage') },
+    { key: 'force_refund_action', label: t(locale, 'cr_btn_force_refund') || '강제환불' },
+  );
+  return cols;
+}
+
+function getCrNotiListColumnDefs(locale) {
+  return [
+    { key: 'sent_at', label: t(locale, 'cr_th_sent_at') },
+    { key: 'type', label: t(locale, 'cr_th_type') },
+    { key: 'agency', label: t(locale, 'cr_th_agency') },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'order_no', label: 'OrderNo' },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'route', label: t(locale, 'cr_th_route_no') },
+    { key: 'internal_target', label: t(locale, 'cr_th_internal_target') },
+    { key: 'merchant_receive', label: t(locale, 'cr_th_merchant_receive') },
+    { key: 'internal_receive', label: t(locale, 'cr_th_internal_receive') },
+    { key: 'resend', label: t(locale, 'cr_force_resend_noti') },
+  ];
+}
+
+function getCrVoidDeletedListColumnDefs(locale) {
+  return [
+    { key: 'transaction_id', label: t(locale, 'cr_th_transaction_id') },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'source', label: t(locale, 'cr_source_col') },
+    { key: 'deleted_at', label: t(locale, 'cr_deleted_at') },
+    { key: 'deleted_by', label: t(locale, 'cr_deleted_by') },
+    { key: 'restore', label: t(locale, 'cr_restore') },
+  ];
+}
+
+function getCrJpayFollowupListColumnDefs(locale) {
+  const cols = [
+    { key: 'received_date', label: t(locale, 'cr_th_received_date') },
+    { key: 'received_time', label: t(locale, 'cr_th_received_time') },
+    { key: 'route', label: t(locale, 'cr_th_route_no') },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'order_no', label: 'OrderNo' },
+  ];
+  appendJpayCrListExtraColDefs(cols);
+  cols.push({ key: 'amount', label: 'Amount' }, { key: 'icopay', label: 'ICOPAY' });
+  appendJpayWebhookColDef(cols, locale);
+  cols.push(
+    { key: 'cancel_action', label: t(locale, 'jpay_followup_th_cancel') },
+    { key: 'refund_action', label: t(locale, 'jpay_followup_th_refund') },
+  );
+  return cols;
+}
+
+function getPgTxListColumnDefs(locale) {
+  return [
+    { key: 'row_no', label: t(locale, 'pg_tx_header_no') },
+    { key: 'tx_date', label: t(locale, 'pg_tx_header_date') },
+    { key: 'tx_time', label: t(locale, 'pg_tx_header_time') },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'merchant', label: 'Merchant' },
+    { key: 'customer', label: 'Customer' },
+    { key: 'order_no', label: 'OrderNo' },
+    { key: 'payment_channel', label: 'PaymentChannel' },
+    { key: 'pay_time', label: t(locale, 'pg_tx_header_pay_time') },
+    { key: 'amount', label: 'Amount' },
+    { key: 'icopay', label: 'ICOPAY' },
+    { key: 'fee', label: 'Fee' },
+    { key: 'total_amount', label: 'TotalAmount' },
+    { key: 'currency', label: 'Currency' },
+    { key: 'route_no', label: 'RouteNo' },
+    { key: 'status', label: 'Status' },
+    { key: 'settled', label: 'Settled' },
+  ];
+}
+
+function getMailLogsListColumnDefs(locale) {
+  return [
+    { key: 'sent_at', label: t(locale, 'cr_th_sent_at') },
+    { key: 'sent_time', label: t(locale, 'cr_th_received_time') },
+    { key: 'type', label: 'Type' },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'order_no', label: 'OrderNo' },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'route', label: t(locale, 'cr_th_route_no') },
+    { key: 'email_to', label: 'Email To' },
+    { key: 'send_status', label: 'Send' },
+    { key: 'accepted', label: 'Accepted' },
+    { key: 'rejected', label: 'Rejected' },
+    { key: 'message_id', label: 'MessageId' },
+    { key: 'smtp_err', label: 'SMTP/Err' },
+    { key: 'subject', label: 'Subject' },
+  ];
+}
+
+function getInternalLogsListColumnDefs(locale) {
+  return [
+    { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
+    { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
+    { key: 'internal_target', label: t(locale, 'cr_th_internal_target') },
+    { key: 'internal_receive', label: t(locale, 'cr_th_internal_receive') },
+    { key: 'header', label: t(locale, 'internal_logs_header') },
+    { key: 'value', label: t(locale, 'internal_logs_value') },
+    { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+  ];
+}
+
+function getInternalResultListColumnDefs(locale) {
+  return [
+    { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
+    { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'type', label: t(locale, 'cr_th_type') },
+    { key: 'route', label: 'route' },
+    { key: 'internal_target', label: t(locale, 'cr_th_internal_target') },
+    { key: 'env', label: t(locale, 'common_env') },
+    { key: 'merchant_id', label: 'merchant id' },
+    { key: 'internal_delivery', label: t(locale, 'cr_th_internal_delivery') },
+    { key: 'fail_reason', label: t(locale, 'cr_th_fail_reason') },
+    { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+  ];
+}
+
+function getDevInternalLogsListColumnDefs(locale) {
+  return [
+    { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
+    { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
+    { key: 'delivery', label: t(locale, 'dev_noti_th_delivery') },
+    { key: 'upstream', label: t(locale, 'dev_internal_th_upstream') },
+    { key: 'header', label: t(locale, 'internal_logs_header') },
+    { key: 'value', label: t(locale, 'internal_logs_value') },
+    { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+  ];
+}
+
+function getDevInternalResultListColumnDefs(locale) {
+  return [
+    { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
+    { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
+    { key: 'route', label: 'route' },
+    { key: 'env', label: t(locale, 'common_env') },
+    { key: 'merchant_id', label: 'merchant id' },
+    { key: 'delivery', label: t(locale, 'dev_noti_th_delivery') },
+    { key: 'upstream', label: t(locale, 'dev_internal_th_upstream') },
+    { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+  ];
+}
+
+function getDealmaiWebhookListColumnDefs(locale) {
+  return [
+    { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
+    { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
+    { key: 'event', label: 'Event' },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'delivery', label: t(locale, 'dev_noti_th_delivery') },
+    { key: 'http_status', label: 'HTTP' },
+    { key: 'url', label: 'URL' },
+    { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+  ];
+}
+
+function getDealmaiWebhookResultListColumnDefs(locale) {
+  return [
+    { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
+    { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
+    { key: 'event', label: 'Event' },
+    { key: 'merchant', label: t(locale, 'cr_th_merchant') },
+    { key: 'transaction_id', label: 'TransactionId' },
+    { key: 'delivery', label: t(locale, 'dev_noti_th_delivery') },
+    { key: 'http_status', label: 'HTTP' },
+    { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+  ];
+}
+
+function jpayCrExtraCellMap(log, esc) {
+  const body = parseNotiBodyForDisplay(log);
+  const isJpay = getNotiLogPgAcquirer(log) === 'jpay';
+  return {
+    customer: '<td class="col-narrow">' + esc(isJpay ? body.customer || '-' : '-') + '</td>',
+    email: '<td class="col-narrow">' + esc(isJpay ? body.email || '-' : '-') + '</td>',
+    cardno: '<td class="col-narrow">' + esc(isJpay ? body.cardno || '-' : '-') + '</td>',
+  };
+}
+
+function filterTransactionListColumns(member, locale, txSource) {
+  const allCols = getTransactionListColumns(txSource);
+  const defs = getTransactionListColumnDefs(locale, txSource);
+  const enabled = getEnabledListColKeys(member, 'transactions', txSource, defs);
+  const set = {};
+  enabled.forEach((k) => { set[k] = 1; });
+  return allCols.filter((col) => set[transactionListColumnKey(col)]);
 }
 
 function jpayCrExtraCellsHtml(log, esc) {
@@ -13215,28 +13404,9 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     }
     return null;
   };
-  const thLabels = [
-    t(locale, 'tx_th_no'),
-    t(locale, 'cr_th_trade_date'),
-    t(locale, 'cr_th_trade_time'),
-    'TransactionId',
-    t(locale, 'tx_th_acquirer'),
-    t(locale, 'cr_th_merchant'),
-    'Route',
-    'CustomerId',
-    ...(txSource === 'jpay' ? ['Customer', 'Email', 'CardNo'] : []),
-    'OrderNo',
-    'PaymentDate',
-    'Amount',
-    t(locale, 'tx_th_internal_amount'),
-    'Currency',
-    t(locale, 'tx_th_status_raw'),
-    t(locale, 'tx_th_status'),
-    t(locale, 'tx_th_noti'),
-    ...(txSource === 'jpay' ? [t(locale, 'merchants_dealmai_webhook') || '웹훅'] : []),
-    t(locale, 'tx_th_detail_reason'),
-  ];
-  const txListColumns = getTransactionListColumns(txSource);
+  const txColDefsAll = getTransactionListColumnDefs(locale, txSource);
+  const txListColumns = filterTransactionListColumns(req.session.member, locale, txSource);
+  const txListColHello = buildListColHelloHtml(locale, esc, req.session.member, 'transactions', txSource, txColDefsAll, '.tx-list-table');
   const voidRefundByTxId = buildVoidRefundNotiMap(30);
   const voidRefundByOrderNo = buildVoidRefundNotiOrderNoMap(30);
   const formatVoidRefundSentAt = (iso) => {
@@ -13424,7 +13594,20 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     '</button></form>';
   const exportUrl = baseUrl + '/export' + qs({ page: 1 });
   const excelBtn = '<a href="' + exportUrl + '" style="margin-left:auto;padding:2px 8px;font-size:12px;background:#0d9488;color:#fff;border-radius:3px;text-decoration:none;white-space:nowrap;flex-shrink:0;">' + esc(t(locale, 'tx_export_excel')) + '</a>';
-  const toolbarHtml = '<div class="tx-toolbar">' + notiKindSelectHtml + '<span class="tx-toolbar-sep">ㅣ</span>' + sortLinks + sortDirLinks + '<span class="tx-toolbar-sep">|</span>' + periodLinks + dateForm + '<span class="tx-toolbar-sep">|</span>' + searchForm + excelBtn + '</div>';
+  const toolbarHtml =
+    '<div class="tx-toolbar">' +
+    notiKindSelectHtml +
+    '<span class="tx-toolbar-sep">ㅣ</span>' +
+    sortLinks +
+    sortDirLinks +
+    '<span class="tx-toolbar-sep">|</span>' +
+    periodLinks +
+    dateForm +
+    '<span class="tx-toolbar-sep">|</span>' +
+    searchForm +
+    excelBtn +
+    txListColHello.helloBtn +
+    '</div>';
   const hubHtmlTx = buildCrHubToolbarHtml(locale, esc, req.session.member, {
     inline: true,
     navEnv: getEnvFromReq(req) === 'sandbox' ? 'sandbox' : undefined,
@@ -13440,13 +13623,6 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       active: txSource,
       chillpayUrl: baseUrl + qs({ source: 'chillpay', page: 1 }),
       jpayUrl: baseUrl + qs({ source: 'jpay', page: 1 }),
-    },
-    hubNav: {
-      group: 'cr',
-      pg: txSource,
-      currentPath: '/admin/transactions',
-      req,
-      env: getEnvFromReq(req) === 'sandbox' ? 'sandbox' : 'live',
     },
   });
   const LEGEND_MAX_DESC = 80;
@@ -13476,8 +13652,37 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     ...(txSource === 'jpay' ? [88, 110, 100] : []),
     120, 88, 80, 78, 52, 48, 68, 52, ...(txSource === 'jpay' ? [72] : []), 200,
   ];
-  const colgroupHtml = '<colgroup>' + thLabels.map((_, i) => '<col id="tx-col-' + i + '" style="width:' + (txColDefaults[i] || 80) + 'px;min-width:40px;">').join('') + '</colgroup>';
-  const thead = '<thead><tr>' + thLabels.map((l, i) => '<th class="col-body-key">' + esc(l) + '<div class="tx-col-resizer" data-col="' + i + '" title="' + esc(t(locale, 'tx_col_resize_title')) + '"></div></th>').join('') + '</tr></thead>';
+  const allTxColsForWidth = getTransactionListColumns(txSource);
+  const colgroupHtml =
+    '<colgroup>' +
+    txListColumns
+      .map((col, i) => {
+        const fullIdx = allTxColsForWidth.findIndex((c) => transactionListColumnKey(c) === transactionListColumnKey(col));
+        const w = fullIdx >= 0 ? txColDefaults[fullIdx] || 80 : 80;
+        return '<col id="tx-col-' + i + '" style="width:' + w + 'px;min-width:40px;">';
+      })
+      .join('') +
+    '</colgroup>';
+  const thead =
+    '<thead><tr>' +
+    txListColumns
+      .map((col, i) => {
+        const key = transactionListColumnKey(col);
+        const label = transactionListColumnLabel(locale, col);
+        return (
+          '<th data-col-key="' +
+          esc(key) +
+          '" class="col-body-key">' +
+          esc(label) +
+          '<div class="tx-col-resizer" data-col="' +
+          i +
+          '" title="' +
+          esc(t(locale, 'tx_col_resize_title')) +
+          '"></div></th>'
+        );
+      })
+      .join('') +
+    '</tr></thead>';
   const rows = list.map((log, index) => {
     const body = parseNotiBodyForDisplay(log);
     const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
@@ -13612,17 +13817,19 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     txDateHint +
     legendHtml +
     toolbarHtml +
+    txListColHello.panelHtml +
     '<p class="admin-page-desc">' +
     notiSummaryLine1 +
     '</p><p class="admin-page-desc">' +
     notiSummaryLine2 +
-    '</p><table class="tx-list-table">' +
+    '</p><table class="tx-list-table list-view-table">' +
     colgroupHtml +
     thead +
     '<tbody>' +
     rows +
     '</tbody></table>' +
     txResizeScript +
+    txListColHello.scriptHtml +
     listPagerFooterTx;
   res.send(
     renderCancelRefundPage(
@@ -14248,13 +14455,6 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
       chillpayUrl: baseUrl + qs({ source: 'chillpay' }),
       jpayUrl: baseUrl + qs({ source: 'jpay' }),
     },
-    hubNav: {
-      group: 'cr',
-      pg: txSource,
-      currentPath: '/admin/daily-noti-summary',
-      req,
-      env: env === 'sandbox' ? 'sandbox' : 'live',
-    },
   });
   const thead =
     '<thead><tr><th>' +
@@ -14568,13 +14768,6 @@ app.get('/admin/daily-pg-summary', requireAuth, requirePage('cr_pg_transactions'
       highlight: true,
     },
     pgSource: { show: true, active: 'chillpay', chillpayUrl: '/admin/transactions', jpayUrl: '/admin/transactions?source=jpay', hideJpay: true },
-    hubNav: {
-      group: 'cr',
-      pg: 'chillpay',
-      currentPath: '/admin/daily-pg-summary',
-      req,
-      env: env === 'sandbox' ? 'sandbox' : 'live',
-    },
   });
   const thead =
     '<thead><tr><th>' +
@@ -15226,31 +15419,51 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
   const toolbarHtml = '<div style="margin-bottom:20px;font-size:12px;display:flex;flex-wrap:wrap;align-items:center;gap:4px;max-width:100%;">' + orderByLinks + sortDirLinks + '<span style="margin:0 4px;color:#9ca3af;">|</span>' + periodLinks + dateForm + '<span style="margin:0 4px;color:#9ca3af;">|</span>' + searchForm + excelBtn + '</div>';
   const toIcopay = (amountRaw, currencyRaw) =>
     computeIcopayAmount(amountRaw, currencyRaw, 'chillpay', { pgTxChillpayUsdThbDisplay: true });
-  // 노티거래내역과 동일하게 날짜/시각 분리 + TH/JP 표기
-  const thLabels = [
-    t(locale, 'pg_tx_header_no'),
-    t(locale, 'pg_tx_header_date'),
-    t(locale, 'pg_tx_header_time'),
-    'TransactionId',
-    'Merchant',
-    'Customer',
-    'OrderNo',
-    'PaymentChannel',
-    t(locale, 'pg_tx_header_pay_time'),
-    'Amount',
-    'ICOPAY',
-    'Fee',
-    'TotalAmount',
-    'Currency',
-    'RouteNo',
-    'Status',
-    'Settled',
-  ];
-  // colgroup를 px로 두고 col 요소 폭을 조정해야 리사이즈가 실제로 먹힘
-  // 가로 스크롤이 생기지 않도록 기본 폭을 최대한 압축
+  const pgTxColDefs = getPgTxListColumnDefs(locale);
+  const pgTxPg = 'chillpay';
+  const pgTxColFiltered = filterListColDefs(req.session.member, 'cr_pg_transactions', pgTxPg, pgTxColDefs);
+  const pgTxColHello = buildListColHelloHtml(
+    locale,
+    esc,
+    req.session.member,
+    'cr_pg_transactions',
+    pgTxPg,
+    pgTxColDefs,
+    '.pg-tx-table',
+  );
   const pgColDefaults = [40, 80, 120, 90, 80, 140, 90, 110, 80, 80, 70, 90, 80, 60, 80, 60, 50];
-  const colgroup = '<colgroup>' + thLabels.map((_, i) => '<col id="pg-col-' + i + '" style="width:' + (pgColDefaults[i] || 90) + 'px;min-width:40px;">').join('') + '</colgroup>';
-  const thead = '<thead><tr>' + thLabels.map((l, i) => '<th style="text-align:center;padding:8px 6px;border:1px solid #e5e7eb;background:#f3f4f6;position:relative;font-size:12px;white-space:nowrap;">' + esc(l) + '<div class="pg-col-resizer" data-col="' + i + '" style="position:absolute;top:0;right:0;width:8px;height:100%;cursor:col-resize;user-select:none;"></div></th>').join('') + '</tr></thead>';
+  const pgColDefaultByKey = {};
+  pgTxColDefs.forEach((c, i) => {
+    pgColDefaultByKey[c.key] = pgColDefaults[i] || 90;
+  });
+  const colgroup =
+    '<colgroup>' +
+    pgTxColFiltered
+      .map(
+        (c) =>
+          '<col id="pg-col-' +
+          esc(c.key) +
+          '" style="width:' +
+          (pgColDefaultByKey[c.key] || 90) +
+          'px;min-width:40px;">',
+      )
+      .join('') +
+    '</colgroup>';
+  const thead =
+    '<thead><tr>' +
+    pgTxColFiltered
+      .map(
+        (c, i) =>
+          '<th data-col-key="' +
+          esc(c.key) +
+          '" style="text-align:center;padding:8px 6px;border:1px solid #e5e7eb;background:#f3f4f6;position:relative;font-size:12px;white-space:nowrap;">' +
+          esc(c.label) +
+          '<div class="pg-col-resizer" data-col="' +
+          i +
+          '" style="position:absolute;top:0;right:0;width:8px;height:100%;cursor:col-resize;user-select:none;"></div></th>',
+      )
+      .join('') +
+    '</tr></thead>';
   // PG 거래내역은 ChillPay 원본 status 기준으로 표시 (노티 이력으로 덮어쓰기 금지)
   const normalizePgStatus = (s) => String(s ?? '').trim().toLowerCase();
   const getPgRowStatusKind = (row) => {
@@ -15330,40 +15543,46 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
     const kind = getPgRowStatusKind(row);
     const st = pgRowStatusStyles[kind];
     const statusCellText = kind !== 'other' ? pgFilterLabel(kind) : (row.status || '-');
-    // ICOPAY = ICOPAY 전용 설정(icopay-amount-settings.json) 통화별 금액 가공 — 노티 환경설정과 동일 규칙 종류·적용식(applyAmountRule)
     const icopayVal = row.amount != null ? formatAmountWithSeparator(toIcopay(row.amount, row.currency)) : '-';
     const txIso = pgDateTimeToIsoTh(row.transactionDate);
     const payIso = pgDateTimeToIsoTh(row.paymentDate);
     const txDt = formatDateAndTimeTHJP(txIso);
     const payDt = formatDateAndTimeTHJP(payIso);
-    const cells = [
-      rowNo,
-      txDt.date || '-',
-      'TH:' + (txDt.timeTh || '-') + ' JP:' + (txDt.timeJp || '-'),
-      row.transactionId,
-      getPgMerchantDisplay(row),
-      row.customer || '-',
-      row.orderNo || '-',
-      row.paymentChannel || '-',
-      'TH:' + (payDt.timeTh || '-') + ' JP:' + (payDt.timeJp || '-'),
-      row.amount != null ? row.amount : '-',
-      icopayVal,
-      row.fee != null ? row.fee : '-',
-      row.totalAmount != null ? row.totalAmount : '-',
-      row.currency || '-',
-      row.routeNo != null ? row.routeNo : '-',
-      statusCellText,
-      row.settled === true ? 'Y' : (row.settled === false ? 'N' : '-'),
-    ];
-    const statusCellIdx = 15;
-    return '<tr style="background:' + st.rowBg + ';">' + cells.map((c, idx) => {
-      var extra = 'font-size:12px;';
-      if (idx === 6) extra += 'min-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-      if (idx === 13 || idx === 14 || idx === 15 || idx === 16) extra += 'overflow:hidden;text-overflow:ellipsis;';
-      var cellStyle = 'text-align:center;padding:8px 6px;border:1px solid #e5e7eb;' + extra;
-      if (idx === statusCellIdx) cellStyle += 'background:' + st.cellBg + ';color:' + st.color + ';font-weight:600;';
-      return '<td style="' + cellStyle + '">' + esc(String(c)) + '</td>';
-    }).join('') + '</tr>';
+    const cellStyleBase = 'text-align:center;padding:8px 6px;border:1px solid #e5e7eb;';
+    const makeTd = (content, extraStyle, isStatus) => {
+      let cellStyle = cellStyleBase + (extraStyle || 'font-size:12px;');
+      if (isStatus) cellStyle += 'background:' + st.cellBg + ';color:' + st.color + ';font-weight:600;';
+      return '<td style="' + cellStyle + '">' + esc(String(content)) + '</td>';
+    };
+    const cellMap = {
+      row_no: makeTd(rowNo, 'font-size:12px;'),
+      tx_date: makeTd(txDt.date || '-', 'font-size:12px;'),
+      tx_time: makeTd('TH:' + (txDt.timeTh || '-') + ' JP:' + (txDt.timeJp || '-'), 'font-size:12px;'),
+      transaction_id: makeTd(row.transactionId, 'font-size:12px;'),
+      merchant: makeTd(getPgMerchantDisplay(row), 'font-size:12px;'),
+      customer: makeTd(row.customer || '-', 'font-size:12px;'),
+      order_no: makeTd(
+        row.orderNo || '-',
+        'font-size:12px;min-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
+      ),
+      payment_channel: makeTd(row.paymentChannel || '-', 'font-size:12px;'),
+      pay_time: makeTd('TH:' + (payDt.timeTh || '-') + ' JP:' + (payDt.timeJp || '-'), 'font-size:12px;'),
+      amount: makeTd(row.amount != null ? row.amount : '-', 'font-size:12px;'),
+      icopay: makeTd(icopayVal, 'font-size:12px;'),
+      fee: makeTd(row.fee != null ? row.fee : '-', 'font-size:12px;'),
+      total_amount: makeTd(
+        row.totalAmount != null ? row.totalAmount : '-',
+        'font-size:12px;overflow:hidden;text-overflow:ellipsis;',
+      ),
+      currency: makeTd(row.currency || '-', 'font-size:12px;overflow:hidden;text-overflow:ellipsis;'),
+      route_no: makeTd(
+        row.routeNo != null ? row.routeNo : '-',
+        'font-size:12px;overflow:hidden;text-overflow:ellipsis;',
+      ),
+      status: makeTd(statusCellText, 'font-size:12px;overflow:hidden;text-overflow:ellipsis;', true),
+      settled: makeTd(row.settled === true ? 'Y' : row.settled === false ? 'N' : '-', 'font-size:12px;'),
+    };
+    return '<tr style="background:' + st.rowBg + ';">' + joinListColCells(pgTxColFiltered, cellMap) + '</tr>';
   };
   const rowMatchesStatus = (row) => {
     if (!statusFilter) return true;
@@ -15531,7 +15750,24 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
     const paginationCenter = totalPages > 0 ? '<div style="text-align:center;margin:12px 0;">' + pageLinks.join('') + '</div>' : '';
     const perPageOptions = CR_LIST_PER_PAGE_CHOICES.map((n) => '<a href="' + baseUrl + qs({ perPage: n, page: 1 }) + '" style="padding:4px 8px;margin:0 2px;font-size:12px;border-radius:4px;text-decoration:none;background:' + (perPage === n ? '#059669' : '#e5e7eb') + ';color:' + (perPage === n ? '#fff' : '#374151') + ';">' + n + '</a>').join('');
     const perPageBar = '<div style="margin-top:12px;font-size:12px;color:#4b5563;">' + (t(locale, 'tx_per_page_bar') || '한 번에 보기') + ': ' + perPageOptions + ' ' + (t(locale, 'cr_count_suffix') || '건') + ' (' + (t(locale, 'tx_per_page_total') || '총') + ' ' + totalCount + (t(locale, 'cr_count_suffix') || '건') + ')</div>';
-    sectionsHtml = '<div style="margin-bottom:16px;"><div style="font-size:12px;margin:0 0 20px 0;color:#1f2937;">' + summaryLine1 + '</div><div style="font-size:12px;margin:0 0 20px 0;">' + summaryLine2 + '</div><table class="pg-tx-table" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;">' + colgroup + thead + '<tbody>' + rows + '</tbody></table>' + paginationCenter + perPageBar + '</div>';
+    sectionsHtml =
+      '<div style="margin-bottom:16px;"><div style="font-size:12px;margin:0 0 20px 0;color:#1f2937;">' +
+      summaryLine1 +
+      '</div><div style="font-size:12px;margin:0 0 20px 0;">' +
+      summaryLine2 +
+      '</div><div style="margin:8px 0;">' +
+      pgTxColHello.helloBtn +
+      '</div>' +
+      pgTxColHello.panelHtml +
+      '<table class="pg-tx-table list-view-table" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;">' +
+      colgroup +
+      thead +
+      '<tbody>' +
+      rows +
+      '</tbody></table>' +
+      paginationCenter +
+      perPageBar +
+      '</div>';
   }
   if (!sectionsHtml) {
     const hasAnyData = Object.keys(byDate).length > 0;
@@ -15563,7 +15799,16 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
   }
   const resizeScript = '<script>(function(){try{var table=document.querySelector(\"table.pg-tx-table\");if(!table)return;var cols=table.querySelectorAll(\"col\");var headers=table.querySelectorAll(\"thead th\");var resizer=null,startX=0,startW=0,colIdx=0;function onMove(e){if(!resizer)return;var dx=e.clientX-startX;var newW=Math.max(40,startW+dx);if(cols[colIdx]) cols[colIdx].style.width=newW+\"px\";}function onUp(){resizer=null;document.removeEventListener(\"mousemove\",onMove);document.removeEventListener(\"mouseup\",onUp);document.body.style.cursor=\"\";document.body.style.userSelect=\"\";}table.querySelectorAll(\".pg-col-resizer\").forEach(function(el){el.addEventListener(\"mousedown\",function(e){e.preventDefault();colIdx=parseInt(el.getAttribute(\"data-col\"),10)||0;startX=e.clientX;startW=headers[colIdx]?headers[colIdx].offsetWidth:90;resizer=el;document.body.style.cursor=\"col-resize\";document.body.style.userSelect=\"none\";document.addEventListener(\"mousemove\",onMove);document.addEventListener(\"mouseup\",onUp);});});}catch(e){}})();</script>';
   const periodLinkScript = '<script>(function(){function pad(n){return (n<10?\"0\":\"\")+n;}function ymd(d){return d.getFullYear()+\"-\"+pad(d.getMonth()+1)+\"-\"+pad(d.getDate());}function getRange(period){var now=new Date(),y=now.getFullYear(),m=now.getMonth(),d=now.getDate();if(period===\"today\"){return{from:ymd(now),to:ymd(now)};}if(period===\"yesterday\"){var yest=new Date(y,m,d-1);return{from:ymd(yest),to:ymd(yest)};}if(period===\"thisWeek\"||period===\"lastWeek\"){var dow=now.getDay(),monOff=dow===0?6:dow-1;var mon=new Date(y,m,d-monOff);if(period===\"lastWeek\"){mon.setDate(mon.getDate()-7);}var sun=new Date(mon);sun.setDate(sun.getDate()+6);return{from:ymd(mon),to:ymd(sun)};}if(period===\"thisMonth\"){return{from:y+\"-\"+pad(m+1)+\"-01\",to:ymd(new Date(y,m+1,0))};}if(period===\"lastMonth\"){return{from:ymd(new Date(y,m-1,1)),to:ymd(new Date(y,m,0))};}return null;}document.querySelectorAll(\"a.pg-period-link\").forEach(function(a){var period=a.getAttribute(\"data-period\");if(period===\"all\")return;var range=getRange(period);if(range){var url=new URL(a.href,window.location.origin);url.searchParams.set(\"dateFrom\",range.from);url.searchParams.set(\"dateTo\",range.to);a.href=url.pathname+\"?\"+url.searchParams.toString();}});})();</script>';
-  const mainContent = alertPgHtml + lastFetchedHtml + '<div style="max-width:100%;overflow-x:hidden;">' + toolbarHtml + sectionsHtml + '</div>' + periodLinkScript + resizeScript;
+  const mainContent =
+    alertPgHtml +
+    lastFetchedHtml +
+    '<div style="max-width:100%;overflow-x:hidden;">' +
+    toolbarHtml +
+    sectionsHtml +
+    '</div>' +
+    periodLinkScript +
+    resizeScript +
+    pgTxColHello.scriptHtml;
   const hubHtmlPg = buildCrHubToolbarHtml(locale, esc, req.session.member, {
     inline: true,
     navEnv: env === 'sandbox' ? 'sandbox' : undefined,
@@ -15580,13 +15825,6 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
       chillpayUrl: '/admin/transactions',
       jpayUrl: '/admin/transactions?source=jpay',
       hideJpay: true,
-    },
-    hubNav: {
-      group: 'cr',
-      pg: 'chillpay',
-      currentPath: '/admin/pg-transactions',
-      req,
-      env: env === 'sandbox' ? 'sandbox' : 'live',
     },
   });
   res.send(
@@ -16483,14 +16721,14 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       chillpayUrl: withPgSourceInUrl('/admin/transactions', 'chillpay'),
       jpayUrl: withPgSourceInUrl('/admin/transactions', 'jpay'),
     },
-    hubNav: {
-      group: 'cr',
-      pg: getSessionPgSource(req),
-      currentPath: '/admin/cancel-refund/cancel',
-      req,
-      env: getEnvFromReq(req) === 'sandbox' ? 'sandbox' : 'live',
-    },
   });
+  const cancelPg = getSessionPgSource(req);
+  const cancelColDefs = getCrCancelListColumnDefs(locale, cancelPg);
+  const cancelColFiltered = filterListColDefs(req.session.member, 'cr_cancel', cancelPg, cancelColDefs);
+  const cancelColHello = buildListColHelloHtml(locale, esc, req.session.member, 'cr_cancel', cancelPg, cancelColDefs, '.cancel-list-table');
+  const cancelTheadHtml = cancelColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
   const rows = displayCancelled.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
@@ -16530,30 +16768,48 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       ? '<form method="post" action="/admin/cancel-refund/cancel-resend-pg" style="display:inline;margin-left:6px;"><input type="hidden" name="index" value="' + realIndex + '" /><button type="submit" class="btn-resend-pg" style="padding:4px 10px;font-size:12px;background:#059669;color:#fff;border:none;border-radius:4px;cursor:pointer;">' + t(locale, 'cr_btn_resend_pg') + '</button></form>'
       : '<span style="color:#9ca3af;font-size:11px;">' + t(locale, 'cr_pg_url_not_set') + '</span>';
     const resendBtn = '<span class="cancel-resend-cell">' + internalBtn + pgBtn + '</span>';
-    return `<tr>
-      <td class="col-date">${esc(dt.date)}</td>
-      <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
-      <td class="col-narrow">${esc(routeNoDisplay)}</td>
-      <td class="col-narrow">${esc(log.merchantId || '')}</td>
-      <td>${esc(String(txId))}</td>
-      <td>${esc(String(orderNo))}</td>
-      ${jpayCrExtraCellsHtml(log, esc)}
-      <td>${esc(amtDisplay)}</td>
-      <td>${esc(amtHuman)}</td>
-      <td class="col-narrow" style="font-size:11px;">${psLabel}</td>
-      ${jpayWebhookCellHtml(locale, log, esc)}
-      <td class="col-action">${resendBtn}</td>
-    </tr>`;
+    const rowCells = {
+      received_date: '<td class="col-date">' + esc(dt.date) + '</td>',
+      received_time:
+        '<td class="col-time">TH: ' + esc(dt.timeTh) + '<br><span class="time-jp">JP: ' + esc(dt.timeJp) + '</span></td>',
+      route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
+      merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
+      transaction_id: '<td>' + esc(String(txId)) + '</td>',
+      order_no: '<td>' + esc(String(orderNo)) + '</td>',
+      customer: '<td class="col-narrow">' + esc((parseNotiBodyForDisplay(log).customer || '-')) + '</td>',
+      email: '<td class="col-narrow">' + esc((parseNotiBodyForDisplay(log).email || '-')) + '</td>',
+      cardno: '<td class="col-narrow">' + esc((parseNotiBodyForDisplay(log).cardno || '-')) + '</td>',
+      amount: '<td>' + esc(amtDisplay) + '</td>',
+      icopay: '<td>' + esc(amtHuman) + '</td>',
+      payment_status: '<td class="col-narrow" style="font-size:11px;">' + psLabel + '</td>',
+      webhook: jpayWebhookCellHtml(locale, log, esc),
+      resend: '<td class="col-action">' + resendBtn + '</td>',
+    };
+    return '<tr>' + cancelColFiltered.map((c) => rowCells[c.key] || '').join('') + '</tr>';
   }).join('');
   const helpPg = '<p class="page-desc">' + t(locale, 'cr_help_cancel') + '</p>';
-  const colgroup = '<colgroup><col style="width:8%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:12%;"/><col style="width:10%;"/><col style="width:14%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:8%;"/><col style="width:10%;"/><col style="width:7%;"/><col style="width:8%;"/><col style="width:6%;"/><col style="width:15%;"/></colgroup>';
-  const thead = '<thead><tr><th>' + t(locale, 'pg_logs_th_received_date') + '</th><th>' + t(locale, 'pg_logs_th_received_time') + '</th><th>Route No.</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>' + t(locale, 'tx_th_internal_amount') + '</th><th>PaymentStatus</th>' + jpayWebhookThHtml(locale) + '<th>' + t(locale, 'pg_result_th_resend') + '</th></tr></thead>';
+  const colgroup =
+    '<colgroup>' + cancelColFiltered.map(() => '<col style="width:auto;" />').join('') + '</colgroup>';
+  const thead = '<thead><tr>' + cancelTheadHtml + '</tr></thead>';
   res.send(
     renderCancelRefundPage(
       locale,
       adminUser,
       appendCrListCountToTitle(t(locale, 'nav_cancel_refund_cancel'), totalCountCancel),
-      alertHtml + helpPg + '<table class="cancel-list-table">' + colgroup + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterCancel,
+      alertHtml +
+        helpPg +
+        '<div style="margin:8px 0;">' +
+        cancelColHello.helloBtn +
+        '</div>' +
+        cancelColHello.panelHtml +
+        '<table class="cancel-list-table list-view-table">' +
+        colgroup +
+        thead +
+        '<tbody>' +
+        rows +
+        '</tbody></table>' +
+        cancelColHello.scriptHtml +
+        listPagerFooterCancel,
       '',
       req.originalUrl,
       req.session.member,
@@ -16869,6 +17125,12 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
     if (s === 'skip') return '<span class="status-skip">미전송' + (internalSkipReason === 'no_internal_url' ? ' (전산 URL 미설정)' : '') + '</span>';
     return '-';
   };
+  const notiColDefs = getCrNotiListColumnDefs(locale);
+  const notiColFiltered = filterListColDefs(req.session.member, 'cr_noti', 'none', notiColDefs);
+  const notiColHello = buildListColHelloHtml(locale, esc, req.session.member, 'cr_noti', 'none', notiColDefs, '.cr-noti-table');
+  const notiTheadHtml = notiColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
   const rows = displayFilteredNoti.map((e) => {
     const dt = e.sentAtIso ? new Date(e.sentAtIso).toLocaleString('ko-KR', { hour12: false }) : '-';
     const typeLabel = e.type === 'void' ? t(locale, 'cr_type_void') : e.type === 'refund' ? t(locale, 'cr_type_refund') : e.type || '-';
@@ -16887,19 +17149,20 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
       '<button type="submit" style="padding:3px 6px;font-size:11px;line-height:1.1;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap;max-width:120px;overflow:hidden;text-overflow:ellipsis;">' +
       t(locale, 'cr_btn_resend_cancel_refund') +
       '</button></form>';
-    return `<tr>
-      <td class="col-date">${esc(dt)}</td>
-      <td class="col-narrow">${esc(typeLabel)}</td>
-      <td class="col-narrow">${esc(pgProvLabel)}</td>
-      <td class="col-narrow">${esc(e.transactionId || '')}</td>
-      <td class="col-narrow">${esc(e.orderNo || '')}</td>
-      <td class="col-narrow">${esc(e.merchantId || '')}</td>
-      <td class="col-narrow">${esc(e.routeNo || '')}</td>
-      <td class="col-narrow">${esc(internalTargetName)}</td>
-      <td class="col-status">${relayLabel(e.relayStatus, e.skipReason)}</td>
-      <td class="col-status">${internalLabel(e.internalStatus, e.internalSkipReason)}</td>
-      <td class="col-action">${resendForm}</td>
-    </tr>`;
+    const rowCellsNoti = {
+      sent_at: '<td class="col-date">' + esc(dt) + '</td>',
+      type: '<td class="col-narrow">' + esc(typeLabel) + '</td>',
+      agency: '<td class="col-narrow">' + esc(pgProvLabel) + '</td>',
+      transaction_id: '<td class="col-narrow">' + esc(e.transactionId || '') + '</td>',
+      order_no: '<td class="col-narrow">' + esc(e.orderNo || '') + '</td>',
+      merchant: '<td class="col-narrow">' + esc(e.merchantId || '') + '</td>',
+      route: '<td class="col-narrow">' + esc(e.routeNo || '') + '</td>',
+      internal_target: '<td class="col-narrow">' + esc(internalTargetName) + '</td>',
+      merchant_receive: '<td class="col-status">' + relayLabel(e.relayStatus, e.skipReason) + '</td>',
+      internal_receive: '<td class="col-status">' + internalLabel(e.internalStatus, e.internalSkipReason) + '</td>',
+      resend: '<td class="col-action">' + resendForm + '</td>',
+    };
+    return '<tr>' + joinListColCells(notiColFiltered, rowCellsNoti) + '</tr>';
   }).join('');
   const envParam = '&env=' + encodeURIComponent(envNoti);
   const pgParam = pgFilter !== 'all' ? '&pg=' + encodeURIComponent(pgFilter) : '';
@@ -16920,38 +17183,24 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=30${envParam}${pgParam}" style="margin-left:4px;font-size:12px;">30${t(locale, 'cr_days')}</a>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=90${envParam}${pgParam}" style="margin-left:4px;font-size:12px;">90${t(locale, 'cr_days')}</a>
   </div>`;
-  const thead =
-    '<thead><tr><th>' +
-    t(locale, 'cr_th_sent_at') +
-    '</th><th>' +
-    t(locale, 'cr_th_type') +
-    '</th><th>' +
-    t(locale, 'cr_th_agency') +
-    '</th><th>TransactionId</th><th>OrderNo</th><th>' +
-    t(locale, 'cr_th_merchant') +
-    '</th><th>' +
-    t(locale, 'cr_th_route_no') +
-    '</th><th>' +
-    t(locale, 'cr_th_internal_target') +
-    '</th><th>' +
-    t(locale, 'cr_th_merchant_receive') +
-    '</th><th>' +
-    t(locale, 'cr_th_internal_receive') +
-    '</th><th>' +
-    t(locale, 'cr_force_resend_noti') +
-    '</th></tr></thead>';
+  const thead = '<thead><tr>' + notiTheadHtml + '</tr></thead>';
   const notiHelp =
     '<p class="page-desc">' + t(locale, 'noti_help_paragraph1') + '</p>' + '<p class="page-desc">' + t(locale, 'noti_help_paragraph2') + '</p>';
   const tableContent =
     alertNotiHtml +
     notiHelp +
     filterLinks +
-    '<div class="cr-noti-table-wrap"><table class="cr-noti-table">' +
+    '<div style="margin:8px 0;">' +
+    notiColHello.helloBtn +
+    '</div>' +
+    notiColHello.panelHtml +
+    '<div class="cr-noti-table-wrap"><table class="cr-noti-table list-view-table">' +
     thead +
     '<tbody>' +
     rows +
     '</tbody></table></div>' +
-    listPagerFooterNoti;
+    listPagerFooterNoti +
+    notiColHello.scriptHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_noti'), totalCountNoti), tableContent, '', req.originalUrl, req.session.member, req, undefined, envNoti));
 });
 
@@ -17425,6 +17674,13 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
     perPage: perPageVoid,
     hrefFor: (o) => baseUrlVoid + qsVoid(o),
   });
+  const voidPg = getSessionPgSource(req);
+  const voidColDefs = getCrVoidListColumnDefs(locale, voidPg);
+  const voidColFiltered = filterListColDefs(req.session.member, 'cr_void', voidPg, voidColDefs);
+  const voidColHello = buildListColHelloHtml(locale, esc, req.session.member, 'cr_void', voidPg, voidColDefs, '.void-list-table');
+  const voidTheadHtml = voidColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
   const cfg = loadChillPayTransactionConfig();
   const rows = displayVoidList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
@@ -17522,27 +17778,48 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
         + `</div>`;
     }
     const sentDt = sentEntry ? formatDateAndTimeTHJP(sentEntry.sentAtIso || sentEntry.sentAt) : { date: '-', timeTh: '-', timeJp: '-' };
-    return `<tr${trClassAttr}>
-      <td class="col-date">${esc(dt.date)}</td>
-      <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
-      <td class="col-date">${esc(sentDt.date)}</td>
-      <td class="col-time">TH: ${esc(sentDt.timeTh)}<br><span class="time-jp">JP: ${esc(sentDt.timeJp)}</span></td>
-      <td class="col-narrow">${esc(routeNoDisplay)}</td>
-      <td class="col-narrow">${esc(log.merchantId || '')}</td>
-      <td class="col-narrow">${esc(txId)}</td>
-      <td class="col-narrow">${esc(orderNo)}</td>
-      ${jpayCrExtraCellsHtml(log, esc)}
-      <td class="col-narrow">${esc(amount)}</td>
-      <td class="col-narrow">${esc(amountHuman)}</td>
-      ${jpayWebhookCellHtml(locale, log, esc)}
-      <td class="col-action">${voidHtml}</td>
-      <td class="col-action">${manageHtml}</td>
-      <td class="col-action">${emailHtml}</td>
-    </tr>`;
+    const jpayExtras = jpayCrExtraCellMap(log, esc);
+    const rowCells = {
+      received_date: '<td class="col-date">' + esc(dt.date) + '</td>',
+      received_time:
+        '<td class="col-time">TH: ' + esc(dt.timeTh) + '<br><span class="time-jp">JP: ' + esc(dt.timeJp) + '</span></td>',
+      sent_date: '<td class="col-date">' + esc(sentDt.date) + '</td>',
+      sent_time:
+        '<td class="col-time">TH: ' + esc(sentDt.timeTh) + '<br><span class="time-jp">JP: ' + esc(sentDt.timeJp) + '</span></td>',
+      route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
+      merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
+      transaction_id: '<td class="col-narrow">' + esc(txId) + '</td>',
+      order_no: '<td class="col-narrow">' + esc(orderNo) + '</td>',
+      customer: jpayExtras.customer,
+      email: jpayExtras.email,
+      cardno: jpayExtras.cardno,
+      amount: '<td class="col-narrow">' + esc(amount) + '</td>',
+      icopay: '<td class="col-narrow">' + esc(amountHuman) + '</td>',
+      webhook: jpayWebhookCellHtml(locale, log, esc),
+      void_action: '<td class="col-action">' + voidHtml + '</td>',
+      manage: '<td class="col-action">' + manageHtml + '</td>',
+      email_send: '<td class="col-action">' + emailHtml + '</td>',
+    };
+    return '<tr' + trClassAttr + '>' + joinListColCells(voidColFiltered, rowCells) + '</tr>';
   }).join('');
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>ICOPAY</th>' + jpayWebhookThHtml(locale) + '<th>' + t(locale, 'cr_th_void') + '</th><th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_email') + '</th></tr></thead>';
+  const thead = '<thead><tr>' + voidTheadHtml + '</tr></thead>';
   const voidNote = '<p class="page-desc">' + t(locale, 'void_note_paragraph') + '</p>';
-  const tableContent = voidNote + voidToolbarHtml + syncResultHtml + '<table class="void-list-table">' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterVoid + historyListHtml;
+  const tableContent =
+    voidNote +
+    voidToolbarHtml +
+    syncResultHtml +
+    '<div style="margin:8px 0;">' +
+    voidColHello.helloBtn +
+    '</div>' +
+    voidColHello.panelHtml +
+    '<table class="void-list-table list-view-table">' +
+    thead +
+    '<tbody>' +
+    rows +
+    '</tbody></table>' +
+    listPagerFooterVoid +
+    historyListHtml +
+    voidColHello.scriptHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_void'), totalCountVoid), tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
 });
 
@@ -17702,6 +17979,13 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
   const pageNumMail = Math.min(page, totalPagesMail);
   const pagedLogsMail = isTodayOnly ? filteredForDateMail : filteredForDateMail.slice((pageNumMail - 1) * perPage, pageNumMail * perPage);
 
+  const mailColDefs = getMailLogsListColumnDefs(locale);
+  const mailColFiltered = filterListColDefs(req.session.member, 'mail_logs', 'none', mailColDefs);
+  const mailColHello = buildListColHelloHtml(locale, esc, req.session.member, 'mail_logs', 'none', mailColDefs, '.mail-logs-table');
+  const mailTheadHtml = mailColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
+
   const rows = pagedLogsMail.map((log) => {
     const dt = formatDateAndTimeTHJP(log.sentAtIso || log.sentAt || '');
     const typeLabel = log.type || 'void_manual_email';
@@ -17720,40 +18004,37 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
     const msgId = log.messageId || '';
     const resp = log.smtpResponse || '';
     const err = log.error || '';
-    return `<tr>
-      <td class="col-date">${esc(dt.date || '')}</td>
-      <td class="col-time">TH: ${esc(dt.timeTh || '')}<br><span class="time-jp">JP: ${esc(dt.timeJp || '')}</span></td>
-      <td class="col-narrow">${esc(typeLabel)}</td>
-      <td class="col-narrow">${esc(tx)}</td>
-      <td class="col-narrow">${esc(orderNo)}</td>
-      <td class="col-narrow">${esc(merchantId)}</td>
-      <td class="col-narrow">${esc(routeNo)}</td>
-      <td class="col-narrow">${esc(emailTo)}</td>
-      <td class="col-narrow">${esc(status)}</td>
-      <td style="max-width:160px;word-break:break-all;">${esc(accepted)}</td>
-      <td style="max-width:160px;word-break:break-all;">${esc(rejected)}</td>
-      <td style="max-width:180px;word-break:break-all;font-size:11px;">${esc(msgId)}</td>
-      <td style="max-width:220px;word-break:break-all;font-size:11px;">${esc(resp || err)}</td>
-      <td>${esc(subject)}</td>
-    </tr>`;
+    const rowCellsMail = {
+      sent_at: '<td class="col-date">' + esc(dt.date || '') + '</td>',
+      sent_time:
+        '<td class="col-time">TH: ' + esc(dt.timeTh || '') + '<br><span class="time-jp">JP: ' + esc(dt.timeJp || '') + '</span></td>',
+      type: '<td class="col-narrow">' + esc(typeLabel) + '</td>',
+      transaction_id: '<td class="col-narrow">' + esc(tx) + '</td>',
+      order_no: '<td class="col-narrow">' + esc(orderNo) + '</td>',
+      merchant: '<td class="col-narrow">' + esc(merchantId) + '</td>',
+      route: '<td class="col-narrow">' + esc(routeNo) + '</td>',
+      email_to: '<td class="col-narrow">' + esc(emailTo) + '</td>',
+      send_status: '<td class="col-narrow">' + esc(status) + '</td>',
+      accepted: '<td style="max-width:160px;word-break:break-all;">' + esc(accepted) + '</td>',
+      rejected: '<td style="max-width:160px;word-break:break-all;">' + esc(rejected) + '</td>',
+      message_id: '<td style="max-width:180px;word-break:break-all;font-size:11px;">' + esc(msgId) + '</td>',
+      smtp_err: '<td style="max-width:220px;word-break:break-all;font-size:11px;">' + esc(resp || err) + '</td>',
+      subject: '<td>' + esc(subject) + '</td>',
+    };
+    return '<tr>' + joinListColCells(mailColFiltered, rowCellsMail) + '</tr>';
   }).join('');
-  const thead = '<thead><tr>'
-    + '<th>' + t(locale, 'cr_th_sent_at') + '</th>'
-    + '<th>' + t(locale, 'cr_th_received_time') + '</th>'
-    + '<th>Type</th>'
-    + '<th>TransactionId</th>'
-    + '<th>OrderNo</th>'
-    + '<th>' + t(locale, 'cr_th_merchant') + '</th>'
-    + '<th>' + t(locale, 'cr_th_route_no') + '</th>'
-    + '<th>Email To</th>'
-    + '<th>Send</th>'
-    + '<th>Accepted</th>'
-    + '<th>Rejected</th>'
-    + '<th>MessageId</th>'
-    + '<th>SMTP/Err</th>'
-    + '<th>Subject</th>'
-    + '</tr></thead>';
-  const mainContent = '<table>' + thead + '<tbody>' + rows + '</tbody></table>';
+  const thead = '<thead><tr>' + mailTheadHtml + '</tr></thead>';
+  const mainContent =
+    '<div style="margin:8px 0;">' +
+    mailColHello.helloBtn +
+    '</div>' +
+    mailColHello.panelHtml +
+    '<table class="mail-logs-table list-view-table">' +
+    thead +
+    '<tbody>' +
+    rows +
+    '</tbody></table>' +
+    mailColHello.scriptHtml;
   const dateFilterForm = `<form method="get" action="/admin/mail-logs" style="margin-bottom:10px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
     <input type="hidden" name="env" value="${esc(env)}" />
     <input type="hidden" name="perPage" value="${perPage}" />
@@ -18280,6 +18561,21 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
   });
   const confirmForceRefund = (t(locale, 'cr_confirm_force_refund') || '강제환불(환불거래 종료 후 추가 환불)을 진행할까요?').replace(/'/g, "\\'").replace(/"/g, '&quot;');
   const confirmForceRefund2 = (t(locale, 'cr_confirm_force_refund_second') || '정말 승인하시겠습니까? ChillPay 환불 요청 후 가맹점과 전산에 환불 노티가 전송됩니다.').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  const forceRefundPg = getSessionPgSource(req);
+  const forceRefundColDefs = getCrForceRefundListColumnDefs(locale, forceRefundPg);
+  const forceRefundColFiltered = filterListColDefs(req.session.member, 'cr_force_refund', forceRefundPg, forceRefundColDefs);
+  const forceRefundColHello = buildListColHelloHtml(
+    locale,
+    esc,
+    req.session.member,
+    'cr_force_refund',
+    forceRefundPg,
+    forceRefundColDefs,
+    '.force-refund-list-table',
+  );
+  const forceRefundTheadHtml = forceRefundColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
   const rows = displayForceRefundList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
@@ -18314,27 +18610,45 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     } else {
       action = '<form method="post" action="/admin/cancel-refund/force-refund-request" style="display:inline;" onsubmit="return confirm(\'' + confirmForceRefund + '\') && confirm(\'' + confirmForceRefund2 + '\');"><input type="hidden" name="index" value="' + realIndex + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><button type="submit" class="btn-refund">' + (t(locale, 'cr_btn_force_refund') || '강제환불 요청') + '</button></form>';
     }
-    return `<tr>
-      <td class="col-date">${esc(dt.date)}</td>
-      <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
-      <td class="col-narrow">${esc(routeNoDisplay)}</td>
-      <td class="col-narrow">${esc(log.merchantId || '')}</td>
-      <td class="col-narrow">${esc(txId)}</td>
-      <td class="col-narrow">${esc(orderNo)}</td>
-      ${jpayCrExtraCellsHtml(log, esc)}
-      <td class="col-narrow">${esc(amount)}</td>
-      <td class="col-narrow">${esc(amountHuman)}</td>
-      ${jpayWebhookCellHtml(locale, log, esc)}
-      <td class="col-action">${manageHtml}</td>
-      <td class="col-action">${action}</td>
-    </tr>`;
+    const jpayExtrasFv = jpayCrExtraCellMap(log, esc);
+    const rowCellsFv = {
+      received_date: '<td class="col-date">' + esc(dt.date) + '</td>',
+      received_time:
+        '<td class="col-time">TH: ' + esc(dt.timeTh) + '<br><span class="time-jp">JP: ' + esc(dt.timeJp) + '</span></td>',
+      route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
+      merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
+      transaction_id: '<td class="col-narrow">' + esc(txId) + '</td>',
+      order_no: '<td class="col-narrow">' + esc(orderNo) + '</td>',
+      customer: jpayExtrasFv.customer,
+      email: jpayExtrasFv.email,
+      cardno: jpayExtrasFv.cardno,
+      amount: '<td class="col-narrow">' + esc(amount) + '</td>',
+      icopay: '<td class="col-narrow">' + esc(amountHuman) + '</td>',
+      webhook: jpayWebhookCellHtml(locale, log, esc),
+      manage: '<td class="col-action">' + manageHtml + '</td>',
+      force_refund_action: '<td class="col-action">' + action + '</td>',
+    };
+    return '<tr>' + joinListColCells(forceRefundColFiltered, rowCellsFv) + '</tr>';
   }).join('');
   const descHtml =
     '<p class="page-desc">' +
     (t(locale, 'cr_force_refund_desc') || '환불거래 기간이 끝난 뒤, 환경설정의 강제환불 가능 기간(일) 안에서만 추가 환불이 가능합니다. 환불거래와 동일하게 ChillPay 환불 API 호출 후 가맹점·전산에 노티를 보냅니다.').replace(/</g, '&lt;') +
     '</p>';
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_th_transaction_id') + '</th><th>' + t(locale, 'cr_th_order_no') + '</th>' + JPAY_CR_EXTRA_TH + '<th>' + t(locale, 'cr_th_amount') + '</th><th>' + t(locale, 'cr_th_amount_display') + '</th>' + jpayWebhookThHtml(locale) + '<th>' + t(locale, 'cr_th_manage') + '</th><th>' + (t(locale, 'cr_btn_force_refund') || '강제환불') + '</th></tr></thead>';
-  const tableContent = descHtml + forceRefundToolbarHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterFv;
+  const thead = '<thead><tr>' + forceRefundTheadHtml + '</tr></thead>';
+  const tableContent =
+    descHtml +
+    forceRefundToolbarHtml +
+    '<div style="margin:8px 0;">' +
+    forceRefundColHello.helloBtn +
+    '</div>' +
+    forceRefundColHello.panelHtml +
+    '<table class="force-refund-list-table list-view-table">' +
+    thead +
+    '<tbody>' +
+    rows +
+    '</tbody></table>' +
+    listPagerFooterFv +
+    forceRefundColHello.scriptHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_force_refund') || '강제환불', totalCountFv), tableContent, alertHtml, req.originalUrl, req.session.member, req, undefined, env));
 });
 
@@ -18423,17 +18737,44 @@ app.get('/admin/cancel-refund/void-deleted-list', requireAuth, requirePage('cr_v
     hrefFor: (o) => baseUrlVd + qsVd(o),
   });
   const sourceLabel = (s) => (s === 'force_refund' ? (t(locale, 'cr_source_force_refund') || '강제환불') : s === 'force_void' ? t(locale, 'cr_source_force_void') : t(locale, 'cr_source_void'));
+  const vdColDefs = getCrVoidDeletedListColumnDefs(locale);
+  const vdColFiltered = filterListColDefs(req.session.member, 'cr_void_deleted', 'none', vdColDefs);
+  const vdColHello = buildListColHelloHtml(locale, esc, req.session.member, 'cr_void_deleted', 'none', vdColDefs, '.void-deleted-list-table');
+  const vdTheadHtml = vdColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
   const rows = displayFilteredVd.map((d) => {
     const deletedAtStr = d.deletedAtIso ? new Date(d.deletedAtIso).toLocaleString('ko-KR', { hour12: false }) : '-';
     const restoreForm = '<form method="post" action="/admin/cancel-refund/void-deleted-restore" style="display:inline;"><input type="hidden" name="id" value="' + esc(d.id || '') + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><button type="submit" style="padding:4px 10px;font-size:12px;background:#16a34a;color:#fff;border:none;border-radius:4px;cursor:pointer;">' + esc(t(locale, 'cr_restore')) + '</button></form>';
-    return '<tr><td class="col-narrow">' + esc(d.transactionId || '') + '</td><td class="col-narrow">' + esc(d.merchantId || '') + '</td><td class="col-narrow">' + esc(sourceLabel(d.source)) + '</td><td class="col-date">' + esc(deletedAtStr) + '</td><td class="col-narrow">' + esc(d.deletedBy || '') + '</td><td class="col-action">' + restoreForm + '</td></tr>';
+    const rowCellsVd = {
+      transaction_id: '<td class="col-narrow">' + esc(d.transactionId || '') + '</td>',
+      merchant: '<td class="col-narrow">' + esc(d.merchantId || '') + '</td>',
+      source: '<td class="col-narrow">' + esc(sourceLabel(d.source)) + '</td>',
+      deleted_at: '<td class="col-date">' + esc(deletedAtStr) + '</td>',
+      deleted_by: '<td class="col-narrow">' + esc(d.deletedBy || '') + '</td>',
+      restore: '<td class="col-action">' + restoreForm + '</td>',
+    };
+    return '<tr>' + joinListColCells(vdColFiltered, rowCellsVd) + '</tr>';
   }).join('');
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_transaction_id') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>' + t(locale, 'cr_source_col') + '</th><th>' + t(locale, 'cr_deleted_at') + '</th><th>' + t(locale, 'cr_deleted_by') + '</th><th>' + t(locale, 'cr_restore') + '</th></tr></thead>';
+  const thead = '<thead><tr>' + vdTheadHtml + '</tr></thead>';
   const hint = '<p class="hint" style="margin-bottom:12px;font-size:11px;color:#6b7280;line-height:1.45;">' + esc(t(locale, 'cr_void_deleted_hint')) + '</p>';
   let listAlert = '';
   if (q.restore === 'ok') listAlert = '<div class="alert alert-ok">' + esc(t(locale, 'cr_restore_ok_msg')) + '</div>';
   if (q.restore === 'fail') listAlert = '<div class="alert alert-fail">' + esc(t(locale, 'cr_restore_fail_msg')) + '</div>';
-  const tableContent = listAlert + hint + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterVd;
+  const tableContent =
+    listAlert +
+    hint +
+    '<div style="margin:8px 0;">' +
+    vdColHello.helloBtn +
+    '</div>' +
+    vdColHello.panelHtml +
+    '<table class="void-deleted-list-table list-view-table">' +
+    thead +
+    '<tbody>' +
+    rows +
+    '</tbody></table>' +
+    listPagerFooterVd +
+    vdColHello.scriptHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'cr_void_deleted_list'), totalCountVd), tableContent, '', req.originalUrl, req.session.member, req, undefined, env));
 });
 
@@ -18836,6 +19177,13 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
     perPage: perPageRf,
     hrefFor: (o) => baseUrlRf + qsRf(o),
   });
+  const refundPg = getSessionPgSource(req);
+  const refundColDefs = getCrRefundListColumnDefs(locale, refundPg);
+  const refundColFiltered = filterListColDefs(req.session.member, 'cr_refund', refundPg, refundColDefs);
+  const refundColHello = buildListColHelloHtml(locale, esc, req.session.member, 'cr_refund', refundPg, refundColDefs, '.refund-list-table');
+  const refundTheadHtml = refundColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
   const rows = displayRefundList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
@@ -18871,25 +19219,45 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
       : '<span class="btn-refund-disabled" title="' + (t(locale, 'cr_refund_period_no_title') || '환경설정에서 지정한 환불 가능 기간을 지났거나 아직 시작 전입니다.').replace(/"/g, '&quot;') + '">' + (t(locale, 'cr_refund_period_no') || '환불 기간 아님') + '</span>';
     const sentEntry = refundSentMap[String(txId).trim()];
     const sentDt = sentEntry ? formatDateAndTimeTHJP(sentEntry.sentAtIso || sentEntry.sentAt) : { date: '-', timeTh: '-', timeJp: '-' };
-    return `<tr>
-      <td class="col-date">${esc(dt.date)}</td>
-      <td class="col-time">TH: ${esc(dt.timeTh)}<br><span class="time-jp">JP: ${esc(dt.timeJp)}</span></td>
-      <td class="col-date">${esc(sentDt.date)}</td>
-      <td class="col-time">TH: ${esc(sentDt.timeTh)}<br><span class="time-jp">JP: ${esc(sentDt.timeJp)}</span></td>
-      <td class="col-narrow">${esc(routeNoDisplay)}</td>
-      <td class="col-narrow">${esc(log.merchantId || '')}</td>
-      <td class="col-narrow">${esc(txId)}</td>
-      <td class="col-narrow">${esc(orderNo)}</td>
-      ${jpayCrExtraCellsHtml(log, esc)}
-      <td class="col-narrow">${esc(amount)}</td>
-      <td class="col-narrow">${esc(amountHuman)}</td>
-      ${jpayWebhookCellHtml(locale, log, esc)}
-      <td class="col-action">${manageHtml}</td>
-      <td class="col-action">${refundHtml}</td>
-    </tr>`;
+    const jpayExtrasRf = jpayCrExtraCellMap(log, esc);
+    const rowCellsRf = {
+      received_date: '<td class="col-date">' + esc(dt.date) + '</td>',
+      received_time:
+        '<td class="col-time">TH: ' + esc(dt.timeTh) + '<br><span class="time-jp">JP: ' + esc(dt.timeJp) + '</span></td>',
+      sent_date: '<td class="col-date">' + esc(sentDt.date) + '</td>',
+      sent_time:
+        '<td class="col-time">TH: ' + esc(sentDt.timeTh) + '<br><span class="time-jp">JP: ' + esc(sentDt.timeJp) + '</span></td>',
+      route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
+      merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
+      transaction_id: '<td class="col-narrow">' + esc(txId) + '</td>',
+      order_no: '<td class="col-narrow">' + esc(orderNo) + '</td>',
+      customer: jpayExtrasRf.customer,
+      email: jpayExtrasRf.email,
+      cardno: jpayExtrasRf.cardno,
+      amount: '<td class="col-narrow">' + esc(amount) + '</td>',
+      icopay: '<td class="col-narrow">' + esc(amountHuman) + '</td>',
+      webhook: jpayWebhookCellHtml(locale, log, esc),
+      manage: '<td class="col-action">' + manageHtml + '</td>',
+      refund_action: '<td class="col-action">' + refundHtml + '</td>',
+    };
+    return '<tr>' + joinListColCells(refundColFiltered, rowCellsRf) + '</tr>';
   }).join('');
-  const thead = '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_sent_date') + '</th><th>' + t(locale, 'cr_th_sent_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>ICOPAY</th>' + jpayWebhookThHtml(locale) + '<th>' + t(locale, 'cr_th_manage') + '</th><th>' + t(locale, 'cr_th_refund') + '</th></tr></thead>';
-  const tableContent = syncResultHtml + refundToolbarHtml + '<table>' + thead + '<tbody>' + rows + '</tbody></table>' + listPagerFooterRf + historyListHtml;
+  const thead = '<thead><tr>' + refundTheadHtml + '</tr></thead>';
+  const tableContent =
+    syncResultHtml +
+    refundToolbarHtml +
+    '<div style="margin:8px 0;">' +
+    refundColHello.helloBtn +
+    '</div>' +
+    refundColHello.panelHtml +
+    '<table class="refund-list-table list-view-table">' +
+    thead +
+    '<tbody>' +
+    rows +
+    '</tbody></table>' +
+    listPagerFooterRf +
+    historyListHtml +
+    refundColHello.scriptHtml;
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'nav_cancel_refund_refund'), totalCountRf), tableContent, alertHtml, req.originalUrl, req.session.member, req, syncForm, env));
 });
 
@@ -19284,6 +19652,12 @@ app.get('/admin/cancel-refund/jpay-followup', requireAuth, requirePage('cr_jpay_
   const confirmCancel2 = (t(locale, 'jpay_followup_confirm_cancel_second') || '').replace(/'/g, "\\'");
   const confirmRefund1 = (t(locale, 'jpay_followup_confirm_refund') || '').replace(/'/g, "\\'");
   const confirmRefund2 = (t(locale, 'jpay_followup_confirm_refund_second') || '').replace(/'/g, "\\'");
+  const jfColDefs = getCrJpayFollowupListColumnDefs(locale);
+  const jfColFiltered = filterListColDefs(req.session.member, 'cr_jpay_followup', 'jpay', jfColDefs);
+  const jfColHello = buildListColHelloHtml(locale, esc, req.session.member, 'cr_jpay_followup', 'jpay', jfColDefs, '.jpay-followup-table');
+  const jfTheadHtml = jfColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
   const rowsHtml = displayJf.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
     const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
@@ -19330,29 +19704,42 @@ app.get('/admin/cancel-refund/jpay-followup', requireAuth, requirePage('cr_jpay_
     const customer = esc(body.customer ?? body.Customer ?? body.customerName ?? '-');
     const email = esc(body.email ?? body.Email ?? '-');
     const cardno = esc(body.cardno ?? body.cardNo ?? body.CardNo ?? '-');
-    return (
-      '<tr>' +
-      '<td>' + esc(dt.date) + '</td>' +
-      '<td>' + esc(dt.timeTh) + '</td>' +
-      '<td>' + esc(routeNoDisplay) + '</td>' +
-      '<td>' + esc(log.merchantId || '') + '</td>' +
-      '<td>' + esc(txId) + '</td>' +
-      '<td>' + esc(orderNo) + '</td>' +
-      '<td>' + customer + '</td>' +
-      '<td>' + email + '</td>' +
-      '<td>' + cardno + '</td>' +
-      '<td>' + esc(String(amount)) + '</td>' +
-      '<td>' + esc(amountHuman) + '</td>' +
-      '<td>' + esc(pgNotiLogWebhookDisplayText(locale, log, merchant)) + '</td>' +
-      '<td>' + cancelHtml + '</td>' +
-      '<td>' + refundHtml + '</td>' +
-      '</tr>'
-    );
+    const rowCellsJf = {
+      received_date: '<td>' + esc(dt.date) + '</td>',
+      received_time: '<td>' + esc(dt.timeTh) + '</td>',
+      route: '<td>' + esc(routeNoDisplay) + '</td>',
+      merchant: '<td>' + esc(log.merchantId || '') + '</td>',
+      transaction_id: '<td>' + esc(txId) + '</td>',
+      order_no: '<td>' + esc(orderNo) + '</td>',
+      customer: '<td>' + customer + '</td>',
+      email: '<td>' + email + '</td>',
+      cardno: '<td>' + cardno + '</td>',
+      amount: '<td>' + esc(String(amount)) + '</td>',
+      icopay: '<td>' + esc(amountHuman) + '</td>',
+      webhook: '<td>' + esc(pgNotiLogWebhookDisplayText(locale, log, merchant)) + '</td>',
+      cancel_action: '<td>' + cancelHtml + '</td>',
+      refund_action: '<td>' + refundHtml + '</td>',
+    };
+    return '<tr>' + joinListColCells(jfColFiltered, rowCellsJf) + '</tr>';
   }).join('');
   const descHtml = '<p class="cr-desc" style="margin:0 0 12px;font-size:13px;color:#4b5563;line-height:1.5;">' + esc(t(locale, 'jpay_followup_desc')) + '</p>';
-  const theadJf =
-    '<thead><tr><th>' + t(locale, 'cr_th_received_date') + '</th><th>' + t(locale, 'cr_th_received_time') + '</th><th>' + t(locale, 'cr_th_route_no') + '</th><th>' + t(locale, 'cr_th_merchant') + '</th><th>TransactionId</th><th>OrderNo</th>' + JPAY_CR_EXTRA_TH + '<th>Amount</th><th>ICOPAY</th>' + jpayWebhookThHtml(locale) + '<th>' + esc(t(locale, 'jpay_followup_th_cancel')) + '</th><th>' + esc(t(locale, 'jpay_followup_th_refund')) + '</th></tr></thead>';
-  const tableContent = descHtml + toolbarJf + '<table class="cr-table">' + theadJf + '<tbody>' + (rowsHtml || '<tr><td colspan="14" style="text-align:center;color:#777;">' + esc(t(locale, 'cr_no_data')) + '</td></tr>') + '</tbody></table>' + listPagerFooterJf;
+  const theadJf = '<thead><tr>' + jfTheadHtml + '</tr></thead>';
+  const emptyRowJf =
+    '<tr><td colspan="' + jfColFiltered.length + '" style="text-align:center;color:#777;">' + esc(t(locale, 'cr_no_data')) + '</td></tr>';
+  const tableContent =
+    descHtml +
+    toolbarJf +
+    '<div style="margin:8px 0;">' +
+    jfColHello.helloBtn +
+    '</div>' +
+    jfColHello.panelHtml +
+    '<table class="cr-table jpay-followup-table list-view-table">' +
+    theadJf +
+    '<tbody>' +
+    (rowsHtml || emptyRowJf) +
+    '</tbody></table>' +
+    listPagerFooterJf +
+    jfColHello.scriptHtml;
   res.send(
     renderCancelRefundPage(
       locale,
@@ -19710,6 +20097,32 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
     getEnv: () => logEnvResult,
     req,
   });
+  const logsResultColDefs = getLogsResultListColumnDefs(locale, logPgResult);
+  const logsResultColFiltered = filterListColDefs(req.session.member, 'logs_result', logPgResult, logsResultColDefs);
+  const logsResultColHello = buildListColHelloHtml(
+    locale,
+    esc,
+    req.session.member,
+    'logs_result',
+    logPgResult,
+    logsResultColDefs,
+    '.logs-result-table',
+  );
+  const resizeTitle = (t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;');
+  const logsResultTheadHtml = logsResultColFiltered
+    .map(
+      (c, i) =>
+        '<th data-col-key="' +
+        esc(c.key) +
+        '">' +
+        esc(c.label) +
+        '<div class="logs-result-resizer" data-col="' +
+        i +
+        '" title="' +
+        resizeTitle +
+        '"></div></th>',
+    )
+    .join('');
 
   const rows = pagedLogsResult
     .map((log) => {
@@ -19744,23 +20157,29 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
         const ic = computeIcopayAmount(amtRawIcopay, body.Currency ?? body.currency, pgK);
         if (Number.isFinite(ic)) icopayCell = formatAmountWithSeparator(ic);
       }
-      return `<tr>
-        <td>${highlightLogSearchHtml(dt.date, logSearchRaw, esc)}</td>
-        <td>TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRaw, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRaw, esc)}</span></td>
-        <td>${highlightLogSearchHtml(String(routeNo), logSearchRaw, esc)}</td>
-        <td>${highlightLogSearchHtml(envLabel, logSearchRaw, esc)}</td>
-        <td>${highlightLogSearchHtml(log.merchantId || '-', logSearchRaw, esc)}</td>
-        <td>${highlightLogSearchHtml(String(txId), logSearchRaw, esc)}</td>
-        <td>${highlightLogSearchHtml(String(orderNo), logSearchRaw, esc)}</td>
-        <td>${highlightLogSearchHtml(String(amtDisplay), logSearchRaw, esc)}</td>
-        <td>${highlightLogSearchHtml(currency || '-', logSearchRaw, esc)}</td>
-        <td>${highlightLogSearchHtml(String(icopayCell), logSearchRaw, esc)}</td>
-        <td><span class="${relayClass}">${highlightLogSearchHtml(relayLabel, logSearchRaw, esc)}</span></td>
-        <td class="col-fail-reason">${failReason ? highlightLogSearchHtml(failReason, logSearchRaw, esc) : '-'}</td>
-        <td class="col-noti-kind">${notiKindCell}</td>
-        ${logPgResult === 'jpay' ? jpayWebhookCellHtml(locale, log, esc) : ''}
-        <td>${resendBtn}</td>
-      </tr>`;
+      const lrCells = {
+        received_date: '<td>' + highlightLogSearchHtml(dt.date, logSearchRaw, esc) + '</td>',
+        received_time:
+          '<td>TH: ' +
+          highlightLogSearchHtml(dt.timeTh, logSearchRaw, esc) +
+          '<br><span class="time-jp">JP: ' +
+          highlightLogSearchHtml(dt.timeJp, logSearchRaw, esc) +
+          '</span></td>',
+        route: '<td>' + highlightLogSearchHtml(String(routeNo), logSearchRaw, esc) + '</td>',
+        env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRaw, esc) + '</td>',
+        merchant_id: '<td>' + highlightLogSearchHtml(log.merchantId || '-', logSearchRaw, esc) + '</td>',
+        transaction_id: '<td>' + highlightLogSearchHtml(String(txId), logSearchRaw, esc) + '</td>',
+        order_no: '<td>' + highlightLogSearchHtml(String(orderNo), logSearchRaw, esc) + '</td>',
+        amount: '<td>' + highlightLogSearchHtml(String(amtDisplay), logSearchRaw, esc) + '</td>',
+        currency: '<td>' + highlightLogSearchHtml(currency || '-', logSearchRaw, esc) + '</td>',
+        icopay: '<td>' + highlightLogSearchHtml(String(icopayCell), logSearchRaw, esc) + '</td>',
+        success: '<td><span class="' + relayClass + '">' + highlightLogSearchHtml(relayLabel, logSearchRaw, esc) + '</span></td>',
+        fail_reason: '<td class="col-fail-reason">' + (failReason ? highlightLogSearchHtml(failReason, logSearchRaw, esc) : '-') + '</td>',
+        noti_kind: '<td class="col-noti-kind">' + notiKindCell + '</td>',
+        webhook: jpayWebhookCellHtml(locale, log, esc),
+        resend: '<td>' + resendBtn + '</td>',
+      };
+      return '<tr>' + logsResultColFiltered.map((c) => lrCells[c.key] || '').join('') + '</tr>';
     })
     .join('');
 
@@ -19840,6 +20259,8 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       ${resendMsg}
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_pg_result')} (${totalCountResult})</h1>
       ${hubHtmlLogsResult}
+      <div style="margin:8px 0;">${logsResultColHello.helloBtn}</div>
+      ${logsResultColHello.panelHtml}
       <p class="admin-page-desc">${t(locale, 'logs_result_desc')}</p>
       ${(() => {
         const fh =
@@ -19870,36 +20291,19 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
           '</form>'
         );
       })()}
-      <table class="logs-result-table">
-        <colgroup>
-          <col id="logs-result-col-0" style="width:7%;" /><col id="logs-result-col-1" style="width:8%;" /><col id="logs-result-col-2" style="width:4%;" /><col id="logs-result-col-3" style="width:4%;" /><col id="logs-result-col-4" style="width:11%;" />
-          <col id="logs-result-col-5" style="width:7%;" /><col id="logs-result-col-6" style="width:10%;" /><col id="logs-result-col-7" style="width:8%;" /><col id="logs-result-col-8" style="width:5%;" /><col id="logs-result-col-9" style="width:6%;" />
-          <col id="logs-result-col-10" style="width:5%;" /><col id="logs-result-col-11" style="width:10%;" /><col id="logs-result-col-12" style="width:5%;" />${logPgResult === 'jpay' ? '<col id="logs-result-col-webhook" style="width:6%;" />' : ''}<col id="logs-result-col-13" style="width:10%;" />
-        </colgroup>
+      <table class="logs-result-table list-view-table">
+        <colgroup>${logsResultColFiltered.map((_, i) => '<col id="logs-result-col-' + i + '" style="width:auto;" />').join('')}</colgroup>
         <thead>
           <tr>
-            <th>${t(locale, 'pg_logs_th_received_date')}<div class="logs-result-resizer" data-col="0" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>${t(locale, 'pg_logs_th_received_time')}<div class="logs-result-resizer" data-col="1" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>route<div class="logs-result-resizer" data-col="2" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>${t(locale, 'common_env')}<div class="logs-result-resizer" data-col="3" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>merchant id<div class="logs-result-resizer" data-col="4" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>TransactionId<div class="logs-result-resizer" data-col="5" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>OrderNo<div class="logs-result-resizer" data-col="6" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>Amount<div class="logs-result-resizer" data-col="7" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>Currency<div class="logs-result-resizer" data-col="8" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>ICOPAY<div class="logs-result-resizer" data-col="9" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>${t(locale, 'dev_result_th_success')}<div class="logs-result-resizer" data-col="10" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>${t(locale, 'cr_th_fail_reason')}<div class="logs-result-resizer" data-col="11" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            <th>${t(locale, 'logs_result_th_noti_kind')}<div class="logs-result-resizer" data-col="12" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
-            ${logPgResult === 'jpay' ? '<th>' + (t(locale, 'merchants_dealmai_webhook') || '웹훅') + '</th>' : ''}
-            <th>${t(locale, 'pg_logs_th_resend')}<div class="logs-result-resizer" data-col="13" title="${(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절').replace(/"/g, '&quot;')}"></div></th>
+            ${logsResultTheadHtml}
           </tr>
         </thead>
         <tbody>
-          ${rows || '<tr><td colspan="' + (logPgResult === 'jpay' ? 15 : 14) + '" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
+          ${rows || '<tr><td colspan="' + logsResultColFiltered.length + '" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
       ${logPagerFooterResult}
+      ${logsResultColHello.scriptHtml}
       <script>
       (function(){
         var table = document.querySelector('.logs-result-table');
@@ -23041,6 +23445,21 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
   const pageNumInternal = Math.min(page, totalPagesInternal);
   const pagedLogsInternal = isTodayOnly ? filteredForDateInternal : filteredForDateInternal.slice((pageNumInternal - 1) * perPage, pageNumInternal * perPage);
 
+  const internalColDefs = getInternalLogsListColumnDefs(locale);
+  const internalColFiltered = filterListColDefs(req.session.member, 'internal_logs', logPgInternal, internalColDefs);
+  const internalColHello = buildListColHelloHtml(
+    locale,
+    esc,
+    req.session.member,
+    'internal_logs',
+    logPgInternal,
+    internalColDefs,
+    '.internal-logs-table',
+  );
+  const internalTheadHtml = internalColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
+
   const rows = pagedLogsInternal
     .map(({ log, realIndex }, i) => {
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
@@ -23058,15 +23477,22 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
         ? `<form method="post" action="/admin/internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${internalResendKind}" />${logPgInternal === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend">${internalResendLabel}</button></form>`
         : '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawInternal, esc) + '</span>';
       const internalTargetName = getInternalTargetName(log.internalTargetId);
-      return `<tr>
-        <td class="col-date">${highlightLogSearchHtml(dt.date, logSearchRawInternal, esc)}</td>
-        <td class="col-time">TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawInternal, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawInternal, esc)}</span></td>
-        <td class="col-narrow">${highlightLogSearchHtml(internalTargetName, logSearchRawInternal, esc)}</td>
-        <td class="col-status"><span class="${internalClass}">${highlightLogSearchHtml(internalLabel, logSearchRawInternal, esc)}</span></td>
-        <td class="col-header"><pre>${highlightLogSearchHtml(jsonHeader, logSearchRawInternal, esc)}</pre></td>
-        <td class="col-json"><pre>${highlightLogSearchHtml(jsonValue, logSearchRawInternal, esc)}</pre></td>
-        <td class="col-action">${resendBtn}</td>
-      </tr>`;
+      const rowCellsInternal = {
+        received_date: '<td class="col-date">' + highlightLogSearchHtml(dt.date, logSearchRawInternal, esc) + '</td>',
+        received_time:
+          '<td class="col-time">TH: ' +
+          highlightLogSearchHtml(dt.timeTh, logSearchRawInternal, esc) +
+          '<br><span class="time-jp">JP: ' +
+          highlightLogSearchHtml(dt.timeJp, logSearchRawInternal, esc) +
+          '</span></td>',
+        internal_target: '<td class="col-narrow">' + highlightLogSearchHtml(internalTargetName, logSearchRawInternal, esc) + '</td>',
+        internal_receive:
+          '<td class="col-status"><span class="' + internalClass + '">' + highlightLogSearchHtml(internalLabel, logSearchRawInternal, esc) + '</span></td>',
+        header: '<td class="col-header"><pre>' + highlightLogSearchHtml(jsonHeader, logSearchRawInternal, esc) + '</pre></td>',
+        value: '<td class="col-json"><pre>' + highlightLogSearchHtml(jsonValue, logSearchRawInternal, esc) + '</pre></td>',
+        resend: '<td class="col-action">' + resendBtn + '</td>',
+      };
+      return '<tr>' + joinListColCells(internalColFiltered, rowCellsInternal) + '</tr>';
     })
     .join('');
 
@@ -23084,7 +23510,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'internal_logs_title')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
@@ -23154,27 +23580,19 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
           '</form>'
         );
       })()}
-      <table>
-        <colgroup><col style="width:7%;" /><col style="width:9%;" /><col style="width:12%;" /><col style="width:5%;" /><col style="width:20%;" /><col style="width:39%;" /><col style="width:10%;" /></colgroup>
-        <thead>
-          <tr>
-            <th>${t(locale, 'pg_logs_th_received_date')}</th>
-            <th>${t(locale, 'pg_logs_th_received_time')}</th>
-            <th>${t(locale, 'cr_th_internal_target')}</th>
-            <th>${t(locale, 'cr_th_internal_receive')}</th>
-            <th>${t(locale, 'internal_logs_header')}</th>
-            <th>${t(locale, 'internal_logs_value')}</th>
-            <th>${t(locale, 'pg_logs_th_resend')}</th>
-          </tr>
-        </thead>
+      <div style="margin:8px 0;">${internalColHello.helloBtn}</div>
+      ${internalColHello.panelHtml}
+      <table class="internal-logs-table list-view-table">
+        <thead><tr>${internalTheadHtml}</tr></thead>
         <tbody>
-          ${rows || `<tr><td colspan="7" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="${internalColFiltered.length}" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
         </tbody>
       </table>
       ${logPagerFooterInternal}
       </div>
     </main>
   </div>
+  ${internalColHello.scriptHtml}
 </body>
 </html>`);
 });
@@ -23280,6 +23698,21 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
   const pageNumInternalResult = Math.min(page, totalPagesInternalResult);
   const pagedLogsInternal = isTodayOnly ? filteredForDateInternal : filteredForDateInternal.slice((pageNumInternalResult - 1) * perPage, pageNumInternalResult * perPage);
 
+  const intResColDefs = getInternalResultListColumnDefs(locale);
+  const intResColFiltered = filterListColDefs(req.session.member, 'internal_result', logPgIntRes, intResColDefs);
+  const intResColHello = buildListColHelloHtml(
+    locale,
+    esc,
+    req.session.member,
+    'internal_result',
+    logPgIntRes,
+    intResColDefs,
+    '.internal-result-table',
+  );
+  const intResTheadHtml = intResColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
+
   const rows = pagedLogsInternal
     .map(({ log, realIndex }, i) => {
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
@@ -23297,19 +23730,26 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       const payStatus = payload.PaymentStatus != null ? payload.PaymentStatus : '-';
       const statusDesc = payStatus === '2' || payStatus === 2 ? t(locale, 'status_void') : payStatus === '9' || payStatus === 9 ? t(locale, 'status_refund') : payStatus === '1' || payStatus === 1 ? t(locale, 'status_payment') : payStatus;
       const internalTargetName = getInternalTargetName(log.internalTargetId);
-      return `<tr>
-        <td>${highlightLogSearchHtml(dt.date, logSearchRawIntRes, esc)}</td>
-        <td>TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawIntRes, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawIntRes, esc)}</span></td>
-        <td>${highlightLogSearchHtml(String(txId), logSearchRawIntRes, esc)}</td>
-        <td>${highlightLogSearchHtml(String(statusDesc), logSearchRawIntRes, esc)}</td>
-        <td>${highlightLogSearchHtml(String(log.routeNo || '-'), logSearchRawIntRes, esc)}</td>
-        <td>${highlightLogSearchHtml(internalTargetName, logSearchRawIntRes, esc)}</td>
-        <td>${highlightLogSearchHtml(envLabel, logSearchRawIntRes, esc)}</td>
-        <td>${highlightLogSearchHtml(log.merchantId || '-', logSearchRawIntRes, esc)}</td>
-        <td><span class="${statusClass}">${highlightLogSearchHtml(label, logSearchRawIntRes, esc)}</span></td>
-        <td class="col-fail-reason">-</td>
-        <td>${resendBtn}</td>
-      </tr>`;
+      const rowCellsIntRes = {
+        received_date: '<td>' + highlightLogSearchHtml(dt.date, logSearchRawIntRes, esc) + '</td>',
+        received_time:
+          '<td>TH: ' +
+          highlightLogSearchHtml(dt.timeTh, logSearchRawIntRes, esc) +
+          '<br><span class="time-jp">JP: ' +
+          highlightLogSearchHtml(dt.timeJp, logSearchRawIntRes, esc) +
+          '</span></td>',
+        transaction_id: '<td>' + highlightLogSearchHtml(String(txId), logSearchRawIntRes, esc) + '</td>',
+        type: '<td>' + highlightLogSearchHtml(String(statusDesc), logSearchRawIntRes, esc) + '</td>',
+        route: '<td>' + highlightLogSearchHtml(String(log.routeNo || '-'), logSearchRawIntRes, esc) + '</td>',
+        internal_target: '<td>' + highlightLogSearchHtml(internalTargetName, logSearchRawIntRes, esc) + '</td>',
+        env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRawIntRes, esc) + '</td>',
+        merchant_id: '<td>' + highlightLogSearchHtml(log.merchantId || '-', logSearchRawIntRes, esc) + '</td>',
+        internal_delivery:
+          '<td><span class="' + statusClass + '">' + highlightLogSearchHtml(label, logSearchRawIntRes, esc) + '</span></td>',
+        fail_reason: '<td class="col-fail-reason">-</td>',
+        resend: '<td>' + resendBtn + '</td>',
+      };
+      return '<tr>' + joinListColCells(intResColFiltered, rowCellsIntRes) + '</tr>';
     })
     .join('');
 
@@ -23327,7 +23767,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'nav_internal_result')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; }
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
@@ -23400,30 +23840,19 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
           '</form>'
         );
       })()}
-      <table>
-        <thead>
-          <tr>
-            <th>${t(locale, 'pg_logs_th_received_date')}</th>
-            <th>${t(locale, 'pg_logs_th_received_time')}</th>
-            <th>TransactionId</th>
-            <th>${t(locale, 'cr_th_type')}</th>
-            <th>route</th>
-            <th>${t(locale, 'cr_th_internal_target')}</th>
-            <th>${t(locale, 'common_env')}</th>
-            <th>merchant id</th>
-            <th>${t(locale, 'cr_th_internal_delivery')}</th>
-            <th>${t(locale, 'cr_th_fail_reason')}</th>
-            <th>${t(locale, 'pg_logs_th_resend')}</th>
-          </tr>
-        </thead>
+      <div style="margin:8px 0;">${intResColHello.helloBtn}</div>
+      ${intResColHello.panelHtml}
+      <table class="internal-result-table list-view-table">
+        <thead><tr>${intResTheadHtml}</tr></thead>
         <tbody>
-          ${rows || '<tr><td colspan="11" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
+          ${rows || '<tr><td colspan="' + intResColFiltered.length + '" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
       ${logPagerFooterInternalResult}
       </div>
     </main>
   </div>
+  ${intResColHello.scriptHtml}
 </body>
 </html>`);
 });
@@ -23489,6 +23918,20 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
   const pagedLogsDevInternal = isTodayOnlyDev
     ? filteredSearchDev
     : filteredSearchDev.slice((pageNumDevInternal - 1) * perPageDev, pageNumDevInternal * perPageDev);
+  const devIntColDefs = getDevInternalLogsListColumnDefs(locale);
+  const devIntColFiltered = filterListColDefs(req.session.member, 'dev_internal_logs', logPgDev, devIntColDefs);
+  const devIntColHello = buildListColHelloHtml(
+    locale,
+    esc,
+    req.session.member,
+    'dev_internal_logs',
+    logPgDev,
+    devIntColDefs,
+    '.dev-internal-table',
+  );
+  const devIntTheadHtml = devIntColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
   const rows = pagedLogsDevInternal
     .map(({ log, realIndex }, i) => {
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
@@ -23506,15 +23949,22 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
         ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDev === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend">${devResendLabel}</button></form>`
         : '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawDev, esc) + '</span>';
       const upStr = devInternalUpstreamCellText(log);
-      return `<tr>
-        <td class="col-date">${highlightLogSearchHtml(dt.date, logSearchRawDev, esc)}</td>
-        <td class="col-time">TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawDev, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawDev, esc)}</span></td>
-        <td class="col-status"><span class="${internalClass}">${highlightLogSearchHtml(internalLabel, logSearchRawDev, esc)}</span></td>
-        <td class="col-upstream"><pre class="cell-upstream-pre">${upStr ? esc(upStr) : '—'}</pre></td>
-        <td class="col-header"><pre>${highlightLogSearchHtml(jsonHeader, logSearchRawDev, esc)}</pre></td>
-        <td class="col-json"><pre>${highlightLogSearchHtml(jsonValue, logSearchRawDev, esc)}</pre></td>
-        <td class="col-action">${resendBtn}</td>
-      </tr>`;
+      const rowCellsDevInt = {
+        received_date: '<td class="col-date">' + highlightLogSearchHtml(dt.date, logSearchRawDev, esc) + '</td>',
+        received_time:
+          '<td class="col-time">TH: ' +
+          highlightLogSearchHtml(dt.timeTh, logSearchRawDev, esc) +
+          '<br><span class="time-jp">JP: ' +
+          highlightLogSearchHtml(dt.timeJp, logSearchRawDev, esc) +
+          '</span></td>',
+        delivery:
+          '<td class="col-status"><span class="' + internalClass + '">' + highlightLogSearchHtml(internalLabel, logSearchRawDev, esc) + '</span></td>',
+        upstream: '<td class="col-upstream"><pre class="cell-upstream-pre">' + (upStr ? esc(upStr) : '—') + '</pre></td>',
+        header: '<td class="col-header"><pre>' + highlightLogSearchHtml(jsonHeader, logSearchRawDev, esc) + '</pre></td>',
+        value: '<td class="col-json"><pre>' + highlightLogSearchHtml(jsonValue, logSearchRawDev, esc) + '</pre></td>',
+        resend: '<td class="col-action">' + resendBtn + '</td>',
+      };
+      return '<tr>' + joinListColCells(devIntColFiltered, rowCellsDevInt) + '</tr>';
     })
     .join('');
 
@@ -23532,7 +23982,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'nav_dev_internal_noti_log')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
@@ -23606,27 +24056,19 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
           '</form>'
         );
       })()}
-      <table>
-        <colgroup><col style="width:8%;" /><col style="width:9%;" /><col style="width:6%;" /><col style="width:14%;" /><col style="width:17%;" /><col style="width:34%;" /><col style="width:8%;" /></colgroup>
-        <thead>
-          <tr>
-            <th>${t(locale, 'pg_logs_th_received_date')}</th>
-            <th>${t(locale, 'pg_logs_th_received_time')}</th>
-            <th>${t(locale, 'dev_noti_th_delivery')}</th>
-            <th>${t(locale, 'dev_internal_th_upstream')}</th>
-            <th>${t(locale, 'internal_logs_header')}</th>
-            <th>${t(locale, 'internal_logs_value')}</th>
-            <th>${t(locale, 'pg_logs_th_resend')}</th>
-          </tr>
-        </thead>
+      <div style="margin:8px 0;">${devIntColHello.helloBtn}</div>
+      ${devIntColHello.panelHtml}
+      <table class="dev-internal-table list-view-table">
+        <thead><tr>${devIntTheadHtml}</tr></thead>
         <tbody>
-          ${rows || `<tr><td colspan="7" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="${devIntColFiltered.length}" style="text-align:center;color:#777;">${t(locale, 'internal_logs_empty')}</td></tr>`}
         </tbody>
       </table>
       ${logPagerFooterDevInternal}
       </div>
     </main>
   </div>
+  ${devIntColHello.scriptHtml}
 </body>
 </html>`);
 });
@@ -23710,6 +24152,20 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
     perPage,
     hrefFor: (o) => '/admin/dealmai-webhook?' + buildQueryString({ ...(q || {}), ...o }),
   });
+  const dwColDefs = getDealmaiWebhookListColumnDefs(locale);
+  const dwColFiltered = filterListColDefs(req.session.member, 'dealmai_webhook_logs', logPg, dwColDefs);
+  const dwColHello = buildListColHelloHtml(
+    locale,
+    esc,
+    req.session.member,
+    'dealmai_webhook_logs',
+    logPg,
+    dwColDefs,
+    '.dealmai-webhook-table',
+  );
+  const dwTheadHtml = dwColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
   const rows = pageSlice
     .map(({ log, realIndex }) => {
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
@@ -23728,34 +24184,36 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
         log.webhookTargetUrl && (log.payload || log.pgSource)
           ? `<form method="post" action="/admin/dealmai-webhook/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="source" value="${logPg === 'jpay' ? 'jpay' : 'chillpay'}" /><button type="submit" class="btn-resend">${esc(t(locale, 'pg_logs_btn_resend'))}</button></form>`
           : '—';
-      return `<tr>
-        <td>${esc(dt.date)}</td>
-        <td>${esc(dt.timeTh)}</td>
-        <td>${esc(event)}</td>
-        <td>${esc(log.merchantId || '')}</td>
-        <td>${esc(txId)}</td>
-        <td>${esc(statusLabel)}</td>
-        <td>${log.webhookHttpStatus != null ? esc(String(log.webhookHttpStatus)) : '—'}</td>
-        <td style="font-size:11px;word-break:break-all;text-align:left;">${esc((log.webhookTargetUrl || '').slice(0, 80))}</td>
-        <td>${resendBtn}</td>
-      </tr>`;
+      const rowCellsDw = {
+        received_date: '<td>' + esc(dt.date) + '</td>',
+        received_time: '<td>' + esc(dt.timeTh) + '</td>',
+        event: '<td>' + esc(event) + '</td>',
+        merchant: '<td>' + esc(log.merchantId || '') + '</td>',
+        transaction_id: '<td>' + esc(txId) + '</td>',
+        delivery: '<td>' + esc(statusLabel) + '</td>',
+        http_status: '<td>' + (log.webhookHttpStatus != null ? esc(String(log.webhookHttpStatus)) : '—') + '</td>',
+        url:
+          '<td style="font-size:11px;word-break:break-all;text-align:left;">' + esc((log.webhookTargetUrl || '').slice(0, 80)) + '</td>',
+        resend: '<td>' + resendBtn + '</td>',
+      };
+      return '<tr>' + joinListColCells(dwColFiltered, rowCellsDw) + '</tr>';
     })
     .join('');
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head><meta charset="UTF-8" /><title>${esc(t(locale, 'nav_dealmai_webhook_log'))}</title>
-<style>${ADMIN_PAGE_DESC_BOX_CSS} body{font-family:system-ui,sans-serif;margin:0;background:#edf2f7;} .layout{display:flex;min-height:100vh;} .main{flex:1;padding:16px 24px;} table{border-collapse:collapse;width:100%;background:#fff;} th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;text-align:center;} th{background:#e5f0ff;} .btn-resend{padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;}</style>
+<style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LIST_COL_GUIDE_CSS} body{font-family:system-ui,sans-serif;margin:0;background:#edf2f7;} .layout{display:flex;min-height:100vh;} .main{flex:1;padding:16px 24px;} table{border-collapse:collapse;width:100%;background:#fff;} th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;text-align:center;} th{background:#e5f0ff;} .btn-resend{padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;}</style>
 </head>
 <body><div class="layout">
 ${getAdminSidebar(locale, adminUser, req.session.member, '/admin/dealmai-webhook', req)}
 <main class="main">
 ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, '/admin/dealmai-webhook')}
 <div class="cr-title-hub-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:14px;"><h1>${esc(t(locale, 'nav_dealmai_webhook_log'))} (${totalCount})</h1>${hubHtml}</div>
-<table><thead><tr>
-<th>${esc(t(locale, 'pg_logs_th_received_date'))}</th><th>${esc(t(locale, 'pg_logs_th_received_time'))}</th><th>Event</th><th>${esc(t(locale, 'cr_th_merchant'))}</th><th>TransactionId</th><th>${esc(t(locale, 'dev_noti_th_delivery'))}</th><th>HTTP</th><th>URL</th><th>${esc(t(locale, 'pg_logs_th_resend'))}</th>
-</tr></thead><tbody>${rows || '<tr><td colspan="9" style="text-align:center;color:#777;">' + esc(t(locale, 'internal_logs_empty')) + '</td></tr>'}</tbody></table>
+<div style="margin:8px 0;">${dwColHello.helloBtn}</div>
+${dwColHello.panelHtml}
+<table class="dealmai-webhook-table list-view-table"><thead><tr>${dwTheadHtml}</tr></thead><tbody>${rows || '<tr><td colspan="' + dwColFiltered.length + '" style="text-align:center;color:#777;">' + esc(t(locale, 'internal_logs_empty')) + '</td></tr>'}</tbody></table>
 ${logPagerFooter}
-</main></div></body></html>`);
+</main></div>${dwColHello.scriptHtml}</body></html>`);
 });
 
 app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webhook_result'), (req, res) => {
@@ -23792,6 +24250,20 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
   const okN = logs.filter((l) => String(l.webhookDeliveryStatus || '').toLowerCase() === 'ok').length;
   const failN = logs.filter((l) => String(l.webhookDeliveryStatus || '').toLowerCase() === 'fail').length;
   const skipN = logs.filter((l) => String(l.webhookDeliveryStatus || '').toLowerCase() === 'skip').length;
+  const dwrColDefs = getDealmaiWebhookResultListColumnDefs(locale);
+  const dwrColFiltered = filterListColDefs(req.session.member, 'dealmai_webhook_result', logPg, dwrColDefs);
+  const dwrColHello = buildListColHelloHtml(
+    locale,
+    esc,
+    req.session.member,
+    'dealmai_webhook_result',
+    logPg,
+    dwrColDefs,
+    '.dealmai-webhook-result-table',
+  );
+  const dwrTheadHtml = dwrColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
   const rows = logs.slice(0, 100).map((log) => {
     const realIndex = DEALMAI_WEBHOOK_LOGS.indexOf(log);
     const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
@@ -23810,11 +24282,21 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
       log.webhookTargetUrl && (log.payload || log.pgSource)
         ? `<form method="post" action="/admin/dealmai-webhook/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="result" /><input type="hidden" name="source" value="${logPg === 'jpay' ? 'jpay' : 'chillpay'}" /><button type="submit" class="btn-resend">${esc(t(locale, 'pg_logs_btn_resend'))}</button></form>`
         : '—';
-    return `<tr><td>${esc(dt.date)}</td><td>${esc(dt.timeTh)}</td><td>${esc(event)}</td><td>${esc(log.merchantId || '')}</td><td>${esc(txId)}</td><td>${esc(statusLabel)}</td><td>${log.webhookHttpStatus != null ? esc(String(log.webhookHttpStatus)) : '—'}</td><td>${resendBtn}</td></tr>`;
+    const rowCellsDwr = {
+      received_date: '<td>' + esc(dt.date) + '</td>',
+      received_time: '<td>' + esc(dt.timeTh) + '</td>',
+      event: '<td>' + esc(event) + '</td>',
+      merchant: '<td>' + esc(log.merchantId || '') + '</td>',
+      transaction_id: '<td>' + esc(txId) + '</td>',
+      delivery: '<td>' + esc(statusLabel) + '</td>',
+      http_status: '<td>' + (log.webhookHttpStatus != null ? esc(String(log.webhookHttpStatus)) : '—') + '</td>',
+      resend: '<td>' + resendBtn + '</td>',
+    };
+    return '<tr>' + joinListColCells(dwrColFiltered, rowCellsDwr) + '</tr>';
   }).join('');
   res.send(`<!DOCTYPE html>
 <html lang="${locale}"><head><meta charset="UTF-8" /><title>${esc(t(locale, 'nav_dealmai_webhook_result'))}</title>
-<style>${ADMIN_PAGE_DESC_BOX_CSS} body{font-family:system-ui,sans-serif;margin:0;background:#edf2f7;} .layout{display:flex;min-height:100vh;} .main{flex:1;padding:16px 24px;} table{border-collapse:collapse;width:100%;background:#fff;} th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;text-align:center;} th{background:#e5f0ff;} .summary{display:flex;gap:16px;margin-bottom:12px;font-size:14px;} .btn-resend{padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;}</style>
+<style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LIST_COL_GUIDE_CSS} body{font-family:system-ui,sans-serif;margin:0;background:#edf2f7;} .layout{display:flex;min-height:100vh;} .main{flex:1;padding:16px 24px;} table{border-collapse:collapse;width:100%;background:#fff;} th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;text-align:center;} th{background:#e5f0ff;} .summary{display:flex;gap:16px;margin-bottom:12px;font-size:14px;} .btn-resend{padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;}</style>
 </head><body><div class="layout">
 ${getAdminSidebar(locale, adminUser, req.session.member, '/admin/dealmai-webhook-result', req)}
 <main class="main">
@@ -23822,9 +24304,11 @@ ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, '/admin/dealmai-we
 ${resendMsg}
 <div class="cr-title-hub-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:14px;"><h1>${esc(t(locale, 'nav_dealmai_webhook_result'))}</h1>${hubHtml}</div>
 <div class="summary"><span>OK: ${okN}</span><span>FAIL: ${failN}</span><span>SKIP: ${skipN}</span></div>
-<table><thead><tr><th>${esc(t(locale, 'pg_logs_th_received_date'))}</th><th>${esc(t(locale, 'pg_logs_th_received_time'))}</th><th>Event</th><th>${esc(t(locale, 'cr_th_merchant'))}</th><th>TransactionId</th><th>${esc(t(locale, 'dev_noti_th_delivery'))}</th><th>HTTP</th><th>${esc(t(locale, 'pg_logs_th_resend'))}</th></tr></thead>
-<tbody>${rows || '<tr><td colspan="8" style="text-align:center;color:#777;">' + esc(t(locale, 'cr_no_data')) + '</td></tr>'}</tbody></table>
-</main></div></body></html>`);
+<div style="margin:8px 0;">${dwrColHello.helloBtn}</div>
+${dwrColHello.panelHtml}
+<table class="dealmai-webhook-result-table list-view-table"><thead><tr>${dwrTheadHtml}</tr></thead>
+<tbody>${rows || '<tr><td colspan="' + dwrColFiltered.length + '" style="text-align:center;color:#777;">' + esc(t(locale, 'cr_no_data')) + '</td></tr>'}</tbody></table>
+</main></div>${dwrColHello.scriptHtml}</body></html>`);
 });
 
 app.post('/admin/dealmai-webhook/resend', requireAuth, requirePageAny(['dealmai_webhook_logs', 'dealmai_webhook_result']), async (req, res) => {
@@ -24097,6 +24581,21 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   const pageNumDevResult = Math.min(page, totalPagesDevResult);
   const pagedLogsDev = isTodayOnly ? filteredForDateDev : filteredForDateDev.slice((pageNumDevResult - 1) * perPage, pageNumDevResult * perPage);
 
+  const devResColDefs = getDevInternalResultListColumnDefs(locale);
+  const devResColFiltered = filterListColDefs(req.session.member, 'dev_result', logPgDevRes, devResColDefs);
+  const devResColHello = buildListColHelloHtml(
+    locale,
+    esc,
+    req.session.member,
+    'dev_result',
+    logPgDevRes,
+    devResColDefs,
+    '.dev-internal-result-table',
+  );
+  const devResTheadHtml = devResColFiltered
+    .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
+    .join('');
+
   const rows = pagedLogsDev
     .map(({ log, realIndex }, i) => {
       const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
@@ -24111,16 +24610,23 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
         ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="dev-internal-result" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDevRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${devResendLabel}</button></form>`
         : '-';
       const upStrRes = devInternalUpstreamCellText(log);
-      return `<tr>
-        <td>${highlightLogSearchHtml(dt.date, logSearchRawDevRes, esc)}</td>
-        <td>TH: ${highlightLogSearchHtml(dt.timeTh, logSearchRawDevRes, esc)}<br><span class="time-jp">JP: ${highlightLogSearchHtml(dt.timeJp, logSearchRawDevRes, esc)}</span></td>
-        <td>${highlightLogSearchHtml(String(log.routeNo || '-'), logSearchRawDevRes, esc)}</td>
-        <td>${highlightLogSearchHtml(envLabel, logSearchRawDevRes, esc)}</td>
-        <td>${highlightLogSearchHtml(log.merchantId || '-', logSearchRawDevRes, esc)}</td>
-        <td><span class="${statusClass}">${highlightLogSearchHtml(label, logSearchRawDevRes, esc)}</span></td>
-        <td class="col-fail-reason"><pre class="cell-upstream-pre">${upStrRes ? esc(upStrRes) : '—'}</pre></td>
-        <td>${resendBtn}</td>
-      </tr>`;
+      const rowCellsDevRes = {
+        received_date: '<td>' + highlightLogSearchHtml(dt.date, logSearchRawDevRes, esc) + '</td>',
+        received_time:
+          '<td>TH: ' +
+          highlightLogSearchHtml(dt.timeTh, logSearchRawDevRes, esc) +
+          '<br><span class="time-jp">JP: ' +
+          highlightLogSearchHtml(dt.timeJp, logSearchRawDevRes, esc) +
+          '</span></td>',
+        route: '<td>' + highlightLogSearchHtml(String(log.routeNo || '-'), logSearchRawDevRes, esc) + '</td>',
+        env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRawDevRes, esc) + '</td>',
+        merchant_id: '<td>' + highlightLogSearchHtml(log.merchantId || '-', logSearchRawDevRes, esc) + '</td>',
+        delivery: '<td><span class="' + statusClass + '">' + highlightLogSearchHtml(label, logSearchRawDevRes, esc) + '</span></td>',
+        upstream:
+          '<td class="col-fail-reason"><pre class="cell-upstream-pre">' + (upStrRes ? esc(upStrRes) : '—') + '</pre></td>',
+        resend: '<td>' + resendBtn + '</td>',
+      };
+      return '<tr>' + joinListColCells(devResColFiltered, rowCellsDevRes) + '</tr>';
     })
     .join('');
 
@@ -24138,7 +24644,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'nav_dev_result')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; }
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
@@ -24215,27 +24721,19 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
           '</form>'
         );
       })()}
-      <table>
-        <thead>
-          <tr>
-            <th>${t(locale, 'pg_logs_th_received_date')}</th>
-            <th>${t(locale, 'pg_logs_th_received_time')}</th>
-            <th>route</th>
-            <th>${t(locale, 'common_env')}</th>
-            <th>merchant id</th>
-            <th>${t(locale, 'dev_noti_th_delivery')}</th>
-            <th>${t(locale, 'dev_internal_th_upstream')}</th>
-            <th>${t(locale, 'pg_logs_th_resend')}</th>
-          </tr>
-        </thead>
+      <div style="margin:8px 0;">${devResColHello.helloBtn}</div>
+      ${devResColHello.panelHtml}
+      <table class="dev-internal-result-table list-view-table">
+        <thead><tr>${devResTheadHtml}</tr></thead>
         <tbody>
-          ${rows || '<tr><td colspan="8" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
+          ${rows || '<tr><td colspan="' + devResColFiltered.length + '" style="text-align:center;color:#777;">' + t(locale, 'cr_no_data') + '</td></tr>'}
         </tbody>
       </table>
       ${logPagerFooterDevResult}
       </div>
     </main>
   </div>
+  ${devResColHello.scriptHtml}
 </body>
 </html>`);
 });
