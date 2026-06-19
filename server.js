@@ -3094,7 +3094,7 @@ function jpayRawRelayFromNotiLog(log) {
       : 'application/x-www-form-urlencoded';
   const rawBody =
     log && log.rawBody != null && String(log.rawBody).trim() !== '' ? String(log.rawBody) : undefined;
-  return { body, contentType, rawBody };
+  return normalizeJpayDevRelayPack({ body, contentType, rawBody });
 }
 
 /** JPAY 수동 무효·환불(후속관리): 결제 성공 원문을 취소/환불 노티 형태로 보강. rawBody는 필드 변경 시 무시. */
@@ -3111,7 +3111,153 @@ function buildJpayManualVoidRefundRelayPack(log, type) {
   return { body, contentType: base.contentType, rawBody: undefined };
 }
 
-/** JPAY: 전산/개발 로그에서 재전송용 relayPack (internal log에는 rawBody 전체 미저장) */
+/** JPAY 본문이 ICOPAY/ChillPay 변환 형태(TransactionId·CustomerId 등)인지 */
+function bodyLooksLikeIcopayChillpayNotifyShape(body) {
+  if (!body || typeof body !== 'object') return false;
+  const hasCp =
+    body.TransactionId != null ||
+    body.transactionId != null ||
+    body.CustomerId != null ||
+    body.customerId != null ||
+    body.PaymentStatus != null ||
+    body.paymentStatus != null ||
+    body.CheckSum != null ||
+    body.checkSum != null;
+  const hasJpayMid = body.memberid != null || body.memberId != null;
+  return hasCp && !hasJpayMid;
+}
+
+/** JPAY 비동기 노티 본문 형태(memberid·orderid·returncode/transaction_id 등) */
+function bodyLooksLikeJpayNotifyShape(body) {
+  if (!body || typeof body !== 'object') return false;
+  const mid = body.memberid ?? body.memberId;
+  const oid = body.orderid ?? body.orderID ?? body.orderId;
+  const rc = body.returncode ?? body.returnCode;
+  const tid = body.transaction_id ?? body.transactionId;
+  return (
+    (mid != null && String(mid).trim() !== '') &&
+    (oid != null && String(oid).trim() !== '') &&
+    ((rc != null && String(rc).trim() !== '') || (tid != null && String(tid).trim() !== ''))
+  );
+}
+
+/** ChillPay/ICOPAY 변환 JSON·폼 객체 → JPAY 노티 필드명으로 복원(재전송·잘못 저장된 payload 보정) */
+function icopayChillpayShapeToJpayNotifyBody(b) {
+  if (!b || typeof b !== 'object') return {};
+  if (bodyLooksLikeJpayNotifyShape(b)) return { ...b };
+  const out = {};
+  const mid = b.memberid ?? b.memberId ?? b.CustomerId ?? b.customerId;
+  if (mid != null && String(mid).trim()) out.memberid = String(mid).trim();
+  const oid = b.orderid ?? b.orderID ?? b.orderId ?? b.OrderNo ?? b.orderNo;
+  if (oid != null && String(oid).trim()) out.orderid = String(oid).trim();
+  const tid = b.transaction_id ?? b.transactionId ?? b.TransactionId;
+  if (tid != null && String(tid).trim()) out.transaction_id = String(tid).trim();
+  const rc = b.returncode ?? b.returnCode;
+  if (rc != null && String(rc).trim()) {
+    out.returncode = String(rc).trim();
+  } else if (b.PaymentStatus != null && b.PaymentStatus !== '') {
+    const ps = Number(b.PaymentStatus);
+    if (ps === 1) out.returncode = '00';
+    else if (ps === 2) out.returncode = '02';
+    else out.returncode = String(b.PaymentStatus);
+  }
+  const sign = b.sign ?? b.CheckSum ?? b.checkSum;
+  if (sign != null && String(sign).trim()) out.sign = String(sign).trim();
+  const amt = b.true_amount ?? b.trueAmount ?? b.amount ?? b.Amount;
+  if (amt != null && String(amt).trim()) out.amount = String(amt).trim();
+  const cur = b.currency ?? b.Currency ?? b.fee_type;
+  if (cur != null && String(cur).trim()) {
+    out.currency = String(cur).trim();
+    if (out.fee_type == null) out.fee_type = String(cur).trim();
+  }
+  const dt = b.datetime ?? b.PaymentDate ?? b.paymentDate;
+  if (dt != null && String(dt).trim()) out.datetime = String(dt).trim();
+  for (const k of ['attach', 'trade_state', 'tradeState', 'paymentstatus', 'paymentStatus', 'bankcode', 'bank_code']) {
+    if (b[k] != null && b[k] !== '' && out[k] == null) out[k] = String(b[k]);
+  }
+  return out;
+}
+
+/** JPAY 노티 객체 → application/x-www-form-urlencoded 원문(ChillPay 필드명 제외) */
+function jpayNotifyBodyToFormUrlEncoded(body) {
+  const b = icopayChillpayShapeToJpayNotifyBody(body || {});
+  const params = new URLSearchParams();
+  const skip = new Set([
+    'transactionid',
+    'customerid',
+    'orderno',
+    'paymentstatus',
+    'paymentdate',
+    'checksum',
+    'bankcode',
+    'bank_code',
+    'bankrefcode',
+    'currentdate',
+    'currenttime',
+    'paymentdescription',
+    'creditcardtoken',
+  ]);
+  for (const [k, v] of Object.entries(b)) {
+    if (v === null || v === undefined || v === '') continue;
+    if (skip.has(String(k).toLowerCase())) continue;
+    params.append(k, String(v));
+  }
+  return params.toString();
+}
+
+/**
+ * JPAY 개발 노티 릴레이 pack 정규화: rawBody 우선, 없으면 JPAY 필드만 form 원문 생성.
+ * ChillPay/ICOPAY 변환 객체가 들어와도 JPAY 원문으로 되돌린 뒤 전송한다.
+ */
+function normalizeJpayDevRelayPack(relayPack) {
+  const rp = relayPack && typeof relayPack === 'object' ? relayPack : {};
+  let body = rp.body;
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      body = {};
+    }
+  }
+  if (!body || typeof body !== 'object') body = {};
+  const incomingCt = (rp.contentType && String(rp.contentType).trim()) || 'application/x-www-form-urlencoded';
+  const ctBase = (incomingCt.split(';')[0] || '').trim().toLowerCase();
+  let contentType =
+    ctBase && (ctBase.includes('application/json') || ctBase.includes('application/x-www-form-urlencoded'))
+      ? ctBase
+      : 'application/x-www-form-urlencoded';
+  let rawBody = rp.rawBody != null && String(rp.rawBody).trim() !== '' ? String(rp.rawBody) : '';
+  if (rawBody && /transactionid=|customerid=/i.test(rawBody) && !/memberid=/i.test(rawBody)) {
+    const parsed = parseNotiRawBodyToObject(Buffer.from(rawBody, 'utf8'), 'application/x-www-form-urlencoded');
+    body = icopayChillpayShapeToJpayNotifyBody(parsed);
+    rawBody = jpayNotifyBodyToFormUrlEncoded(body);
+    contentType = 'application/x-www-form-urlencoded';
+  } else if (!rawBody && bodyLooksLikeIcopayChillpayNotifyShape(body)) {
+    body = icopayChillpayShapeToJpayNotifyBody(body);
+  }
+  if (!rawBody) {
+    rawBody = jpayNotifyBodyToFormUrlEncoded(body);
+    contentType = 'application/x-www-form-urlencoded';
+  } else if (bodyLooksLikeIcopayChillpayNotifyShape(body) && !bodyLooksLikeJpayNotifyShape(body)) {
+    body = icopayChillpayShapeToJpayNotifyBody(body);
+  }
+  return { body, contentType, rawBody };
+}
+
+/** JPAY 개발 노티 로그 저장용(재전송 시 rawBody 복원) */
+function jpayDevInternalLogExtrasFromRelayPack(relayPack) {
+  const pack = normalizeJpayDevRelayPack(relayPack);
+  const raw = pack.rawBody || '';
+  const incomingCt = pack.contentType || 'application/x-www-form-urlencoded';
+  return {
+    incomingContentType: incomingCt,
+    rawBodyLength: raw.length,
+    rawBodyPreview: raw.length > 6000 ? raw.slice(0, 6000) + '…' : raw,
+    ...(raw.length > 0 && raw.length <= 120000 ? { rawBody: raw } : {}),
+  };
+}
+
+/** JPAY: 전산/개발 로그에서 재전송용 relayPack */
 function jpayRawRelayFromInternalLog(log) {
   const payload = (log && log.payload) || {};
   let body = payload;
@@ -3130,7 +3276,92 @@ function jpayRawRelayFromInternalLog(log) {
     ctBase && (ctBase.includes('application/json') || ctBase.includes('application/x-www-form-urlencoded'))
       ? ctBase
       : 'application/x-www-form-urlencoded';
-  return { body, contentType, rawBody: undefined };
+  const rawStored = log && log.rawBody != null && String(log.rawBody).trim() !== '' ? String(log.rawBody) : '';
+  const rawPreview =
+    !rawStored && log && log.rawBodyPreview != null && String(log.rawBodyPreview).trim() !== ''
+      ? String(log.rawBodyPreview).replace(/…$/, '').trim()
+      : '';
+  const rawBody = rawStored || rawPreview || undefined;
+  return normalizeJpayDevRelayPack({ body, contentType, rawBody });
+}
+
+/** JPAY 수신 본문 → ICOPAY/ChillPay 형태(개발 노티 transformForDevInternal 입력) */
+function jpayBodyToIcopayNotiShape(body, merchant) {
+  if (!body || typeof body !== 'object') return {};
+  const b = body;
+  const currencyRaw = b.Currency ?? b.currency ?? b.fee_type ?? '392';
+  const currency = normalizeCurrencyCode(currencyRaw) || '392';
+  const amountRaw = b.Amount ?? b.amount ?? b.true_amount ?? b.trueAmount ?? '';
+  const txId = b.TransactionId ?? b.transaction_id ?? b.transactionId ?? '';
+  const orderNo = b.OrderNo ?? b.orderNo ?? b.orderid ?? b.orderID ?? '';
+  let paymentStatus = b.PaymentStatus ?? b.paymentStatus ?? b.status;
+  if (paymentStatus == null || paymentStatus === '') {
+    if (isJpaySaleAsyncNotifyBody(b)) {
+      const rc = String(b.returncode ?? b.returnCode ?? '').trim();
+      if (rc === '00' || rc === '0') paymentStatus = 1;
+      else paymentStatus = 2;
+    } else {
+      const st = String(b.paymentStatus ?? '').toLowerCase();
+      if (st === 'succeeded' || st === 'success') paymentStatus = 1;
+    }
+  }
+  const paymentDate = notifBodyPaymentDateForWindow(b);
+  const customerId = b.CustomerId ?? b.customerId ?? b.memberid ?? b.memberId ?? '';
+  const customerName = b.CustomerName ?? b.customerName ?? b.customer ?? '';
+  return {
+    TransactionId: txId != null ? String(txId) : '',
+    Amount: amountRaw != null && amountRaw !== '' ? String(amountRaw) : '',
+    OrderNo: orderNo != null ? String(orderNo) : '',
+    PaymentStatus: paymentStatus,
+    PaymentDate: paymentDate,
+    Currency: currency,
+    CustomerId: customerId != null ? String(customerId) : '',
+    CustomerName: customerName != null ? String(customerName) : '',
+    BankCode: b.BankCode ?? b.bankCode ?? '',
+    BankRefCode: b.BankRefCode ?? b.bankRefCode ?? '',
+    CurrentDate: b.CurrentDate ?? b.currentDate ?? '',
+    CurrentTime: b.CurrentTime ?? b.currentTime ?? '',
+    PaymentDescription: b.PaymentDescription ?? b.paymentDescription ?? b.attach ?? '',
+    CreditCardToken: b.CreditCardToken ?? b.creditCardToken ?? '',
+    CheckSum: b.CheckSum ?? b.checkSum ?? b.sign ?? '',
+  };
+}
+
+/** JPAY 본문에서 개발 환경설정 통화 키 (392/840/…) */
+function jpayCurrencyCodeFromBody(body) {
+  if (!body || typeof body !== 'object') return '392';
+  const currencyRaw = body.Currency ?? body.currency ?? body.fee_type ?? '392';
+  return normalizeCurrencyCode(currencyRaw) || '392';
+}
+
+/** JPAY 개발 노티는 항상 수신 원문(form) 릴레이 — ChillPay JSON 변환 경로 사용 안 함 */
+function jpayDevUsesRawRelay() {
+  return true;
+}
+
+/** JPAY → ICOPAY 개발 노티: JPAY 수신 원문만 릴레이 (memberid·returncode·sign 등) */
+async function deliverJpayDevInternalNotify(devUrl, relayPack, merchant, opts) {
+  const pack = normalizeJpayDevRelayPack(relayPack);
+  console.log('[JPAY 개발 전산] JPAY 수신 원문 릴레이, url=', devUrl);
+  const jpayRes = await relayJpayRawWithRetry(devUrl, pack, null);
+  const status = jpayRes.res && jpayRes.res.status;
+  return {
+    mode: 'raw',
+    jpayRawRelay: true,
+    devPayload: pack.body,
+    devRelayPack: pack,
+    devAggResult: {
+      success: jpayRes.ok,
+      queued: false,
+      status: status || 0,
+      attempts: jpayRes.ok ? 1 : 2,
+      attemptStatuses: status ? [status] : [],
+      deliveryState: jpayRes.ok ? 'DELIVERED' : 'FAILED',
+      error: jpayRes.ok ? undefined : status ? 'HTTP ' + status : 'relay failed',
+      responsePreview: '',
+      durationMsTotal: 0,
+    },
+  };
 }
 
 /** JPAY: 가맹점 relayFormat 에 맞는 relayToMerchant 옵션 (raw=수신 원문, merchant 없으면 항상 raw) */
@@ -3168,15 +3399,16 @@ function resolveJpayInternalNotiDeliveryUrl(merchant, enableRelay, kind, rof) {
 
 /** JPAY: URL 로 수신 원문 POST (1회 재시도). 전산/개발은 merchant=null 로 항상 raw. */
 async function relayJpayRawWithRetry(url, relayPack, merchant) {
-  const relayOpts = jpayRelayOptsFromMerchant(merchant, relayPack);
-  let res = await relayToMerchant(url, relayPack.body, relayOpts);
+  const pack = normalizeJpayDevRelayPack(relayPack);
+  const relayOpts = jpayRelayOptsFromMerchant(merchant, pack);
+  let res = await relayToMerchant(url, pack.body, relayOpts);
   let ok = res.status >= 200 && res.status < 400;
   if (!ok) {
     await new Promise((r) => setTimeout(r, 2000));
-    res = await relayToMerchant(url, relayPack.body, relayOpts);
+    res = await relayToMerchant(url, pack.body, relayOpts);
     ok = res.status >= 200 && res.status < 400;
   }
-  return { ok, res, relayOpts };
+  return { ok, res, relayOpts, pack };
 }
 
 function jpayInternalLogExtrasFromNotiLog(log) {
@@ -5784,17 +6016,13 @@ async function sendVoidOrRefundNoti(log, type, mode) {
       }
       if (!devUrl) {
         console.log('[무효/환불 노티 → 개발 전산 스킵] URL 미설정, merchant=', log.merchantId);
-      } else if (isJpayVr && sameJpayNotifyUrl(devUrl, internalTargetUrl)) {
-        devInternalTargetUrl = devUrl;
-        console.log('[JPAY 취소 노티 → 개발 전산 스킵] 운영 전산과 동일 URL');
-        devOk = internalOk;
       } else {
         devInternalTargetUrl = devUrl;
         if (isJpayVr) {
-          console.log('[JPAY 취소 노티 → 개발 전산] 원문 POST url=', devUrl);
-          const jpayDevRes = await relayJpayRawWithRetry(devUrl, jpayRelayPack, null);
-          devOk = jpayDevRes.ok;
-          devAggVr = { success: jpayDevRes.ok, status: jpayDevRes.res && jpayDevRes.res.status, attempts: jpayDevRes.ok ? 1 : 2 };
+          const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant);
+          devPayload = jpayDevDeliver.devPayload;
+          devAggVr = jpayDevDeliver.devAggResult;
+          devOk = devAggVr.success;
         } else {
           console.log('[취소 노티 → 개발 전산] url=', devUrl, 'PaymentStatus=', devPayload.PaymentStatus, 'TransactionId=', devPayload.TransactionId);
           devAggVr = await sendDevInternalHttpNotify(devUrl, devPayload);
@@ -5812,7 +6040,13 @@ async function sendVoidOrRefundNoti(log, type, mode) {
         internalTargetUrl: devInternalTargetUrl,
         internalDeliveryStatus: devInternalTargetUrl ? (devOk ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP) : DEV_INTERNAL_DELIVER_FAIL,
         pgProvider: pgProv,
-        ...(isJpayVr ? { jpayRawRelay: true, ...jpayInternalLogExtrasFromNotiLog(log) } : {}),
+        ...(isJpayVr
+          ? {
+              jpayRawRelay: true,
+              ...jpayInternalLogExtrasFromNotiLog(log),
+              ...jpayDevInternalLogExtrasFromRelayPack(jpayRelayPack),
+            }
+          : {}),
         ...(devInternalTargetUrl && devAggVr && !isJpayVr ? devInternalLogUpstreamExtras(devAggVr) : {}),
       });
     } catch (err) {
@@ -6733,6 +6967,46 @@ async function sendDevInternalHttpNotify(internalUrl, payload, opts) {
   });
 }
 
+/** 관리자 재전송 등: job만 등록하고 백그라운드 전송(nginx 504 방지) */
+function queueDevInternalHttpNotify(internalUrl, payload, opts) {
+  if (!internalUrl) {
+    return {
+      success: false,
+      queued: false,
+      status: 0,
+      responsePreview: '',
+      attempts: 0,
+      attemptStatuses: [],
+      deliveryState: 'FAILED',
+      error: 'no_url',
+    };
+  }
+  const o = opts || {};
+  const idem = pgNotifyDelivery.buildIdempotencyKey(internalUrl, payload);
+  const job = createPgNotifyDeliveryJobRecord(internalUrl, payload, idem, {
+    icopayNotifyHttpAttemptBase: o.icopayNotifyHttpAttemptBase != null ? o.icopayNotifyHttpAttemptBase : 0,
+  });
+  PG_NOTIFY_DELIVERY_JOBS.push(job);
+  persistPgNotifyDeliveryJobs();
+  const idemKey = job.idempotencyKey;
+  setImmediate(() => {
+    runSerializedPgNotify(idemKey, () => runPgNotifyDeliveryJobLifecycle(job, false)).catch((e) =>
+      console.warn('[pg-notify-delivery] queued delivery error', e.message || e),
+    );
+  });
+  return {
+    success: true,
+    queued: true,
+    status: 0,
+    responsePreview: '',
+    attempts: 0,
+    attemptStatuses: [],
+    deliveryState: 'PENDING',
+    jobId: job.id,
+    durationMsTotal: 0,
+  };
+}
+
 function devInternalUpstreamCellText(log) {
   const prev = (log && log.upstreamResponsePreview) ? String(log.upstreamResponsePreview).trim() : '';
   const st = log && log.upstreamHttpStatus != null && log.upstreamHttpStatus !== '' ? String(log.upstreamHttpStatus) : '';
@@ -7595,33 +7869,51 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   let devDeliverySuccess = false;
   let devInternalTargetUrl = '';
   if (enableDevInternalChecked) {
+    let devAggResultJpay = null;
+    let devPayloadJpay = null;
+    let devRelayPackLogged = null;
     try {
       const useRelayOffDevUrlsJpay = !enableRelay && rofJpay === 'dev_internal';
       const devUrl = useRelayOffDevUrlsJpay ? resolveRelayOffDevUrl(merchant, kind) : resolveMerchantDevInternalUrl(merchant, kind);
       if (!devUrl) {
         console.log('[JPAY 개발 전산 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
-      } else if (sameJpayNotifyUrl(devUrl, internalTargetUrl)) {
-        devInternalTargetUrl = devUrl;
-        console.log('[JPAY 개발 전산 스킵] 운영 전산과 동일 URL');
-        devDeliverySuccess = internalDeliverySuccess;
       } else {
         devInternalTargetUrl = devUrl;
-        console.log('[JPAY 개발 전산 전송] 원문 POST, merchant=', merchantId, 'url=', devUrl);
-        const jpayDevRes = await relayJpayRawWithRetry(devUrl, jpayRelayPack, null);
-        devDeliverySuccess = jpayDevRes.ok;
+        const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant);
+        devPayloadJpay = jpayDevDeliver.devPayload;
+        devAggResultJpay = jpayDevDeliver.devAggResult;
+        devDeliverySuccess = devAggResultJpay.success;
+        devRelayPackLogged = jpayDevDeliver.devRelayPack || normalizeJpayDevRelayPack(jpayRelayPack);
+        if (devDeliverySuccess) {
+          console.log(
+            '[JPAY 개발 전산 전송]',
+            'JPAY 원문 릴레이 완료',
+            'status=',
+            devAggResultJpay.status,
+          );
+        } else {
+          console.warn(
+            '[JPAY 개발 전산 전송 실패] attempts=',
+            devAggResultJpay.attempts,
+            'lastStatus=',
+            devAggResultJpay.status,
+            devAggResultJpay.error || '',
+          );
+        }
       }
       appendDevInternalLog({
         storedAt: new Date().toISOString(),
         merchantId,
         routeNo: merchant.routeNo || '',
         internalTargetId: merchant.internalTargetId || '',
-        payload: body,
+        payload: devPayloadJpay || body,
         internalTargetUrl: devInternalTargetUrl,
         internalDeliveryStatus: devInternalTargetUrl ? (devDeliverySuccess ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP) : DEV_INTERNAL_DELIVER_FAIL,
-        jpayRawRelay: true,
         pgProvider: 'jpay',
+        jpayRawRelay: true,
         routeKey,
         ...jpayInternalLogExtras(),
+        ...jpayDevInternalLogExtrasFromRelayPack(devRelayPackLogged || normalizeJpayDevRelayPack(jpayRelayPack)),
       });
     } catch (err) {
       console.error('[JPAY 개발 전산 전송 실패]', err.message);
@@ -7636,13 +7928,14 @@ async function handleJpayNotiRequest(routeKey, req, res) {
         merchantId,
         routeNo: merchant.routeNo || '',
         internalTargetId: merchant.internalTargetId || '',
-        payload: body,
+        payload: devPayloadJpay || body,
         internalTargetUrl: failUrl || '',
         internalDeliveryStatus: failUrl ? DEV_INTERNAL_DELIVER_SKIP : DEV_INTERNAL_DELIVER_FAIL,
-        jpayRawRelay: true,
         pgProvider: 'jpay',
+        jpayRawRelay: true,
         routeKey,
         ...jpayInternalLogExtras(),
+        ...jpayDevInternalLogExtrasFromRelayPack(jpayRelayPack),
       });
     }
   } else {
@@ -17233,8 +17526,10 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
     try {
       let devResult = null;
       if (isJpayCr) {
-        const jpayDevRes = await relayJpayRawWithRetry(devUrl, jpayRelayPackCr, null);
-        devOk = jpayDevRes.ok;
+        const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPackCr, merchant);
+        devPayload = jpayDevDeliver.devPayload;
+        devResult = jpayDevDeliver.devAggResult;
+        devOk = devResult.success;
       } else {
         devResult = await sendDevInternalHttpNotify(devUrl, devPayload);
         devOk = devResult.success;
@@ -17248,8 +17543,13 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
         internalTargetUrl: devUrl,
         internalDeliveryStatus: devOk ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP,
         pgProvider: isJpayCr ? 'jpay' : 'chillpay',
-        ...jpayCrLogExtras,
-        ...(devResult ? devInternalLogUpstreamExtras(devResult) : {}),
+        ...(isJpayCr
+          ? {
+              jpayRawRelay: true,
+              ...jpayInternalLogExtrasFromNotiLog(log),
+              ...jpayDevInternalLogExtrasFromRelayPack(jpayRelayPackCr),
+            }
+          : {}),
       });
     } catch (e) {
       devOk = false;
@@ -17262,7 +17562,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
         internalTargetUrl: devUrl,
         internalDeliveryStatus: devUrl ? DEV_INTERNAL_DELIVER_SKIP : DEV_INTERNAL_DELIVER_FAIL,
         pgProvider: isJpayCr ? 'jpay' : 'chillpay',
-        ...jpayCrLogExtras,
+        ...(isJpayCr ? { jpayRawRelay: true, ...jpayCrLogExtras, ...jpayDevInternalLogExtrasFromRelayPack(jpayRelayPackCr) } : {}),
       });
     }
   } else if (deliverDevCr) {
@@ -24180,6 +24480,32 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
   const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const resendKindDev = (qDev.resendKind || 'payment').toString().toLowerCase();
+  const resendMsgDev =
+    qDev.resend === 'queued'
+      ? '<div class="alert alert-ok" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#d1fae5;border:1px solid #6ee7b7;color:#065f46;">' +
+        esc(t(locale, 'dev_internal_resend_queued')) +
+        '</div>'
+      : qDev.resend === 'ok'
+        ? '<div class="alert alert-ok" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#d1fae5;border:1px solid #6ee7b7;color:#065f46;">' +
+          esc(resendKindDev === 'cancel' ? t(locale, 'pg_logs_resend_cancel_ok') : t(locale, 'pg_logs_resend_pay_ok')) +
+          '</div>'
+        : qDev.resend === 'fail'
+          ? '<div class="alert alert-fail" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;">' +
+            esc(resendKindDev === 'cancel' ? t(locale, 'pg_logs_resend_cancel_fail') : t(locale, 'pg_logs_resend_pay_fail')) +
+            (qDev.reason ? ': ' + esc(String(qDev.reason)) : '') +
+            '</div>'
+          : qDev.err
+            ? '<div class="alert alert-fail" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;">' +
+              esc(
+                qDev.err === 'invalid'
+                  ? t(locale, 'err_bad_request')
+                  : qDev.err === 'forbidden'
+                    ? t(locale, 'err_forbidden')
+                    : t(locale, 'relay_no_url'),
+              ) +
+              '</div>'
+            : '';
   const reversedDev = [...DEV_INTERNAL_LOGS].slice().reverse();
   const memberDev = getMemberForAccessControl(req);
   const withIndexDev = reversedDev.map((log, i) => ({ log, realIndex: DEV_INTERNAL_LOGS.length - 1 - i }));
@@ -24335,6 +24661,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
+      ${resendMsgDev}
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_internal_noti_log')} (${totalCountDevInternal})</h1>
       ${hubHtmlDevInternal}
       <p class="admin-page-desc">${t(locale, 'internal_logs_desc')}</p>
@@ -24401,16 +24728,24 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
   }
   const resendKind = (req.body.resendKind || '').toString().toLowerCase() || (isCancelNotiBody(log.payload || {}) ? 'cancel' : 'payment');
   const isJpayDevResend = String(log.pgProvider || '').toLowerCase() === 'jpay' || log.jpayRawRelay === true;
+  const merchantDevResend = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+  const queuedRedirect =
+    base + '?resend=queued&resendKind=' + encodeURIComponent(resendKind) + srcQ;
   try {
     if (isJpayDevResend) {
       const relayPack = jpayRawRelayFromInternalLog(log);
-      const jpayRes = await relayJpayRawWithRetry(url, relayPack, null);
-      if (jpayRes.ok) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+      const jpayDevDeliver = await deliverJpayDevInternalNotify(url, relayPack, merchantDevResend, {
+        icopayNotifyHttpAttemptBase: 1,
+      });
+      const result = jpayDevDeliver.devAggResult;
+      if (result.success) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
       const reason =
-        (jpayRes.res && jpayRes.res.status ? 'HTTP ' + jpayRes.res.status : '') || 'relay failed';
+        (result.attempts > 1 ? result.attempts + ' attempts, ' : '') +
+        (result.status ? 'HTTP ' + result.status : result.error || '');
       return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
     }
-    const result = await sendDevInternalHttpNotify(url, log.payload, { icopayNotifyHttpAttemptBase: 1 });
+    const result = queueDevInternalHttpNotify(url, log.payload, { icopayNotifyHttpAttemptBase: 1 });
+    if (result.queued) return res.redirect(queuedRedirect);
     if (result.success) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
     const reason =
       (result.attempts > 1 ? result.attempts + ' attempts, ' : '') +
@@ -24833,8 +25168,11 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   const resendKind = (q.resendKind || 'payment').toString().toLowerCase();
   const resendOkLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_ok') : t(locale, 'pg_logs_resend_pay_ok');
   const resendFailLabel = resendKind === 'cancel' ? t(locale, 'pg_logs_resend_cancel_fail') : t(locale, 'pg_logs_resend_pay_fail');
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const resendMsg =
-    q.resend === 'ok'
+    q.resend === 'queued'
+      ? '<div class="alert alert-ok">' + esc(t(locale, 'dev_internal_resend_queued')) + '</div>'
+      : q.resend === 'ok'
       ? '<div class="alert alert-ok">' + resendOkLabel + '</div>'
       : q.resend === 'fail'
       ? '<div class="alert alert-fail">' + resendFailLabel + (q.reason ? ': ' + String(q.reason).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '') + '</div>'
@@ -24845,7 +25183,6 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   const nowDate = new Date();
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const envLabel = APP_ENV === 'test' ? 'sandbox' : 'live';
-  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const logPgDevRes = parseTxSourceFromReq(req);
   const reversed = [...DEV_INTERNAL_LOGS].slice().reverse();
   const memberDevResult = getMemberForAccessControl(req);
