@@ -3349,6 +3349,14 @@ async function deliverJpayDevInternalNotify(devUrl, relayPack, merchant, opts) {
     icopayNotifyHttpAttemptBase: o.icopayNotifyHttpAttemptBase,
   });
   const status = jpayRes.res && jpayRes.res.status;
+  const respData = jpayRes.res ? jpayRes.res.data : undefined;
+  let respPreview = '';
+  try {
+    respPreview = typeof respData === 'string' ? respData : JSON.stringify(respData);
+  } catch {
+    respPreview = String(respData);
+  }
+  respPreview = (respPreview || '').slice(0, 300);
   return {
     mode: 'raw',
     jpayRawRelay: true,
@@ -3362,7 +3370,7 @@ async function deliverJpayDevInternalNotify(devUrl, relayPack, merchant, opts) {
       attemptStatuses: status ? [status] : [],
       deliveryState: jpayRes.ok ? 'DELIVERED' : 'FAILED',
       error: jpayRes.ok ? undefined : status ? 'HTTP ' + status : 'relay failed',
-      responsePreview: '',
+      responsePreview: respPreview,
       durationMsTotal: 0,
     },
   };
@@ -24549,6 +24557,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       : qDev.resend === 'ok'
         ? '<div class="alert alert-ok" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#d1fae5;border:1px solid #6ee7b7;color:#065f46;">' +
           esc(resendKindDev === 'cancel' ? t(locale, 'pg_logs_resend_cancel_ok') : t(locale, 'pg_logs_resend_pay_ok')) +
+          (qDev.reason ? ': ' + esc(String(qDev.reason)) : '') +
           '</div>'
         : qDev.resend === 'fail'
           ? '<div class="alert alert-fail" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;">' +
@@ -24782,15 +24791,28 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
   if (memberDevResend && !canAccessInternalTarget(memberDevResend, log.internalTargetId)) {
     return res.redirect(base + '?err=forbidden' + srcQ);
   }
-  const url = log.internalTargetUrl;
-  if (!url || !log.payload) {
-    return res.redirect(base + '?err=no_target' + srcQ);
-  }
   const resendKind = (req.body.resendKind || '').toString().toLowerCase() || (isCancelNotiBody(log.payload || {}) ? 'cancel' : 'payment');
   const isJpayDevResend = String(log.pgProvider || '').toLowerCase() === 'jpay' || log.jpayRawRelay === true;
   const merchantDevResend = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+  // 저장된 URL이 비어 있으면 가맹점 개발 대상에서 재해석 (옛 로그 보강)
+  let url = log.internalTargetUrl;
+  if (!url && merchantDevResend) {
+    const kindForUrl = isCancelNotiBody(log.payload || {}) ? 'callback' : 'callback';
+    url = resolveMerchantDevInternalUrl(merchantDevResend, kindForUrl) || '';
+  }
+  if (!url || !log.payload) {
+    return res.redirect(base + '?err=no_target' + srcQ);
+  }
   const queuedRedirect =
     base + '?resend=queued&resendKind=' + encodeURIComponent(resendKind) + srcQ;
+  const shortHost = (() => {
+    try {
+      const u = new URL(url);
+      return u.host + (u.pathname || '');
+    } catch {
+      return String(url).slice(0, 80);
+    }
+  })();
   try {
     if (isJpayDevResend) {
       const relayPack = jpayRawRelayFromInternalLog(log);
@@ -24798,10 +24820,26 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
         icopayNotifyHttpAttemptBase: 1,
       });
       const result = jpayDevDeliver.devAggResult;
-      if (result.success) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+      // 실제 전송된 본문 길이는 정규화된 relay pack 기준으로 계산
+      const sentPack = jpayDevDeliver.devRelayPack || {};
+      const sentLen = sentPack.rawBody
+        ? Buffer.byteLength(String(sentPack.rawBody), 'utf8')
+        : sentPack.body
+          ? Buffer.byteLength(jpayRelayOutgoingBodyString(sentPack, { contentType: sentPack.contentType, rawBody: sentPack.rawBody }), 'utf8')
+          : 0;
+      console.log('[JPAY 개발 재전송]', 'url=', url, 'len=', sentLen, 'status=', result.status, 'ok=', result.success);
+      if (sentLen === 0) {
+        const reasonEmpty = '본문 비어있음(memberid 없음) → ' + shortHost;
+        return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reasonEmpty) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+      }
+      const respTail = result.responsePreview ? ' | resp: ' + String(result.responsePreview).slice(0, 160) : '';
+      if (result.success) {
+        const okMsg = 'HTTP ' + (result.status || '') + ' → ' + shortHost + ' (len ' + sentLen + ')' + respTail;
+        return res.redirect(base + '?resend=ok&reason=' + encodeURIComponent(okMsg) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+      }
       const reason =
-        (result.attempts > 1 ? result.attempts + ' attempts, ' : '') +
-        (result.status ? 'HTTP ' + result.status : result.error || '');
+        (result.status ? 'HTTP ' + result.status : result.error || 'no response') +
+        ' → ' + shortHost + ' (len ' + sentLen + ')' + respTail;
       return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
     }
     const result = queueDevInternalHttpNotify(url, log.payload, { icopayNotifyHttpAttemptBase: 1 });
