@@ -3227,8 +3227,14 @@ function normalizeJpayDevRelayPack(relayPack) {
       ? ctBase
       : 'application/x-www-form-urlencoded';
   let rawBody = rp.rawBody != null && String(rp.rawBody).trim() !== '' ? String(rp.rawBody) : '';
-  if (rawBody && /transactionid=|customerid=/i.test(rawBody) && !/memberid=/i.test(rawBody)) {
-    const parsed = parseNotiRawBodyToObject(Buffer.from(rawBody, 'utf8'), 'application/x-www-form-urlencoded');
+  // 저장된 원문이 ChillPay/ICOPAY 변환 형태(폼 또는 JSON)면 JPAY 원문으로 복원해 재생성한다.
+  const rawHasJpayMid = rawBody ? /(^|&)\s*member_?id=/i.test(rawBody) || /"member_?id"/i.test(rawBody) : false;
+  const rawLooksChillpay = rawBody
+    ? /(^|&)\s*(transaction_?id|customerid|paymentstatus|checksum)=/i.test(rawBody) ||
+      /"(TransactionId|CustomerId|PaymentStatus|CheckSum)"/.test(rawBody)
+    : false;
+  if (rawBody && rawLooksChillpay && !rawHasJpayMid) {
+    const parsed = parseNotiRawBodyToObject(Buffer.from(rawBody, 'utf8'), contentType);
     body = icopayChillpayShapeToJpayNotifyBody(parsed);
     rawBody = jpayNotifyBodyToFormUrlEncoded(body);
     contentType = 'application/x-www-form-urlencoded';
@@ -3334,16 +3340,14 @@ function jpayCurrencyCodeFromBody(body) {
   return normalizeCurrencyCode(currencyRaw) || '392';
 }
 
-/** JPAY 개발 노티는 항상 수신 원문(form) 릴레이 — ChillPay JSON 변환 경로 사용 안 함 */
-function jpayDevUsesRawRelay() {
-  return true;
-}
-
 /** JPAY → ICOPAY 개발 노티: JPAY 수신 원문만 릴레이 (memberid·returncode·sign 등) */
 async function deliverJpayDevInternalNotify(devUrl, relayPack, merchant, opts) {
+  const o = opts || {};
   const pack = normalizeJpayDevRelayPack(relayPack);
   console.log('[JPAY 개발 전산] JPAY 수신 원문 릴레이, url=', devUrl);
-  const jpayRes = await relayJpayRawWithRetry(devUrl, pack, null);
+  const jpayRes = await relayJpayRawWithRetry(devUrl, pack, null, {
+    icopayNotifyHttpAttemptBase: o.icopayNotifyHttpAttemptBase,
+  });
   const status = jpayRes.res && jpayRes.res.status;
   return {
     mode: 'raw',
@@ -3397,18 +3401,69 @@ function resolveJpayInternalNotiDeliveryUrl(merchant, enableRelay, kind, rof) {
   return INTERNAL_NOTI_URL ? String(INTERNAL_NOTI_URL).trim() : null;
 }
 
+/** JPAY 원문 릴레이용: 실제 전송될 본문 문자열·길이 계산(로그/빈 본문 진단용) */
+function jpayRelayOutgoingBodyString(pack, relayOpts) {
+  if (relayOpts && relayOpts.rawBody !== undefined && relayOpts.rawBody !== null && String(relayOpts.rawBody).length > 0) {
+    return String(relayOpts.rawBody);
+  }
+  const body = pack && pack.body;
+  const ct = ((relayOpts && relayOpts.contentType) || (pack && pack.contentType) || '').toLowerCase();
+  if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(body)) params.append(k, v === null || v === undefined ? '' : String(v));
+      return params.toString();
+    }
+    try {
+      return JSON.stringify(body);
+    } catch {
+      return '';
+    }
+  }
+  return body != null ? String(body) : '';
+}
+
+/** 로그용 마스킹: sign/CheckSum 등 민감값 일부만 노출 */
+function maskJpayBodyForLog(s) {
+  if (!s) return '';
+  let out = String(s).slice(0, 600);
+  out = out.replace(/((?:sign|checksum)=)([^&]{6})[^&]*/gi, '$1$2…');
+  return out;
+}
+
 /** JPAY: URL 로 수신 원문 POST (1회 재시도). 전산/개발은 merchant=null 로 항상 raw. */
-async function relayJpayRawWithRetry(url, relayPack, merchant) {
+async function relayJpayRawWithRetry(url, relayPack, merchant, opts) {
+  const o = opts || {};
   const pack = normalizeJpayDevRelayPack(relayPack);
   const relayOpts = jpayRelayOptsFromMerchant(merchant, pack);
-  let res = await relayToMerchant(url, pack.body, relayOpts);
+  const outBody = jpayRelayOutgoingBodyString(pack, relayOpts);
+  const outLen = outBody ? Buffer.byteLength(outBody, 'utf8') : 0;
+  const attemptBase = Number.isFinite(Number(o.icopayNotifyHttpAttemptBase)) ? Math.max(1, Math.floor(Number(o.icopayNotifyHttpAttemptBase))) : 1;
+  if (!url) {
+    console.warn('[JPAY 릴레이 중단] 전송 URL 없음 (전산/개발 대상 미설정)');
+    return { ok: false, res: { status: 0, data: 'no_url' }, relayOpts, pack, outLen };
+  }
+  if (outLen === 0) {
+    console.warn('[JPAY 릴레이 경고] 전송 본문이 비어 있음 url=', url, 'body(object)=', JSON.stringify(pack.body || {}).slice(0, 300));
+  }
+  const ingressHeaders = {};
+  applyIcopayPgNotifyIngressHeaders(ingressHeaders, url, attemptBase);
+  const sendOpts1 = { ...relayOpts, headers: ingressHeaders };
+  console.log('[JPAY 릴레이 시도1] url=', url, 'ct=', relayOpts.contentType || pack.contentType, 'len=', outLen, 'body=', maskJpayBodyForLog(outBody));
+  let res = await relayToMerchant(url, pack.body, sendOpts1);
   let ok = res.status >= 200 && res.status < 400;
+  console.log('[JPAY 릴레이 결과1] url=', url, 'status=', res && res.status, 'ok=', ok);
   if (!ok) {
     await new Promise((r) => setTimeout(r, 2000));
-    res = await relayToMerchant(url, pack.body, relayOpts);
+    const ingressHeaders2 = {};
+    applyIcopayPgNotifyIngressHeaders(ingressHeaders2, url, attemptBase + 1);
+    const sendOpts2 = { ...relayOpts, headers: ingressHeaders2 };
+    console.log('[JPAY 릴레이 시도2] url=', url, 'len=', outLen);
+    res = await relayToMerchant(url, pack.body, sendOpts2);
     ok = res.status >= 200 && res.status < 400;
+    console.log('[JPAY 릴레이 결과2] url=', url, 'status=', res && res.status, 'ok=', ok);
   }
-  return { ok, res, relayOpts, pack };
+  return { ok, res, relayOpts, pack, outLen };
 }
 
 function jpayInternalLogExtrasFromNotiLog(log) {
@@ -6447,6 +6502,11 @@ async function relayToMerchant(callbackUrl, body, options = {}) {
   const rawBody = options.rawBody;
   let data;
   let headers = { 'Content-Type': contentType };
+  if (options.headers && typeof options.headers === 'object') {
+    for (const [hk, hv] of Object.entries(options.headers)) {
+      if (hv !== undefined && hv !== null && String(hv) !== '') headers[hk] = String(hv);
+    }
+  }
   const rawLen =
     rawBody !== undefined && rawBody !== null
       ? Buffer.isBuffer(rawBody)
