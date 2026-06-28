@@ -580,6 +580,408 @@ const DEFAULT_VOID_CUTOFF_MINUTE = 0;
 const DEFAULT_REFUND_START_HOUR = 0;
 const DEFAULT_REFUND_START_MINUTE = 0;
 const DEFAULT_CHILLPAY_TIMEZONE = 'Asia/Bangkok';
+/** ICOPAY 전산설정과 동일: 목록 1줄(운영) 표시용. 신규 기본 Asia/Tokyo */
+const DEFAULT_NOTI_OPERATIONAL_TIMEZONE = 'Asia/Tokyo';
+/** PG HQ_LEDGER_DISPLAY_TZ_OPTIONS 와 동일 목록 */
+const NOTI_IANA_TIMEZONE_OPTIONS = [
+  { id: 'Asia/Bangkok', tag: 'TH' },
+  { id: 'Asia/Seoul', tag: 'KR' },
+  { id: 'Asia/Tokyo', tag: 'JP' },
+  { id: 'Asia/Shanghai', tag: 'CH' },
+  { id: 'Asia/Ho_Chi_Minh', tag: 'VT' },
+  { id: 'Asia/Singapore', tag: 'SG' },
+  { id: 'Asia/Manila', tag: 'PP' },
+  { id: 'Asia/Jakarta', tag: 'IN' },
+  { id: 'Asia/Dubai', tag: 'UA' },
+  { id: 'UTC', tag: 'UTC' },
+  { id: 'Europe/London', tag: 'EU' },
+  { id: 'America/New_York', tag: 'NY' },
+  { id: 'America/Los_Angeles', tag: 'LA' },
+];
+const NOTI_WD_SHORT = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+function notiTimezoneOptionIds() {
+  return NOTI_IANA_TIMEZONE_OPTIONS.map((o) => o.id);
+}
+
+function normalizeNotiIanaTimezone(raw, fallback) {
+  const fb = fallback || DEFAULT_CHILLPAY_TIMEZONE;
+  const s = raw != null ? String(raw).trim() : '';
+  if (!s) return fb;
+  if (notiTimezoneOptionIds().includes(s)) return s;
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: s });
+    return s;
+  } catch {
+    return fb;
+  }
+}
+
+function timezoneTagFromIana(tz) {
+  const id = normalizeNotiIanaTimezone(tz, DEFAULT_CHILLPAY_TIMEZONE);
+  const hit = NOTI_IANA_TIMEZONE_OPTIONS.find((o) => o.id === id);
+  if (hit) return hit.tag;
+  const parts = id.split('/');
+  return (parts[parts.length - 1] || id).slice(0, 3).toUpperCase();
+}
+
+function notiTimezoneOptionLabel(locale, id) {
+  const key = 'noti_tz_' + String(id).replace(/\//g, '_');
+  const tr = t(locale, key);
+  return tr && tr !== key ? tr : id;
+}
+
+function getNotiStandardTimezone() {
+  const cfg = loadChillPayTransactionConfig();
+  const raw = cfg.standardTimezone || cfg.timezone;
+  return normalizeNotiIanaTimezone(raw, DEFAULT_CHILLPAY_TIMEZONE);
+}
+
+function getNotiOperationalTimezone() {
+  const cfg = loadChillPayTransactionConfig();
+  return normalizeNotiIanaTimezone(cfg.operationalTimezone, DEFAULT_NOTI_OPERATIONAL_TIMEZONE);
+}
+
+function normalizeInternalTargetTimezoneMode(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  return s === 'custom' ? 'custom' : 'global';
+}
+
+function internalTargetUsesCustomTimezone(target) {
+  return !!(target && normalizeInternalTargetTimezoneMode(target.timezoneMode) === 'custom');
+}
+
+function internalTargetTimezoneFieldsFromRaw(v) {
+  return {
+    timezoneMode: normalizeInternalTargetTimezoneMode(v && v.timezoneMode),
+    standardTimezone: normalizeNotiIanaTimezone(v && v.standardTimezone, DEFAULT_CHILLPAY_TIMEZONE),
+    operationalTimezone: normalizeNotiIanaTimezone(v && v.operationalTimezone, DEFAULT_NOTI_OPERATIONAL_TIMEZONE),
+  };
+}
+
+function resolveLogDisplayInternalTargetId(log, merchant) {
+  if (log && log.internalTargetId) {
+    const tid = String(log.internalTargetId).trim();
+    if (tid) return tid;
+  }
+  if (merchant && merchant.internalTargetId) {
+    const tid = String(merchant.internalTargetId).trim();
+    if (tid) return tid;
+  }
+  if (log && log.merchantId && typeof MERCHANTS !== 'undefined' && MERCHANTS && MERCHANTS.get) {
+    const m = MERCHANTS.get(log.merchantId);
+    if (m && m.internalTargetId) return String(m.internalTargetId).trim();
+  }
+  return '';
+}
+
+/** 화면 표시용 TZ: 전산대상 custom > global(변경 시점 이후만 신규 TZ, 이전 로그는 직전 global TZ) */
+function resolveDisplayTimezones(isoString, internalTargetId) {
+  const tid = internalTargetId ? String(internalTargetId).trim() : '';
+  if (tid && typeof INTERNAL_TARGETS !== 'undefined' && INTERNAL_TARGETS) {
+    const target = INTERNAL_TARGETS.get(tid);
+    if (internalTargetUsesCustomTimezone(target)) {
+      return {
+        standardTimezone: normalizeNotiIanaTimezone(target.standardTimezone, DEFAULT_CHILLPAY_TIMEZONE),
+        operationalTimezone: normalizeNotiIanaTimezone(target.operationalTimezone, DEFAULT_NOTI_OPERATIONAL_TIMEZONE),
+      };
+    }
+  }
+  const cfg = loadChillPayTransactionConfig();
+  const currentStd = normalizeNotiIanaTimezone(cfg.standardTimezone || cfg.timezone, DEFAULT_CHILLPAY_TIMEZONE);
+  const currentOp = normalizeNotiIanaTimezone(cfg.operationalTimezone, DEFAULT_NOTI_OPERATIONAL_TIMEZONE);
+  const effectiveFromRaw = cfg.displayTzEffectiveFromIso ? String(cfg.displayTzEffectiveFromIso).trim() : '';
+  const effectiveFromMs = effectiveFromRaw ? Date.parse(effectiveFromRaw) : Number.NaN;
+  const logMs = isoString != null && String(isoString).trim() !== '' ? Date.parse(String(isoString)) : Number.NaN;
+  if (Number.isFinite(effectiveFromMs) && Number.isFinite(logMs) && logMs < effectiveFromMs) {
+    const prevStd = cfg.displayTzPreviousStandard
+      ? normalizeNotiIanaTimezone(cfg.displayTzPreviousStandard, currentStd)
+      : currentStd;
+    const prevOp = cfg.displayTzPreviousOperational
+      ? normalizeNotiIanaTimezone(cfg.displayTzPreviousOperational, currentOp)
+      : currentOp;
+    return { standardTimezone: prevStd, operationalTimezone: prevOp };
+  }
+  return { standardTimezone: currentStd, operationalTimezone: currentOp };
+}
+
+function formatInternalTargetTimezoneDisplay(locale, target) {
+  if (!internalTargetUsesCustomTimezone(target)) {
+    const follow = t(locale, 'internal_targets_tz_follow_global');
+    return { standard: follow, operational: follow };
+  }
+  const std = target.standardTimezone || DEFAULT_CHILLPAY_TIMEZONE;
+  const op = target.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
+  return {
+    standard: timezoneTagFromIana(std) + ' · ' + notiTimezoneOptionLabel(locale, std),
+    operational: timezoneTagFromIana(op) + ' · ' + notiTimezoneOptionLabel(locale, op),
+  };
+}
+
+function resolveInternalTargetIdFromRouteNo(routeNo) {
+  const rn = String(routeNo || '').trim();
+  if (!rn || typeof MERCHANTS === 'undefined' || !MERCHANTS) return '';
+  for (const m of MERCHANTS.values()) {
+    if (m && String(m.routeNo || '').trim() === rn) {
+      return resolveLogDisplayInternalTargetId(null, m);
+    }
+  }
+  return '';
+}
+
+function localDatePartsInTz(ms, tz) {
+  const z = normalizeNotiIanaTimezone(tz, DEFAULT_CHILLPAY_TIMEZONE);
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: z,
+      weekday: 'short',
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+    }).formatToParts(new Date(ms));
+    const get = (type) => {
+      const p = parts.find((x) => x.type === type);
+      return p ? p.value : '';
+    };
+    return {
+      year: parseInt(get('year'), 10),
+      month: parseInt(get('month'), 10),
+      day: parseInt(get('day'), 10),
+      weekday: get('weekday'),
+    };
+  } catch {
+    return { year: 1970, month: 1, day: 1, weekday: 'Thu' };
+  }
+}
+
+function dayOfWeekInTz(ms, tz) {
+  const lp = localDatePartsInTz(ms, tz);
+  const wd = String(lp.weekday || '').slice(0, 3);
+  return NOTI_WD_SHORT[wd] != null ? NOTI_WD_SHORT[wd] : 0;
+}
+
+function ymdFromParts(y, m, d) {
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function addCalendarDaysYmd(ymd, delta) {
+  if (!ymd) return '';
+  const [y, m, d] = ymd.split('-').map((x) => parseInt(x, 10));
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return '';
+  const dt = new Date(Date.UTC(y, m - 1, d + delta));
+  return toYmdUTC(dt);
+}
+
+function getYmdInTimezone(isoOrMs, tz) {
+  const t = typeof isoOrMs === 'number' ? isoOrMs : Date.parse(String(isoOrMs || ''));
+  if (!t || Number.isNaN(t)) return '';
+  const z = normalizeNotiIanaTimezone(tz, DEFAULT_CHILLPAY_TIMEZONE);
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: z,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date(t));
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch (_) {}
+  return '';
+}
+
+function getTodayYmdInTimezone(tz) {
+  return getYmdInTimezone(Date.now(), tz);
+}
+
+function calcPresetRangeInTimezone(preset, tz) {
+  const z = normalizeNotiIanaTimezone(tz, DEFAULT_CHILLPAY_TIMEZONE);
+  const p = String(preset || '').trim();
+  if (!p) return null;
+  const todayYmd = getTodayYmdInTimezone(z);
+  const dow = dayOfWeekInTz(Date.now(), z);
+  const mondayDiff = dow === 0 ? -6 : 1 - dow;
+  if (p === 'today') return { startDate: todayYmd, endDate: todayYmd };
+  if (p === 'yesterday') {
+    const s = addCalendarDaysYmd(todayYmd, -1);
+    return { startDate: s, endDate: s };
+  }
+  if (p === 'this_week') {
+    const start = addCalendarDaysYmd(todayYmd, mondayDiff);
+    const end = addCalendarDaysYmd(start, 6);
+    return { startDate: start, endDate: end };
+  }
+  if (p === 'last_week') {
+    const end = addCalendarDaysYmd(todayYmd, mondayDiff - 1);
+    const start = addCalendarDaysYmd(end, -6);
+    return { startDate: start, endDate: end };
+  }
+  if (p === 'this_month') {
+    const lp = localDatePartsInTz(Date.now(), z);
+    const start = ymdFromParts(lp.year, lp.month, 1);
+    const lastDay = new Date(Date.UTC(lp.year, lp.month, 0)).getUTCDate();
+    const end = ymdFromParts(lp.year, lp.month, lastDay);
+    return { startDate: start, endDate: end };
+  }
+  if (p === 'last_month') {
+    const lp = localDatePartsInTz(Date.now(), z);
+    let y = lp.year;
+    let m = lp.month - 1;
+    if (m < 1) {
+      m = 12;
+      y -= 1;
+    }
+    const start = ymdFromParts(y, m, 1);
+    const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const end = ymdFromParts(y, m, lastDay);
+    return { startDate: start, endDate: end };
+  }
+  return null;
+}
+
+function formatZonedLocaleString(dateInput, tz, locale) {
+  const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
+  if (Number.isNaN(d.getTime())) return '-';
+  const z = normalizeNotiIanaTimezone(tz, DEFAULT_CHILLPAY_TIMEZONE);
+  const loc = LOCALE_TO_INTL[locale] || 'ko-KR';
+  try {
+    return d.toLocaleString(loc, { timeZone: z, hour12: false });
+  } catch {
+    return d.toISOString();
+  }
+}
+
+function buildAdminTopbarClocks(nowDate, locale) {
+  const opTz = getNotiOperationalTimezone();
+  const stdTz = getNotiStandardTimezone();
+  return {
+    nowOp: formatZonedLocaleString(nowDate, opTz, locale),
+    nowStd: formatZonedLocaleString(nowDate, stdTz, locale),
+    tagOp: timezoneTagFromIana(opTz),
+    tagStd: timezoneTagFromIana(stdTz),
+  };
+}
+
+function renderNotiTimezoneSelectOptions(locale, selectedId) {
+  const sel = normalizeNotiIanaTimezone(selectedId, DEFAULT_CHILLPAY_TIMEZONE);
+  return NOTI_IANA_TIMEZONE_OPTIONS.map((o) => {
+    const label = notiTimezoneOptionLabel(locale, o.id);
+    const escLabel = String(label).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    return `<option value="${o.id}"${o.id === sel ? ' selected' : ''}>${escLabel}</option>`;
+  }).join('');
+}
+
+function renderChillpayTimezoneSection(locale, c) {
+  const stdTz = c.standardTimezone || c.timezone || DEFAULT_CHILLPAY_TIMEZONE;
+  const opTz = c.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
+  const clocks = buildAdminTopbarClocks(new Date(), locale);
+  const stdOpts = renderNotiTimezoneSelectOptions(locale, stdTz);
+  const opOpts = renderNotiTimezoneSelectOptions(locale, opTz);
+  const tagMapJson = JSON.stringify(Object.fromEntries(NOTI_IANA_TIMEZONE_OPTIONS.map((o) => [o.id, o.tag])));
+  const locIntl = LOCALE_TO_INTL[locale] || 'ko-KR';
+  return (
+    '<section class="chillpay-section"><h3>' +
+    t(locale, 'chillpay_tz_section_title') +
+    '</h3><p class="admin-page-desc">' +
+    t(locale, 'chillpay_tz_hint') +
+    '</p><table class="chillpay-time-table"><colgroup><col style="width:28%" /><col style="width:28%" /><col style="width:22%" /><col style="width:22%" /></colgroup><thead><tr>' +
+    '<th>' +
+    t(locale, 'chillpay_tz_standard_label') +
+    '</th><th>' +
+    t(locale, 'chillpay_tz_operational_label') +
+    '</th><th>' +
+    t(locale, 'chillpay_tz_standard_tag') +
+    '</th><th>' +
+    t(locale, 'chillpay_tz_operational_tag') +
+    '</th></tr></thead><tbody><tr>' +
+    '<td><select name="standardTimezone" class="noti-tz-select" style="width:100%;max-width:280px;padding:6px 8px;">' +
+    stdOpts +
+    '</select></td>' +
+    '<td><select name="operationalTimezone" class="noti-tz-select" style="width:100%;max-width:280px;padding:6px 8px;">' +
+    opOpts +
+    '</select></td>' +
+    '<td><input type="text" id="notiStdTzTag" readonly value="' +
+    clocks.tagStd +
+    '" style="width:72px;text-align:center;padding:4px 6px;border:1px solid #e5e7eb;background:#f9fafb;" /></td>' +
+    '<td><input type="text" id="notiOpTzTag" readonly value="' +
+    clocks.tagOp +
+    '" style="width:72px;text-align:center;padding:4px 6px;border:1px solid #e5e7eb;background:#f9fafb;" /></td>' +
+    '</tr></tbody></table>' +
+    '<p class="chillpay-hint" style="margin-top:10px;">' +
+    t(locale, 'chillpay_tz_preview') +
+    '</p>' +
+    '<div id="notiTzPreview" style="font-size:13px;font-family:ui-monospace,monospace;margin-top:4px;">' +
+    '<div><span id="notiTzPreviewOp">' +
+    clocks.tagOp +
+    ': ' +
+    clocks.nowOp +
+    '</span></div>' +
+    '<div style="color:#6b7280;margin-top:2px;"><span id="notiTzPreviewStd">' +
+    clocks.tagStd +
+    ': ' +
+    clocks.nowStd +
+    '</span></div></div>' +
+    '<script>(function(){var tagMap=' +
+    tagMapJson +
+    ';var loc=' +
+    JSON.stringify(locIntl) +
+    ';function fmt(tz){try{return new Date().toLocaleString(loc,{timeZone:tz,hour12:false});}catch(e){return "-";}}function upd(){var std=document.querySelector("[name=standardTimezone]");var op=document.querySelector("[name=operationalTimezone]");if(!std||!op)return;var st=tagMap[std.value]||"??";var ot=tagMap[op.value]||"??";var tgS=document.getElementById("notiStdTzTag");var tgO=document.getElementById("notiOpTzTag");if(tgS)tgS.value=st;if(tgO)tgO.value=ot;var pO=document.getElementById("notiTzPreviewOp");var pS=document.getElementById("notiTzPreviewStd");if(pO)pO.textContent=ot+": "+fmt(op.value);if(pS)pS.textContent=st+": "+fmt(std.value);}document.querySelectorAll(".noti-tz-select").forEach(function(el){el.addEventListener("change",upd);});upd();setInterval(upd,1000);})();</script></section>'
+  );
+}
+
+function renderInternalTargetTimezoneFormFields(locale, editTarget) {
+  const tzMode = editTarget ? normalizeInternalTargetTimezoneMode(editTarget.timezoneMode) : 'global';
+  const stdTz = editTarget ? editTarget.standardTimezone || DEFAULT_CHILLPAY_TIMEZONE : DEFAULT_CHILLPAY_TIMEZONE;
+  const opTz = editTarget ? editTarget.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE : DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
+  const stdOpts = renderNotiTimezoneSelectOptions(locale, stdTz);
+  const opOpts = renderNotiTimezoneSelectOptions(locale, opTz);
+  const globalChecked = tzMode === 'global' ? ' checked' : '';
+  const customChecked = tzMode === 'custom' ? ' checked' : '';
+  const customDisplay = tzMode === 'custom' ? 'block' : 'none';
+  return (
+    '<section style="margin-top:16px;padding-top:14px;border-top:1px solid #e5e7eb;">' +
+    '<h3 style="margin:0 0 8px;font-size:15px;">' +
+    t(locale, 'internal_targets_tz_section_title') +
+    '</h3>' +
+    '<p class="admin-page-desc">' +
+    t(locale, 'internal_targets_tz_section_hint') +
+    '</p>' +
+    '<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px;">' +
+    '<label style="display:flex;align-items:center;gap:8px;margin:0;font-size:13px;">' +
+    '<input type="radio" name="timezoneMode" value="global"' +
+    globalChecked +
+    ' /> ' +
+    t(locale, 'internal_targets_tz_mode_global') +
+    '</label>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin:0;font-size:13px;">' +
+    '<input type="radio" name="timezoneMode" value="custom"' +
+    customChecked +
+    ' /> ' +
+    t(locale, 'internal_targets_tz_mode_custom') +
+    '</label></div>' +
+    '<div id="internal-target-tz-custom-wrap" style="display:' +
+    customDisplay +
+    ';margin-top:8px;">' +
+    '<table class="chillpay-time-table" style="max-width:720px;"><thead><tr>' +
+    '<th>' +
+    t(locale, 'chillpay_tz_standard_label') +
+    '</th><th>' +
+    t(locale, 'chillpay_tz_operational_label') +
+    '</th></tr></thead><tbody><tr>' +
+    '<td><select name="standardTimezone" class="internal-target-tz-select" style="width:100%;padding:6px 8px;">' +
+    stdOpts +
+    '</select></td>' +
+    '<td><select name="operationalTimezone" class="internal-target-tz-select" style="width:100%;padding:6px 8px;">' +
+    opOpts +
+    '</select></td>' +
+    '</tr></tbody></table>' +
+    '<p class="admin-page-desc" style="margin-top:8px;font-size:12px;">' +
+    t(locale, 'internal_targets_tz_custom_hint') +
+    '</p></div></section>'
+  );
+}
+
 const DEFAULT_SYNC_RESULT_DISPLAY_MINUTES = 30;
 const DEFAULT_REFUND_WINDOW_DAYS = 7;
 const DEFAULT_FORCE_REFUND_WINDOW_DAYS = 0;
@@ -680,7 +1082,9 @@ function loadChillPayTransactionConfig() {
       redirectRouteNos: normalizeChillpayRedirectRouteNos(
         Array.isArray(o && o.redirectRouteNos) ? o.redirectRouteNos : DEFAULT_CHILLPAY_REDIRECT_ROUTE_NUMBERS,
       ),
-      timezone: (o && o.timezone && String(o.timezone).trim()) ? String(o.timezone).trim() : DEFAULT_CHILLPAY_TIMEZONE,
+      standardTimezone: normalizeNotiIanaTimezone(o && (o.standardTimezone || o.timezone), DEFAULT_CHILLPAY_TIMEZONE),
+      operationalTimezone: normalizeNotiIanaTimezone(o && o.operationalTimezone, DEFAULT_NOTI_OPERATIONAL_TIMEZONE),
+      timezone: normalizeNotiIanaTimezone(o && (o.standardTimezone || o.timezone), DEFAULT_CHILLPAY_TIMEZONE),
       useSandbox: !!(o && o.useSandbox === true),
       emailFrom: (o && o.emailFrom != null) ? String(o.emailFrom).trim() : '',
       companyName: (o && o.companyName != null) ? String(o.companyName).trim() : '',
@@ -693,6 +1097,13 @@ function loadChillPayTransactionConfig() {
       smtpUser: (o && o.smtpUser != null) ? String(o.smtpUser).trim() : '',
       smtpPass: (o && o.smtpPass != null) ? String(o.smtpPass) : '',
       smtpTestTo: (o && o.smtpTestTo != null) ? String(o.smtpTestTo).trim() : '',
+      displayTzEffectiveFromIso: (o && o.displayTzEffectiveFromIso != null) ? String(o.displayTzEffectiveFromIso).trim() : '',
+      displayTzPreviousStandard: (o && o.displayTzPreviousStandard)
+        ? normalizeNotiIanaTimezone(o.displayTzPreviousStandard, DEFAULT_CHILLPAY_TIMEZONE)
+        : '',
+      displayTzPreviousOperational: (o && o.displayTzPreviousOperational)
+        ? normalizeNotiIanaTimezone(o.displayTzPreviousOperational, DEFAULT_NOTI_OPERATIONAL_TIMEZONE)
+        : '',
     };
   } catch (e) {
     return {
@@ -711,6 +1122,8 @@ function loadChillPayTransactionConfig() {
       logKeepDaysMem: DEFAULT_LOG_KEEP_DAYS_MEM,
       logKeepDaysDisk: DEFAULT_LOG_KEEP_DAYS_DISK,
       redirectRouteNos: normalizeChillpayRedirectRouteNos([...DEFAULT_CHILLPAY_REDIRECT_ROUTE_NUMBERS]),
+      standardTimezone: DEFAULT_CHILLPAY_TIMEZONE,
+      operationalTimezone: DEFAULT_NOTI_OPERATIONAL_TIMEZONE,
       timezone: DEFAULT_CHILLPAY_TIMEZONE,
       useSandbox: APP_ENV === 'test',
       emailFrom: '',
@@ -724,8 +1137,27 @@ function loadChillPayTransactionConfig() {
       smtpUser: '',
       smtpPass: '',
       smtpTestTo: '',
+      displayTzEffectiveFromIso: '',
+      displayTzPreviousStandard: '',
+      displayTzPreviousOperational: '',
     };
   }
+}
+
+function computeGlobalDisplayTzSnapshotForSave(cur, nextStd, nextOp, tzFieldsTouched) {
+  let displayTzEffectiveFromIso = cur.displayTzEffectiveFromIso || '';
+  let displayTzPreviousStandard = cur.displayTzPreviousStandard || '';
+  let displayTzPreviousOperational = cur.displayTzPreviousOperational || '';
+  if (tzFieldsTouched) {
+    const curStd = normalizeNotiIanaTimezone(cur.standardTimezone || cur.timezone, DEFAULT_CHILLPAY_TIMEZONE);
+    const curOp = normalizeNotiIanaTimezone(cur.operationalTimezone, DEFAULT_NOTI_OPERATIONAL_TIMEZONE);
+    if (nextStd !== curStd || nextOp !== curOp) {
+      displayTzPreviousStandard = curStd;
+      displayTzPreviousOperational = curOp;
+      displayTzEffectiveFromIso = new Date().toISOString();
+    }
+  }
+  return { displayTzEffectiveFromIso, displayTzPreviousStandard, displayTzPreviousOperational };
 }
 
 function saveChillPayTransactionConfig(o) {
@@ -752,7 +1184,21 @@ function saveChillPayTransactionConfig(o) {
         : cur.redirectRouteNos && cur.redirectRouteNos.length
           ? normalizeChillpayRedirectRouteNos(cur.redirectRouteNos)
           : normalizeChillpayRedirectRouteNos([...DEFAULT_CHILLPAY_REDIRECT_ROUTE_NUMBERS]),
-    timezone: (o && o.timezone != null && String(o.timezone).trim()) ? String(o.timezone).trim() : cur.timezone,
+    standardTimezone: (() => {
+      const raw = o && o.standardTimezone != null ? o.standardTimezone : (o && o.timezone != null ? o.timezone : undefined);
+      const base = cur.standardTimezone || cur.timezone || DEFAULT_CHILLPAY_TIMEZONE;
+      return raw != null ? normalizeNotiIanaTimezone(raw, base) : normalizeNotiIanaTimezone(base, DEFAULT_CHILLPAY_TIMEZONE);
+    })(),
+    operationalTimezone: (() => {
+      const raw = o && o.operationalTimezone != null ? o.operationalTimezone : undefined;
+      const base = cur.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
+      return raw != null ? normalizeNotiIanaTimezone(raw, base) : normalizeNotiIanaTimezone(base, DEFAULT_NOTI_OPERATIONAL_TIMEZONE);
+    })(),
+    timezone: (() => {
+      const raw = o && o.standardTimezone != null ? o.standardTimezone : (o && o.timezone != null ? o.timezone : undefined);
+      const base = cur.standardTimezone || cur.timezone || DEFAULT_CHILLPAY_TIMEZONE;
+      return raw != null ? normalizeNotiIanaTimezone(raw, base) : normalizeNotiIanaTimezone(base, DEFAULT_CHILLPAY_TIMEZONE);
+    })(),
     amountDisplayOp: (o && typeof o.amountDisplayOp === 'string' && ['*', '/', '+', '-'].includes(o.amountDisplayOp)) ? o.amountDisplayOp : cur.amountDisplayOp || DEFAULT_AMOUNT_DISPLAY_OP,
     amountDisplayValue: o && Number.isFinite(o.amountDisplayValue) ? o.amountDisplayValue : cur.amountDisplayValue,
     useSandbox: o && typeof o.useSandbox === 'boolean' ? o.useSandbox : cur.useSandbox,
@@ -767,6 +1213,20 @@ function saveChillPayTransactionConfig(o) {
     smtpUser: (o && o.smtpUser != null) ? String(o.smtpUser).trim() : cur.smtpUser,
     smtpPass: (o && o.smtpPass != null && String(o.smtpPass).trim() !== '') ? String(o.smtpPass) : cur.smtpPass,
     smtpTestTo: (o && o.smtpTestTo != null) ? String(o.smtpTestTo).trim() : cur.smtpTestTo,
+    ...computeGlobalDisplayTzSnapshotForSave(
+      cur,
+      (() => {
+        const raw = o && o.standardTimezone != null ? o.standardTimezone : (o && o.timezone != null ? o.timezone : undefined);
+        const base = cur.standardTimezone || cur.timezone || DEFAULT_CHILLPAY_TIMEZONE;
+        return raw != null ? normalizeNotiIanaTimezone(raw, base) : normalizeNotiIanaTimezone(base, DEFAULT_CHILLPAY_TIMEZONE);
+      })(),
+      (() => {
+        const raw = o && o.operationalTimezone != null ? o.operationalTimezone : undefined;
+        const base = cur.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
+        return raw != null ? normalizeNotiIanaTimezone(raw, base) : normalizeNotiIanaTimezone(base, DEFAULT_NOTI_OPERATIONAL_TIMEZONE);
+      })(),
+      !!(o && (o.standardTimezone != null || o.operationalTimezone != null || o.timezone != null)),
+    ),
   };
   fs.writeFileSync(CHILLPAY_TRANSACTION_CONFIG_PATH, JSON.stringify(toSave, null, 2));
   return toSave;
@@ -1231,6 +1691,7 @@ function loadInternalTargets() {
         devResultUrl: String(v.devResultUrl || '').trim(),
         pgProvider: pg,
         linkedMid,
+        ...internalTargetTimezoneFieldsFromRaw(v),
       };
       map.set(id, entry);
     });
@@ -3017,7 +3478,7 @@ function devInternalDeliveryRowClass(norm) {
 }
 
 function devInternalHaystackAdminLog(log, locale) {
-  const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+  const dt = formatDateAndTimeForLog(log);
   const payload = log.payload || {};
   const displayPayload = jpayInternalLogDisplayPayload(log);
   const jsonHeader = Object.keys(displayPayload).join(', ');
@@ -4073,60 +4534,13 @@ function toYmdUTC(d) {
   return `${y}-${m}-${day}`;
 }
 function getBangkokYmdFromIso(iso) {
-  if (!iso) return '';
-  const t = Date.parse(String(iso));
-  if (!t || Number.isNaN(t)) return '';
-  // 방콕 자정 기준 비교를 위해 ms에 오프셋을 더한 뒤 UTC 날짜를 사용
-  const bang = new Date(t + BANGKOK_OFFSET_MS);
-  return toYmdUTC(bang);
+  return getYmdInTimezone(iso, getNotiStandardTimezone());
 }
 function getBangkokTodayYmd() {
-  return toYmdUTC(new Date(Date.now() + BANGKOK_OFFSET_MS));
+  return getTodayYmdInTimezone(getNotiStandardTimezone());
 }
 function calcBangkokPresetRange(preset) {
-  const p = String(preset || '').toString().trim();
-  if (!p) return null;
-  const nowBang = new Date(Date.now() + BANGKOK_OFFSET_MS);
-  const base = new Date(Date.UTC(nowBang.getUTCFullYear(), nowBang.getUTCMonth(), nowBang.getUTCDate()));
-  const todayYmd = toYmdUTC(base);
-
-  const dayOfWeek = base.getUTCDay(); // 0=일요일
-  const mondayDiff = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-
-  const ymd = (d) => toYmdUTC(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())));
-
-  if (p === 'today') return { startDate: todayYmd, endDate: todayYmd };
-  if (p === 'yesterday') {
-    const d = new Date(base);
-    d.setUTCDate(d.getUTCDate() - 1);
-    const s = ymd(d);
-    return { startDate: s, endDate: s };
-  }
-  if (p === 'this_week') {
-    const start = new Date(base);
-    start.setUTCDate(start.getUTCDate() + mondayDiff);
-    const end = new Date(start);
-    end.setUTCDate(end.getUTCDate() + 6);
-    return { startDate: ymd(start), endDate: ymd(end) };
-  }
-  if (p === 'last_week') {
-    const end = new Date(base);
-    end.setUTCDate(end.getUTCDate() + mondayDiff - 1);
-    const start = new Date(end);
-    start.setUTCDate(start.getUTCDate() - 6);
-    return { startDate: ymd(start), endDate: ymd(end) };
-  }
-  if (p === 'this_month') {
-    const start = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 1));
-    const end = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0));
-    return { startDate: ymd(start), endDate: ymd(end) };
-  }
-  if (p === 'last_month') {
-    const start = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() - 1, 1));
-    const end = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 0));
-    return { startDate: ymd(start), endDate: ymd(end) };
-  }
-  return null;
+  return calcPresetRangeInTimezone(preset, getNotiStandardTimezone());
 }
 
 function parseLogDateRangeFromQuery(q) {
@@ -4208,7 +4622,7 @@ function routeNoSearchExactMatch(routeVal, wantRaw) {
 
 function notiHaystackPgResultLog(log, locale, logPg) {
   const body = parseNotiBody(log);
-  const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+  const dt = formatDateAndTimeForLog(log);
   const routeNo = (log.routeKey && (log.routeKey.match(/\/(\d+)$/) || [null, log.routeKey])[1]) || log.routeKey || '';
   const envLabel = (log.env && String(log.env).toLowerCase()) === 'sandbox' ? 'sandbox' : 'live';
   const relayStatus = String(log.relayStatus || '');
@@ -4267,7 +4681,7 @@ function notiHaystackPgResultLog(log, locale, logPg) {
 }
 
 function notiHaystackPgNotiLog(log, locale) {
-  const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+  const dt = formatDateAndTimeForLog(log);
   const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
   let jsonCallback = log.kind === 'callback' ? JSON.stringify(log.body, null, 2) : '';
   let jsonResult = log.kind === 'result' ? JSON.stringify(log.body, null, 2) : '';
@@ -4315,7 +4729,7 @@ function notiHaystackPgNotiLog(log, locale) {
 }
 
 function internalHaystackAdminLog(log, locale) {
-  const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+  const dt = formatDateAndTimeForLog(log);
   const payload = log.payload || {};
   const displayPayload = jpayInternalLogDisplayPayload(log);
   const jsonHeader = Object.keys(displayPayload).join(', ');
@@ -4360,7 +4774,7 @@ function internalHaystackAdminLog(log, locale) {
 
 function internalResultHaystackLog(log, locale, envLabel, opt) {
   const payload = log.payload || {};
-  const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+  const dt = formatDateAndTimeForLog(log);
   const txId = String(payload.TransactionId != null ? payload.TransactionId : (payload.transactionId != null ? payload.transactionId : ''));
   const payStatus = payload.PaymentStatus != null ? payload.PaymentStatus : '';
   const statusDesc =
@@ -4525,10 +4939,11 @@ function renderAdminLogFilterBar(locale, cfg) {
   );
 }
 
-// 태국 시간(Asia/Bangkok) 문자열 생성 (노티 로그용)
+// 표준 시간대(업무 기준) 현재 시각 문자열 — 구명 getThailandNowString 유지
 function getThailandNowString() {
-  return new Date().toLocaleString('th-TH', {
-    timeZone: 'Asia/Bangkok',
+  const tz = getNotiStandardTimezone();
+  return new Date().toLocaleString('en-CA', {
+    timeZone: tz,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -4562,17 +4977,72 @@ function formatTimeMultiTZ(isoString) {
   return { th, jp, sg, us };
 }
 
-// 결과 요약용: 날짜·시각 분리, 태국·일본만 (수신일, 수신시각 TH/JP)
-function formatDateAndTimeTHJP(isoString) {
-  if (!isoString) return { date: '-', timeTh: '-', timeJp: '-' };
+// 결과 요약용: 날짜·시각 분리 — 1줄=운영, 2줄=표준 (전산대상 custom TZ 우선, global은 변경 시점 기준)
+function getNotiDualTimeTags(dtOrInternalTargetId, isoString) {
+  if (dtOrInternalTargetId && typeof dtOrInternalTargetId === 'object' && dtOrInternalTargetId.tagOp) {
+    return { tagOp: dtOrInternalTargetId.tagOp, tagStd: dtOrInternalTargetId.tagStd };
+  }
+  const tid = typeof dtOrInternalTargetId === 'string' ? dtOrInternalTargetId : '';
+  const zones = resolveDisplayTimezones(isoString, tid);
+  return {
+    tagOp: timezoneTagFromIana(zones.operationalTimezone),
+    tagStd: timezoneTagFromIana(zones.standardTimezone),
+  };
+}
+
+function dualTimeCellInner(dt, esc, searchRaw) {
+  const tags = getNotiDualTimeTags(dt);
+  const fmt = (v) => {
+    const s = v != null && v !== '' ? String(v) : '-';
+    if (searchRaw) return highlightLogSearchHtml(s, searchRaw, esc);
+    return esc(s);
+  };
+  return (
+    tags.tagOp +
+    ': ' +
+    fmt(dt.timeTh) +
+    '<br><span class="time-jp">' +
+    tags.tagStd +
+    ': ' +
+    fmt(dt.timeJp) +
+    '</span>'
+  );
+}
+
+function dualTimeSlashText(dt) {
+  const tags = getNotiDualTimeTags(dt);
+  return tags.tagOp + ':' + (dt.timeTh || '-') + ' / ' + tags.tagStd + ':' + (dt.timeJp || '-');
+}
+
+function dualTimePairText(dt) {
+  const tags = getNotiDualTimeTags(dt);
+  return tags.tagOp + ':' + (dt.timeTh || '-') + ' ' + tags.tagStd + ':' + (dt.timeJp || '-');
+}
+
+function formatDateAndTimeTHJP(isoString, internalTargetId) {
+  if (!isoString) return { date: '-', timeTh: '-', timeJp: '-', tagOp: '-', tagStd: '-' };
   const d = new Date(isoString);
-  if (Number.isNaN(d.getTime())) return { date: '-', timeTh: '-', timeJp: '-' };
-  const dateOpts = { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Bangkok' };
+  if (Number.isNaN(d.getTime())) return { date: '-', timeTh: '-', timeJp: '-', tagOp: '-', tagStd: '-' };
+  const zones = resolveDisplayTimezones(isoString, internalTargetId);
+  const opTz = zones.operationalTimezone;
+  const stdTz = zones.standardTimezone;
+  const dateOpts = { year: 'numeric', month: '2-digit', day: '2-digit' };
   const timeOpts = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
-  const date = d.toLocaleDateString('en-CA', dateOpts);
-  const timeTh = d.toLocaleTimeString('en-CA', { ...timeOpts, timeZone: 'Asia/Bangkok' });
-  const timeJp = d.toLocaleTimeString('en-CA', { ...timeOpts, timeZone: 'Asia/Tokyo' });
-  return { date, timeTh, timeJp };
+  const date = d.toLocaleDateString('en-CA', { ...dateOpts, timeZone: stdTz });
+  const timeTh = d.toLocaleTimeString('en-CA', { ...timeOpts, timeZone: opTz });
+  const timeJp = d.toLocaleTimeString('en-CA', { ...timeOpts, timeZone: stdTz });
+  const tagOp = timezoneTagFromIana(opTz);
+  const tagStd = timezoneTagFromIana(stdTz);
+  return { date, timeTh, timeJp, tagOp, tagStd };
+}
+
+function formatDateAndTimeForLog(log, merchant, isoOverride) {
+  const tid = resolveLogDisplayInternalTargetId(log, merchant);
+  const iso =
+    isoOverride != null
+      ? isoOverride
+      : log && (log.receivedAtIso || log.receivedAt || log.storedAtIso || log.storedAt);
+  return formatDateAndTimeTHJP(iso, tid);
 }
 
 // DirectCredit용 CheckSum 생성 (매뉴얼 Table 1.3 + 제공 스크립트와 동일한 로직)
@@ -5147,7 +5617,7 @@ async function fetchChillPayPgTransactionsDateRange(useSandbox, transactionDateF
 async function fetchChillPayPgTransactionsForEnv(useSandbox, options) {
   const { incremental = false, existingByDate = {} } = options || {};
   const cfg = loadChillPayTransactionConfig();
-  const tz = cfg.timezone || 'Asia/Tokyo';
+  const tz = getNotiStandardTimezone();
   // 서버 로컬 시간을 기준으로 사용하고, 실제 타임존 보정은 formatChillPayTransactionDate에서 처리한다.
   const now = new Date();
   const toDate = now;
@@ -5695,15 +6165,15 @@ function logMatchesNotiTransactionDateRange(log, dateFrom, dateTo, tzFallback) {
   }
 }
 
-/** 목록·CSV용: 본문 결제일 시각(TH/JP), 없으면 수신 시각 */
-function formatNotiLogPaymentDateTimeTHJP(log, tzFallback) {
+function formatNotiLogPaymentDateTimeTHJP(log, _tzFallback, merchant) {
   const body = parseNotiBody(log);
   const payRaw = notifBodyPaymentDateForWindow(body);
   const pd = payRaw ? parseVoidRefundScheduleDateRaw(payRaw) : null;
+  const tid = resolveLogDisplayInternalTargetId(log, merchant);
   if (pd && !Number.isNaN(pd.getTime())) {
-    return formatDateAndTimeTHJP(pd.toISOString());
+    return formatDateAndTimeTHJP(pd.toISOString(), tid);
   }
-  return formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+  return formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt, tid);
 }
 
 function voidRefundNotiEntryMatchesEnv(entry, env) {
@@ -5715,7 +6185,7 @@ function voidRefundNotiEntryMatchesEnv(entry, env) {
 
 function getVoidRefundWindow(paymentDateOrIso, nowIso) {
   const cfg = loadChillPayTransactionConfig();
-  const tz = cfg.timezone || DEFAULT_CHILLPAY_TIMEZONE;
+  const tz = getNotiStandardTimezone();
   const date = parseVoidRefundScheduleDateRaw(paymentDateOrIso);
   if (!date) return 'refund_only';
 
@@ -5748,7 +6218,7 @@ function getVoidRefundWindow(paymentDateOrIso, nowIso) {
 // 태국 시간 기준 현재 시각이 23:59 이상(당일 종료)인지
 function isThailandTimePast2359(nowDate) {
   const cfg = loadChillPayTransactionConfig();
-  const tz = cfg.timezone || DEFAULT_CHILLPAY_TIMEZONE;
+  const tz = getNotiStandardTimezone();
   const d = nowDate && nowDate instanceof Date ? nowDate : new Date(nowDate);
   if (Number.isNaN(d.getTime())) return false;
   const timeParts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(d);
@@ -5761,7 +6231,7 @@ function isThailandTimePast2359(nowDate) {
 // 환불 요청 버튼 활성화 여부: 결제 다음날(d+1) ~ d+환불 가능 기간(일) 안인지 검사. 당일(d) 결제는 비활성화 (환경설정의 환불 가능 기간(일) 적용)
 function isWithinRefundWindow(paymentDateOrIso, nowIso) {
   const cfg = loadChillPayTransactionConfig();
-  const tz = cfg.timezone || DEFAULT_CHILLPAY_TIMEZONE;
+  const tz = getNotiStandardTimezone();
   const days = Number(cfg.refundWindowDays) > 0 ? cfg.refundWindowDays : DEFAULT_REFUND_WINDOW_DAYS;
   const raw = paymentDateOrIso;
   if (raw == null || raw === '') return false;
@@ -5814,7 +6284,7 @@ function isWithinRefundWindow(paymentDateOrIso, nowIso) {
 // 강제환불 가능 여부: 환불거래 기간 종료 다음날(H = refundWindowDays+1) ~ H+강제환불가능기간(일) 안인지 검사
 function isWithinForceRefundWindow(paymentDateOrIso, nowIso) {
   const cfg = loadChillPayTransactionConfig();
-  const tz = cfg.timezone || DEFAULT_CHILLPAY_TIMEZONE;
+  const tz = getNotiStandardTimezone();
   const refundDays = Number(cfg.refundWindowDays) > 0 ? cfg.refundWindowDays : DEFAULT_REFUND_WINDOW_DAYS;
   const forceDays = Number(cfg.forceRefundWindowDays) >= 0 ? cfg.forceRefundWindowDays : DEFAULT_FORCE_REFUND_WINDOW_DAYS;
   if (forceDays <= 0) return false;
@@ -8479,10 +8949,11 @@ function formatTimeForLocale(date, locale) {
     return date.toLocaleString('ko-KR', { hour12: false });
   }
 }
-function getAdminTopbar(locale, clientIp, nowDateOrLocal, nowTh, adminUser, currentPath) {
+function getAdminTopbar(locale, clientIp, nowDateOrLocal, _legacyNowTh, adminUser, currentPath) {
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const nowDate = nowDateOrLocal instanceof Date ? nowDateOrLocal : new Date();
   const nowLocal = nowDateOrLocal instanceof Date ? formatTimeForLocale(nowDate, locale) : nowDateOrLocal;
+  const clocks = buildAdminTopbarClocks(nowDate, locale);
   const back = currentPath || '/admin/merchants';
   const langLinks = SUPPORTED_LOCALES.map((l) => {
     const label = l === 'zh' ? 'CH' : l.toUpperCase();
@@ -8493,7 +8964,8 @@ function getAdminTopbar(locale, clientIp, nowDateOrLocal, nowTh, adminUser, curr
     <div class="topbar-meta">
       <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'topbar_ip'))}</span> <span class="topbar-v">${esc(clientIp || '-')}</span></div>
       <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'topbar_time'))}</span> <span class="topbar-v">${esc(nowLocal)}</span></div>
-      <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'topbar_time_th'))}</span> <span class="topbar-v">${esc(nowTh)}</span></div>
+      <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'topbar_time_operational'))} (${esc(clocks.tagOp)})</span> <span class="topbar-v">${esc(clocks.nowOp)}</span></div>
+      <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'topbar_time_standard'))} (${esc(clocks.tagStd)})</span> <span class="topbar-v">${esc(clocks.nowStd)}</span></div>
     </div>
     <div class="topbar-actions">
       <div class="topbar-chip"><span class="topbar-k">${esc(t(locale, 'lang_switch'))}</span> <span class="topbar-lang-links">${langLinks}</span></div>
@@ -9471,6 +9943,7 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
           + renderJpayEnvironmentCard(locale, req.query || {})
           + '<div class="card card-chillpay"><h2>' + t(locale, 'chillpay_time_title') + '</h2><p class="admin-page-desc">' + t(locale, 'chillpay_time_desc') + '</p>'
           + '<form method="post" action="/admin/settings/chillpay-time" onsubmit="return confirm(\'' + (t(locale, 'chillpay_time_confirm_save') || '').replace(/'/g, "\\'") + '\');">'
+          + renderChillpayTimezoneSection(locale, c)
           + '<section class="chillpay-section"><h3>' + t(locale, 'chillpay_time_void_window') + '</h3><p class="admin-page-desc">' + t(locale, 'chillpay_time_hint_dates') + '</p>'
           + '<table class="chillpay-time-table"><thead><tr><th>' + t(locale, 'chillpay_th_void_cutoff') + '</th><th>' + t(locale, 'chillpay_th_manual_email') + '</th><th>' + t(locale, 'chillpay_th_refund_start') + '</th><th>' + t(locale, 'chillpay_th_amount_formula') + '</th></tr></thead><tbody>'
           + '<tr>'
@@ -9512,7 +9985,6 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
         + '<td class="time-desc-cell">피지결과, 전산결과, 개발결과, 피지노티, 전산노티, 메일 로그의 보관 기간입니다.</td>'
         + '</tr></tbody></table>'
           + '</section>'
-          + '<input type="hidden" name="timezone" value="Asia/Bangkok" />'
           + '<div class="chillpay-submit"><button type="submit">' + t(locale, 'common_save') + '</button></div></form></div>'
           + '<div class="card card-chillpay"><h2>' + t(locale, 'chillpay_email_title') + '</h2><p class="admin-page-desc">' + t(locale, 'chillpay_email_desc') + '</p>'
           + '<form method="post" action="/admin/settings/chillpay-email" onsubmit="return confirm(\'' + (t(locale, 'chillpay_email_confirm_save') || '').replace(/'/g, "\\'") + '\');">'
@@ -9725,6 +10197,8 @@ app.post('/admin/settings/chillpay-time', requireAuth, requireSettingsOrRedirect
   const logKeepDaysDisk = parseInt(req.body.logKeepDaysDisk, 10);
   const amountDisplayOp = req.body && req.body.amountDisplayOp != null ? String(req.body.amountDisplayOp).trim() : '';
   const amountDisplayValue = parseFloat(req.body.amountDisplayValue);
+  const standardTimezone = req.body && req.body.standardTimezone != null ? String(req.body.standardTimezone).trim() : undefined;
+  const operationalTimezone = req.body && req.body.operationalTimezone != null ? String(req.body.operationalTimezone).trim() : undefined;
   saveChillPayTransactionConfig({
     voidCutoffHour: Number.isFinite(voidCutoffHour) ? voidCutoffHour : DEFAULT_VOID_CUTOFF_HOUR,
     voidCutoffMinute: Number.isFinite(voidCutoffMinute) ? voidCutoffMinute : DEFAULT_VOID_CUTOFF_MINUTE,
@@ -9740,7 +10214,8 @@ app.post('/admin/settings/chillpay-time', requireAuth, requireSettingsOrRedirect
     logKeepDaysDisk: Number.isFinite(logKeepDaysDisk) && logKeepDaysDisk > 0 ? Math.min(365, logKeepDaysDisk) : undefined,
     amountDisplayOp: ['*', '/', '+', '-'].includes(amountDisplayOp) ? amountDisplayOp : undefined,
     amountDisplayValue: Number.isFinite(amountDisplayValue) ? amountDisplayValue : undefined,
-    timezone: (req.body && req.body.timezone != null) ? String(req.body.timezone).trim() : 'Asia/Tokyo',
+    standardTimezone,
+    operationalTimezone,
   });
   try {
     reloadMemLogsFromDisk();
@@ -12216,7 +12691,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
   const rows = pagedLogsPg
     .map((log, i) => {
       const realIndex = NOTI_LOGS.indexOf(log);
-      const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+      const dt = formatDateAndTimeForLog(log);
       const bodyForDisplayPg = parseNotiBodyForDisplay(log);
       let jsonCallback = log.kind === 'callback' ? JSON.stringify(bodyForDisplayPg, null, 2) : '';
       let jsonResult = log.kind === 'result' ? JSON.stringify(bodyForDisplayPg, null, 2) : '';
@@ -12272,11 +12747,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       const rowCells = {
         received_date: '<td class="col-date">' + highlightLogSearchHtml(dt.date, logSearchRawPg, esc) + '</td>',
         received_time:
-          '<td class="col-time">TH: ' +
-          highlightLogSearchHtml(dt.timeTh, logSearchRawPg, esc) +
-          '<br><span class="time-jp">JP: ' +
-          highlightLogSearchHtml(dt.timeJp, logSearchRawPg, esc) +
-          '</span></td>',
+          '<td class="col-time">' + dualTimeCellInner(dt, esc, logSearchRawPg) + '</td>',
         route: '<td class="col-narrow">' + highlightLogSearchHtml(log.routeKey || '', logSearchRawPg, esc) + '</td>',
         merchant_id: '<td class="col-narrow">' + highlightLogSearchHtml(log.merchantId || '', logSearchRawPg, esc) + '</td>',
         relay_status:
@@ -13778,7 +14249,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   let list = filterTransactionLogsByNotiKind([...getTransactionListLogs(req)].slice().reverse(), notiKindFilter);
   // "칠리페이 기준" = ChillPay 환경설정 timezone 기준으로 날짜를 끊는다 (피지거래내역과 동일)
   const cfgTx = loadChillPayTransactionConfig();
-  const chillTz = (cfgTx && cfgTx.timezone) ? String(cfgTx.timezone).trim() : 'Asia/Bangkok';
+  const chillTz = getNotiStandardTimezone();
   const toYmd = (d) => {
     try {
       // en-CA: YYYY-MM-DD 형식
@@ -14411,7 +14882,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       if (col.type === 'fixed') {
         if (col.id === 'no') cells.push('<td class="col-no">' + esc(String((pageNum - 1) * perPage + index + 1)) + '</td>');
         else if (col.id === 'received_date') cells.push('<td class="col-date">' + esc(dt.date) + '</td>');
-        else if (col.id === 'received_time') cells.push('<td class="col-time">TH:' + esc(dt.timeTh) + '<br><span class="time-jp">JP:' + esc(dt.timeJp) + '</span></td>');
+        else if (col.id === 'received_time') cells.push('<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>');
         else if (col.id === 'route_no') cells.push('<td class="col-route">' + esc(routeNoDisplay) + '</td>');
         else if (col.id === 'pg_acquirer') cells.push('<td class="col-acquirer">' + esc(acquirerLabelFromLog(locale, log)) + '</td>');
         else if (col.id === 'merchant') cells.push('<td class="col-merchant">' + esc(log.merchantId || '') + '</td>');
@@ -14521,8 +14992,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
 const DAILY_DETAIL_ROW_CAP = 8000;
 
 function dailyNotiChillTz() {
-  const cfgTx = loadChillPayTransactionConfig();
-  return (cfgTx && cfgTx.timezone) ? String(cfgTx.timezone).trim() : 'Asia/Bangkok';
+  return getNotiStandardTimezone();
 }
 
 function dailyNotiIsoToYmd(iso, chillTz) {
@@ -14865,7 +15335,7 @@ function computeDailyPgSummaryDayRows(req) {
   const block = env === 'sandbox' ? store.sandbox : store.production;
   const byDate = block.byDate || {};
   const cfg = loadChillPayTransactionConfig();
-  const chillTz = (cfg && cfg.timezone) ? String(cfg.timezone).trim() : 'Asia/Bangkok';
+  const chillTz = getNotiStandardTimezone();
   const toYmdTz = (dObj) => {
     try {
       return new Intl.DateTimeFormat('en-CA', { timeZone: chillTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(dObj);
@@ -15187,8 +15657,13 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     '<div id="dailyNotiDetailBody" class="admin-page-desc" style="color:#64748b;">' +
     esc(t(locale, 'daily_detail_placeholder')) +
     '</div></div>';
+  const dailyDualTags = getNotiDualTimeTags();
   const script =
-    '<script>(function(){var apiBase="/admin/api/daily-noti-detail";function qs(){var p=new URLSearchParams(window.location.search||"");return p.toString();}function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}document.querySelectorAll("tr.daily-sum-row").forEach(function(tr){tr.addEventListener("dblclick",function(){var d=tr.getAttribute("data-date");if(!d)return;var el=document.getElementById("dailyNotiDetailBody");var title=document.getElementById("dailyNotiDetailTitle");if(title)title.textContent="' +
+    '<script>(function(){var apiBase="/admin/api/daily-noti-detail";var tzTags={op:"' +
+    dailyDualTags.tagOp +
+    '",std:"' +
+    dailyDualTags.tagStd +
+    '"};function qs(){var p=new URLSearchParams(window.location.search||"");return p.toString();}function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}document.querySelectorAll("tr.daily-sum-row").forEach(function(tr){tr.addEventListener("dblclick",function(){var d=tr.getAttribute("data-date");if(!d)return;var el=document.getElementById("dailyNotiDetailBody");var title=document.getElementById("dailyNotiDetailTitle");if(title)title.textContent="' +
     esc(t(locale, 'daily_detail_title')) +
     ' ("+d+")";if(!el)return;el.innerHTML="' +
     esc(t(locale, 'daily_detail_loading')) +
@@ -15205,7 +15680,7 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     '","Amt","ICOPAY","CCY","' +
     esc(t(locale, 'tx_th_status')) +
     (txSource === 'jpay' ? '","Customer","Email","CardNo' : '') +
-    '"];var html="<div style=\\"overflow-x:auto;\\"><table class=\\"tx-list-table\\"><thead><tr>"+th.map(function(h){return "<th>"+esc(h)+"</th>";}).join("")+"</tr></thead><tbody>";rows.forEach(function(r,i){html+="<tr><td>"+(i+1)+"</td><td>"+esc(r.d)+"</td><td style=\\"font-size:11px;\\">TH:"+esc(r.th)+"<br><span class=\\"time-jp\\">JP:"+esc(r.jp)+"</span></td><td style=\\"font-size:11px;\\">"+esc(r.txid)+"</td><td style=\\"font-size:11px;\\">"+esc(r.mid)+"</td><td>"+esc(r.amt)+"</td><td>"+esc(r.ico)+"</td><td>"+esc(r.ccy)+"</td><td>"+esc(r.st)+"</td>"' +
+    '"];var html="<div style=\\"overflow-x:auto;\\"><table class=\\"tx-list-table\\"><thead><tr>"+th.map(function(h){return "<th>"+esc(h)+"</th>";}).join("")+"</tr></thead><tbody>";rows.forEach(function(r,i){html+="<tr><td>"+(i+1)+"</td><td>"+esc(r.d)+"</td><td style=\\"font-size:11px;\\">"+tzTags.op+":"+esc(r.th)+"<br><span class=\\"time-jp\\">"+tzTags.std+":"+esc(r.jp)+"</span></td><td style=\\"font-size:11px;\\">"+esc(r.txid)+"</td><td style=\\"font-size:11px;\\">"+esc(r.mid)+"</td><td>"+esc(r.amt)+"</td><td>"+esc(r.ico)+"</td><td>"+esc(r.ccy)+"</td><td>"+esc(r.st)+"</td>"' +
     (txSource === 'jpay'
       ? '+(j.jpay?("<td>"+esc(r.customer)+"</td><td>"+esc(r.email)+"</td><td>"+esc(r.cardno)+"</td>"):"")'
       : '') +
@@ -15618,7 +16093,8 @@ app.get('/admin/api/daily-pg-detail', requireAuth, requirePage('cr_pg_transactio
       const dt = new Date(utcMs);
       return Number.isNaN(dt.getTime()) ? '' : dt.toISOString();
     })();
-    const dtFmt = formatDateAndTimeTHJP(txIso);
+    const tidDetail = resolveInternalTargetIdFromRouteNo(row && row.routeNo);
+    const dtFmt = formatDateAndTimeTHJP(txIso, tidDetail);
     let merch = row.merchant || '-';
     const rn = row && row.routeNo != null ? String(row.routeNo).trim() : '';
     if (rn) {
@@ -15631,7 +16107,7 @@ app.get('/admin/api/daily-pg-detail', requireAuth, requirePage('cr_pg_transactio
     }
     rows.push({
       d: dtFmt.date,
-      t: 'TH:' + dtFmt.timeTh + ' / JP:' + dtFmt.timeJp,
+      t: dualTimeSlashText(dtFmt),
       txid: String(row.transactionId || '').trim(),
       merch,
       ord: String(row.orderNo || '').trim(),
@@ -15897,7 +16373,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
   }
   const syncIntervalMin = Number.isFinite(cfg.pgTransactionSyncIntervalMinutes) && cfg.pgTransactionSyncIntervalMinutes > 0 ? cfg.pgTransactionSyncIntervalMinutes : 30;
   // "칠리페이 기준" = ChillPay 환경설정 timezone 기준으로 프리셋(당일/전일/이번주...) 계산
-  const chillTz = (cfg && cfg.timezone) ? String(cfg.timezone).trim() : 'Asia/Bangkok';
+  const chillTz = getNotiStandardTimezone();
   const toYmdTz = (dObj) => {
     try {
       return new Intl.DateTimeFormat('en-CA', { timeZone: chillTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(dObj);
@@ -16215,8 +16691,9 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
     const icopayVal = row.amount != null ? formatAmountWithSeparator(toIcopay(row.amount, row.currency)) : '-';
     const txIso = pgDateTimeToIsoTh(row.transactionDate);
     const payIso = pgDateTimeToIsoTh(row.paymentDate);
-    const txDt = formatDateAndTimeTHJP(txIso);
-    const payDt = formatDateAndTimeTHJP(payIso);
+    const tidPg = resolveInternalTargetIdFromRouteNo(row && row.routeNo);
+    const txDt = formatDateAndTimeTHJP(txIso, tidPg);
+    const payDt = formatDateAndTimeTHJP(payIso, tidPg);
     const cellStyleBase = 'text-align:center;padding:8px 6px;border:1px solid #e5e7eb;';
     const makeTd = (content, extraStyle, isStatus) => {
       let cellStyle = cellStyleBase + (extraStyle || 'font-size:12px;');
@@ -16226,7 +16703,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
     const cellMap = {
       row_no: makeTd(rowNo, 'font-size:12px;'),
       tx_date: makeTd(txDt.date || '-', 'font-size:12px;'),
-      tx_time: makeTd('TH:' + (txDt.timeTh || '-') + ' JP:' + (txDt.timeJp || '-'), 'font-size:12px;'),
+      tx_time: makeTd(dualTimePairText(txDt), 'font-size:12px;'),
       transaction_id: makeTd(row.transactionId, 'font-size:12px;'),
       merchant: makeTd(getPgMerchantDisplay(row), 'font-size:12px;'),
       customer: makeTd(row.customer || '-', 'font-size:12px;'),
@@ -16235,7 +16712,7 @@ app.get('/admin/pg-transactions', requireAuth, requirePage('cr_pg_transactions')
         'font-size:12px;min-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
       ),
       payment_channel: makeTd(row.paymentChannel || '-', 'font-size:12px;'),
-      pay_time: makeTd('TH:' + (payDt.timeTh || '-') + ' JP:' + (payDt.timeJp || '-'), 'font-size:12px;'),
+      pay_time: makeTd(dualTimePairText(payDt), 'font-size:12px;'),
       amount: makeTd(row.amount != null ? row.amount : '-', 'font-size:12px;'),
       icopay: makeTd(icopayVal, 'font-size:12px;'),
       fee: makeTd(row.fee != null ? row.fee : '-', 'font-size:12px;'),
@@ -16697,7 +17174,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
   const notiKindFilter = parseTxNotiKindFilter(req);
   let list = filterTransactionLogsByNotiKind([...getTransactionListLogs(req)].slice().reverse(), notiKindFilter);
   const cfgTxExport = loadChillPayTransactionConfig();
-  const chillTzExport = (cfgTxExport && cfgTxExport.timezone) ? String(cfgTxExport.timezone).trim() : 'Asia/Bangkok';
+  const chillTzExport = getNotiStandardTimezone();
   if (dateFrom || dateTo) {
     list = list.filter((log) => logMatchesNotiTransactionDateRange(log, dateFrom, dateTo, chillTzExport));
   }
@@ -16825,7 +17302,7 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
     const routeNo = getRouteNoDisplay(merchant, log.routeKey);
     const tradeDt = formatNotiLogPaymentDateTimeTHJP(log, chillTzExport);
-    const recvDt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const recvDt = formatDateAndTimeForLog(log);
     const txId = body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '';
     const isJpExport = getNotiLogPgAcquirer(log) === 'jpay';
     let notiLabel = '';
@@ -16871,9 +17348,9 @@ app.get('/admin/transactions/export', requireAuth, requirePage('cr_transactions'
     return [
       idx + 1,
       tradeDt.date,
-      'TH:' + tradeDt.timeTh + ' JP:' + tradeDt.timeJp,
+      dualTimePairText(tradeDt),
       recvDt.date,
-      'TH:' + recvDt.timeTh + ' JP:' + recvDt.timeJp,
+      dualTimePairText(recvDt),
       txId,
       acquirerLabelFromLog(locale, log),
       log.merchantId || '',
@@ -17400,7 +17877,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
     .join('');
   const rows = displayCancelled.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
-    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const dt = formatDateAndTimeForLog(log);
     const body = parseNotiBodyForDisplay(log);
     const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
     const jpayRc = getNotiLogPgAcquirer(log) === 'jpay' && isJpaySaleAsyncNotifyBody(body) ? String(body.returncode || '').trim() : '';
@@ -17440,7 +17917,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
     const rowCells = {
       received_date: '<td class="col-date">' + esc(dt.date) + '</td>',
       received_time:
-        '<td class="col-time">TH: ' + esc(dt.timeTh) + '<br><span class="time-jp">JP: ' + esc(dt.timeJp) + '</span></td>',
+        '<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>',
       route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
       merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
       transaction_id: '<td>' + esc(String(txId)) + '</td>',
@@ -18049,7 +18526,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
   const voidRowStatusFilter = (q.voidRowStatus || 'all').toString();
   const perPageVoid = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const pageVoid = Math.max(1, parseInt(q.page, 10) || 1);
-  const chillTzVoid = (cfgVoid && cfgVoid.timezone) ? String(cfgVoid.timezone).trim() : 'Asia/Bangkok';
+  const chillTzVoid = getNotiStandardTimezone();
   const toYmdVoid = (d) => {
     try {
       return new Intl.DateTimeFormat('en-CA', { timeZone: chillTzVoid, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
@@ -18360,7 +18837,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
   const cfg = loadChillPayTransactionConfig();
   const rows = displayVoidList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
-    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const dt = formatDateAndTimeForLog(log);
     const body = parseNotiBodyForDisplay(log);
     // 무효요청 버튼 활성화 여부도 동일하게 노티 수신 시각 기준으로 판정
     const baseDate =
@@ -18453,15 +18930,15 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
         + `<a href="${emailTestUrl}" class="btn-email" style="background:#0ea5e9;">${(t(locale, 'cr_btn_test_send') || '테스트발송').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>`
         + `</div>`;
     }
-    const sentDt = sentEntry ? formatDateAndTimeTHJP(sentEntry.sentAtIso || sentEntry.sentAt) : { date: '-', timeTh: '-', timeJp: '-' };
+    const sentDt = sentEntry ? formatDateAndTimeForLog(log, null, sentEntry.sentAtIso || sentEntry.sentAt) : { date: '-', timeTh: '-', timeJp: '-', tagOp: '-', tagStd: '-' };
     const jpayExtras = jpayCrExtraCellMap(log, esc);
     const rowCells = {
       received_date: '<td class="col-date">' + esc(dt.date) + '</td>',
       received_time:
-        '<td class="col-time">TH: ' + esc(dt.timeTh) + '<br><span class="time-jp">JP: ' + esc(dt.timeJp) + '</span></td>',
+        '<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>',
       sent_date: '<td class="col-date">' + esc(sentDt.date) + '</td>',
       sent_time:
-        '<td class="col-time">TH: ' + esc(sentDt.timeTh) + '<br><span class="time-jp">JP: ' + esc(sentDt.timeJp) + '</span></td>',
+        '<td class="col-time">' + dualTimeCellInner(sentDt, esc) + '</td>',
       route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
       merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
       transaction_id: '<td class="col-narrow">' + esc(txId) + '</td>',
@@ -18683,7 +19160,7 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
     const rowCellsMail = {
       sent_at: '<td class="col-date">' + esc(dt.date || '') + '</td>',
       sent_time:
-        '<td class="col-time">TH: ' + esc(dt.timeTh || '') + '<br><span class="time-jp">JP: ' + esc(dt.timeJp || '') + '</span></td>',
+        '<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>',
       type: '<td class="col-narrow">' + esc(typeLabel) + '</td>',
       transaction_id: '<td class="col-narrow">' + esc(tx) + '</td>',
       order_no: '<td class="col-narrow">' + esc(orderNo) + '</td>',
@@ -18882,7 +19359,7 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cr_void_s
     const dt = r.sentAt || { date: '', timeTh: '', timeJp: '' };
     return `<tr>
       <td class="col-date">${esc(dt.date || '')}</td>
-      <td class="col-time">TH: ${esc(dt.timeTh || '')}<br><span class="time-jp">JP: ${esc(dt.timeJp || '')}</span></td>
+      <td class="col-time">${dualTimeCellInner(dt, esc)}</td>
       <td class="col-narrow">${esc(categoryLabel(r.category))}</td>
       <td class="col-narrow">${esc(r.source)}</td>
       <td class="col-narrow">${esc(r.pg || '-')}</td>
@@ -18960,7 +19437,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
   const forceRefundRowStatusFilter = (q.forceRefundRowStatus || 'all').toString();
   const perPageFv = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const pageFv = Math.max(1, parseInt(q.page, 10) || 1);
-  const chillTzFv = (cfgFr && cfgFr.timezone) ? String(cfgFr.timezone).trim() : 'Asia/Bangkok';
+  const chillTzFv = getNotiStandardTimezone();
   const toYmdFv = (d) => {
     try {
       return new Intl.DateTimeFormat('en-CA', { timeZone: chillTzFv, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
@@ -19254,7 +19731,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     .join('');
   const rows = displayForceRefundList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
-    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const dt = formatDateAndTimeForLog(log);
     const body = parseNotiBodyForDisplay(log);
     const txId = notifBodyTxId(body) || '-';
     const orderNo = notifBodyOrderNo(body) || '-';
@@ -19290,7 +19767,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     const rowCellsFv = {
       received_date: '<td class="col-date">' + esc(dt.date) + '</td>',
       received_time:
-        '<td class="col-time">TH: ' + esc(dt.timeTh) + '<br><span class="time-jp">JP: ' + esc(dt.timeJp) + '</span></td>',
+        '<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>',
       route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
       merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
       transaction_id: '<td class="col-narrow">' + esc(txId) + '</td>',
@@ -19559,7 +20036,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
   const refundRowStatusFilter = (q.refundRowStatus || 'all').toString();
   const perPageRf = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const pageRf = Math.max(1, parseInt(q.page, 10) || 1);
-  const chillTzRf = (cfgRefund && cfgRefund.timezone) ? String(cfgRefund.timezone).trim() : 'Asia/Bangkok';
+  const chillTzRf = getNotiStandardTimezone();
   const toYmdRf = (d) => {
     try {
       return new Intl.DateTimeFormat('en-CA', { timeZone: chillTzRf, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
@@ -19862,7 +20339,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
     .join('');
   const rows = displayRefundList.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
-    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const dt = formatDateAndTimeForLog(log);
     const body = parseNotiBodyForDisplay(log);
     const txId = notifBodyTxId(body) || '-';
     const orderNo = notifBodyOrderNo(body) || '-';
@@ -19894,15 +20371,15 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
       ? `<form method="post" action="/admin/cancel-refund/refund-request" style="display:inline;" onsubmit="return confirm('${confirmRefund}') && confirm('${confirmRefund2}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="env" value="${escR(env)}" /><button type="submit" class="btn-refund">${t(locale, 'cr_btn_refund_request')}</button></form>`
       : '<span class="btn-refund-disabled" title="' + (t(locale, 'cr_refund_period_no_title') || '환경설정에서 지정한 환불 가능 기간을 지났거나 아직 시작 전입니다.').replace(/"/g, '&quot;') + '">' + (t(locale, 'cr_refund_period_no') || '환불 기간 아님') + '</span>';
     const sentEntry = refundSentMap[String(txId).trim()];
-    const sentDt = sentEntry ? formatDateAndTimeTHJP(sentEntry.sentAtIso || sentEntry.sentAt) : { date: '-', timeTh: '-', timeJp: '-' };
+    const sentDt = sentEntry ? formatDateAndTimeForLog(log, null, sentEntry.sentAtIso || sentEntry.sentAt) : { date: '-', timeTh: '-', timeJp: '-', tagOp: '-', tagStd: '-' };
     const jpayExtrasRf = jpayCrExtraCellMap(log, esc);
     const rowCellsRf = {
       received_date: '<td class="col-date">' + esc(dt.date) + '</td>',
       received_time:
-        '<td class="col-time">TH: ' + esc(dt.timeTh) + '<br><span class="time-jp">JP: ' + esc(dt.timeJp) + '</span></td>',
+        '<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>',
       sent_date: '<td class="col-date">' + esc(sentDt.date) + '</td>',
       sent_time:
-        '<td class="col-time">TH: ' + esc(sentDt.timeTh) + '<br><span class="time-jp">JP: ' + esc(sentDt.timeJp) + '</span></td>',
+        '<td class="col-time">' + dualTimeCellInner(sentDt, esc) + '</td>',
       route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
       merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
       transaction_id: '<td class="col-narrow">' + esc(txId) + '</td>',
@@ -20081,7 +20558,7 @@ app.get('/admin/cancel-refund/jpay-followup', requireAuth, requirePage('cr_jpay_
     alertHtml += '<div class="alert alert-fail">' + esc(t(locale, 'jpay_followup_alert_refund_fail')) + ': ' + escQ(q.reason) + '</div>';
   }
   const cfgJf = loadChillPayTransactionConfig();
-  const chillTzJf = (cfgJf && cfgJf.timezone) ? String(cfgJf.timezone).trim() : 'Asia/Bangkok';
+  const chillTzJf = getNotiStandardTimezone();
   const voidRefundByTxJf = buildVoidRefundNotiMap(30);
   const voidRefundByOrderJf = buildVoidRefundNotiOrderNoMap(30);
   const filteredLogs = getEnvFilteredLogs(req).filter((log) => getNotiLogPgAcquirer(log) === 'jpay');
@@ -20336,7 +20813,7 @@ app.get('/admin/cancel-refund/jpay-followup', requireAuth, requirePage('cr_jpay_
     .join('');
   const rowsHtml = displayJf.map((log) => {
     const realIndex = NOTI_LOGS.indexOf(log);
-    const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+    const dt = formatDateAndTimeForLog(log);
     const body = parseNotiBodyForDisplay(log);
     const txId = notifBodyTxId(body) || '-';
     const orderNo = notifBodyOrderNo(body) || '-';
@@ -20803,7 +21280,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
   const rows = pagedLogsResult
     .map((log) => {
       const realIndex = NOTI_LOGS.indexOf(log);
-      const dt = formatDateAndTimeTHJP(log.receivedAtIso || log.receivedAt);
+      const dt = formatDateAndTimeForLog(log);
       const envLabel = (log.env && String(log.env).toLowerCase()) === 'sandbox' ? 'sandbox' : 'live';
       const routeNo = (log.routeKey && (log.routeKey.match(/\/(\d+)$/) || [null, log.routeKey])[1]) || log.routeKey || '-';
       const relayStatus = log.relayStatus || '-';
@@ -20836,11 +21313,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       const lrCells = {
         received_date: '<td>' + highlightLogSearchHtml(dt.date, logSearchRaw, esc) + '</td>',
         received_time:
-          '<td>TH: ' +
-          highlightLogSearchHtml(dt.timeTh, logSearchRaw, esc) +
-          '<br><span class="time-jp">JP: ' +
-          highlightLogSearchHtml(dt.timeJp, logSearchRaw, esc) +
-          '</span></td>',
+          '<td>' + dualTimeCellInner(dt, esc, logSearchRaw) + '</td>',
         route: '<td>' + highlightLogSearchHtml(String(routeNo), logSearchRaw, esc) + '</td>',
         env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRaw, esc) + '</td>',
         merchant_id: '<td>' + highlightLogSearchHtml(log.merchantId || '-', logSearchRaw, esc) + '</td>',
@@ -21070,6 +21543,9 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
   const formDevCbVal = editTarget ? escAttr(editTarget.devCallbackUrl || '') : '';
   const formDevResVal = editTarget ? escAttr(editTarget.devResultUrl || '') : '';
   const pgIsJpay = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'jpay');
+  const formTzMode = editTarget ? normalizeInternalTargetTimezoneMode(editTarget.timezoneMode) : 'global';
+  const formTzStd = editTarget ? (editTarget.standardTimezone || DEFAULT_CHILLPAY_TIMEZONE) : DEFAULT_CHILLPAY_TIMEZONE;
+  const formTzOp = editTarget ? (editTarget.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE) : DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
   const idReadonlyAttr = editTarget ? ' readonly style="background:#e5e7eb;color:#374151;cursor:not-allowed;"' : '';
   const editInvalidAlert =
     editIdRaw && !editTarget
@@ -21091,11 +21567,14 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         pg === 'chillpay'
           ? escCell(getChillpayProductionMidForInternalLinked())
           : escCell((target.linkedMid || '').trim() || '-');
+      const tzDisp = formatInternalTargetTimezoneDisplay(locale, target);
       return `<tr>
           <td class="cell-compact">${escCell(target.id)}</td>
           <td class="cell-compact">${escCell(target.name)}</td>
           <td class="cell-compact">${escCell(pgLabel)}</td>
           <td class="cell-compact">${linkCell}</td>
+          <td class="cell-compact" title="${escAttr(tzDisp.standard)}">${escCell(tzDisp.standard)}</td>
+          <td class="cell-compact" title="${escAttr(tzDisp.operational)}">${escCell(tzDisp.operational)}</td>
           <td class="cell-url-one-line" title="${escAttr(target.callbackUrl)}">${escCell(target.callbackUrl)}</td>
           <td class="cell-url-one-line" title="${escAttr(target.resultUrl || '')}">${escCell(target.resultUrl || '')}</td>
           <td class="cell-url-one-line" title="${escAttr(target.devCallbackUrl || '')}">${escCell(target.devCallbackUrl || '')}</td>
@@ -21201,7 +21680,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
       ${editInvalidAlert}
       <h2>${editTarget ? t(locale, 'internal_targets_edit') + ' — ' + escCell(editTarget.id) : t(locale, 'internal_targets_register')}</h2>
       ${editingHint}
-      <form method="post" action="/admin/internal-targets" onsubmit="return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}');">
+      <form method="post" action="/admin/internal-targets" id="internal-target-form" data-prev-tz-mode="${escAttr(formTzMode)}" data-prev-std="${escAttr(formTzStd)}" data-prev-op="${escAttr(formTzOp)}" onsubmit="return confirmInternalTargetSave(this);">
         <label>${t(locale, 'internal_targets_id')}<input type="text" name="id" required value="${formIdVal}"${idReadonlyAttr} /></label>
         <label>${t(locale, 'internal_targets_name')}<input type="text" name="name" required value="${formNameVal}" /></label>
         <label>${t(locale, 'internal_targets_pg_provider')}
@@ -21231,22 +21710,53 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         <p class="admin-page-desc">${t(locale, 'internal_targets_dev_urls_hint')}</p>
         <label>${t(locale, 'internal_targets_dev_callback_url')}<input type="text" name="devCallbackUrl" value="${formDevCbVal}" placeholder="https://..." /></label>
         <label>${t(locale, 'internal_targets_dev_result_url')}<input type="text" name="devResultUrl" value="${formDevResVal}" placeholder="https://..." /></label>
+        ${renderInternalTargetTimezoneFormFields(locale, editTarget)}
         <button type="submit">${t(locale, 'common_save')}</button>
       </form>
       <script>
+      function confirmInternalTargetSave(form) {
+        var saveMsg = ${JSON.stringify(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?')};
+        if (!confirm(saveMsg)) return false;
+        var modeEl = form.querySelector('input[name="timezoneMode"]:checked');
+        var mode = modeEl ? modeEl.value : 'global';
+        var prevMode = form.getAttribute('data-prev-tz-mode') || 'global';
+        var stdEl = form.querySelector('[name="standardTimezone"]');
+        var opEl = form.querySelector('[name="operationalTimezone"]');
+        var std = stdEl ? stdEl.value : '';
+        var op = opEl ? opEl.value : '';
+        var prevStd = form.getAttribute('data-prev-std') || '';
+        var prevOp = form.getAttribute('data-prev-op') || '';
+        var tzChanged = mode === 'custom' && (mode !== prevMode || std !== prevStd || op !== prevOp);
+        if (tzChanged) {
+          return confirm(${JSON.stringify(t(locale, 'internal_targets_tz_confirm_retroactive'))});
+        }
+        return true;
+      }
       (function () {
         var pg = document.getElementById('internal-target-pg');
         var wC = document.getElementById('internal-mid-chillpay-wrap');
         var wJ = document.getElementById('internal-mid-jpay-wrap');
-        function sync() {
+        function syncPg() {
           if (!pg) return;
           var j = pg.value === 'jpay';
           if (wC) wC.style.display = j ? 'none' : 'block';
           if (wJ) wJ.style.display = j ? 'block' : 'none';
         }
+        function syncTz() {
+          var wrap = document.getElementById('internal-target-tz-custom-wrap');
+          var custom = form && form.querySelector('input[name="timezoneMode"][value="custom"]');
+          if (wrap && custom) wrap.style.display = custom.checked ? 'block' : 'none';
+        }
+        var form = document.getElementById('internal-target-form');
         if (pg) {
-          pg.addEventListener('change', sync);
-          sync();
+          pg.addEventListener('change', syncPg);
+          syncPg();
+        }
+        if (form) {
+          form.querySelectorAll('input[name="timezoneMode"]').forEach(function (el) {
+            el.addEventListener('change', syncTz);
+          });
+          syncTz();
         }
       })();
       </script>
@@ -21255,14 +21765,16 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
       <h2>${t(locale, 'internal_targets_list')}</h2>
       <table class="internal-targets-list">
         <colgroup>
-          <col style="width:9%" />
+          <col style="width:8%" />
+          <col style="width:10%" />
+          <col style="width:6%" />
+          <col style="width:8%" />
           <col style="width:11%" />
-          <col style="width:7%" />
-          <col style="width:9%" />
-          <col style="width:16%" />
-          <col style="width:16%" />
-          <col style="width:16%" />
-          <col style="width:16%" />
+          <col style="width:11%" />
+          <col style="width:13%" />
+          <col style="width:13%" />
+          <col style="width:13%" />
+          <col style="width:13%" />
           <col style="width:120px" />
         </colgroup>
         <thead>
@@ -21271,6 +21783,8 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
             <th>${t(locale, 'internal_targets_name')}</th>
             <th>${t(locale, 'tx_th_acquirer')}</th>
             <th>${t(locale, 'internal_targets_linked_mid')}</th>
+            <th>${t(locale, 'internal_targets_col_standard_tz')}</th>
+            <th>${t(locale, 'internal_targets_col_operational_tz')}</th>
             <th>${t(locale, 'internal_targets_callback_url')}</th>
             <th>${t(locale, 'internal_targets_result_url')}</th>
             <th>${t(locale, 'internal_targets_dev_callback_url')}</th>
@@ -21279,7 +21793,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="9" style="text-align:center;color:#777;">${t(locale, 'internal_targets_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="11" style="text-align:center;color:#777;">${t(locale, 'internal_targets_empty')}</td></tr>`}
         </tbody>
       </table>
       </div>
@@ -22049,6 +22563,11 @@ app.post('/admin/internal-targets', requireAuth, requirePage('internal_targets')
     req.ip ||
     '';
   const before = INTERNAL_TARGETS.get(id) || null;
+  const tzFields = internalTargetTimezoneFieldsFromRaw({
+    timezoneMode: req.body && req.body.timezoneMode,
+    standardTimezone: req.body && req.body.standardTimezone,
+    operationalTimezone: req.body && req.body.operationalTimezone,
+  });
 
   INTERNAL_TARGETS.set(id, {
     id,
@@ -22059,6 +22578,7 @@ app.post('/admin/internal-targets', requireAuth, requirePage('internal_targets')
     devResultUrl: String(devResultUrl || '').trim(),
     pgProvider: pg,
     linkedMid,
+    ...tzFields,
   });
   saveInternalTargets();
   console.log('[관리자] 전산 대상 저장:', id, INTERNAL_TARGETS.get(id));
@@ -24138,7 +24658,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
 
   const rows = pagedLogsInternal
     .map(({ log, realIndex }, i) => {
-      const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+      const dt = formatDateAndTimeForLog(log);
       const payload = log.payload || {};
       const displayPayload = jpayInternalLogDisplayPayload(log);
       const jsonHeader = Object.keys(displayPayload).join(', ');
@@ -24156,11 +24676,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       const rowCellsInternal = {
         received_date: '<td class="col-date">' + highlightLogSearchHtml(dt.date, logSearchRawInternal, esc) + '</td>',
         received_time:
-          '<td class="col-time">TH: ' +
-          highlightLogSearchHtml(dt.timeTh, logSearchRawInternal, esc) +
-          '<br><span class="time-jp">JP: ' +
-          highlightLogSearchHtml(dt.timeJp, logSearchRawInternal, esc) +
-          '</span></td>',
+          '<td class="col-time">' + dualTimeCellInner(dt, esc, logSearchRawInternal) + '</td>',
         internal_target: '<td class="col-narrow">' + highlightLogSearchHtml(internalTargetName, logSearchRawInternal, esc) + '</td>',
         internal_receive:
           '<td class="col-status"><span class="' + internalClass + '">' + highlightLogSearchHtml(internalLabel, logSearchRawInternal, esc) + '</span></td>',
@@ -24391,7 +24907,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
 
   const rows = pagedLogsInternal
     .map(({ log, realIndex }, i) => {
-      const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+      const dt = formatDateAndTimeForLog(log);
       const status = log.internalDeliveryStatus || '-';
       const label = status === 'ok' ? t(locale, 'status_ok') : status === 'fail' ? t(locale, 'status_fail') : status === 'skip' ? t(locale, 'status_skip') : status;
       const statusClass = status === 'ok' ? 'status-ok' : status === 'fail' ? 'status-fail' : '';
@@ -24409,11 +24925,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       const rowCellsIntRes = {
         received_date: '<td>' + highlightLogSearchHtml(dt.date, logSearchRawIntRes, esc) + '</td>',
         received_time:
-          '<td>TH: ' +
-          highlightLogSearchHtml(dt.timeTh, logSearchRawIntRes, esc) +
-          '<br><span class="time-jp">JP: ' +
-          highlightLogSearchHtml(dt.timeJp, logSearchRawIntRes, esc) +
-          '</span></td>',
+          '<td>' + dualTimeCellInner(dt, esc, logSearchRawIntRes) + '</td>',
         transaction_id: '<td>' + highlightLogSearchHtml(String(txId), logSearchRawIntRes, esc) + '</td>',
         type: '<td>' + highlightLogSearchHtml(String(statusDesc), logSearchRawIntRes, esc) + '</td>',
         route: '<td>' + highlightLogSearchHtml(String(log.routeNo || '-'), logSearchRawIntRes, esc) + '</td>',
@@ -24637,7 +25149,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
     .join('');
   const rows = pagedLogsDevInternal
     .map(({ log, realIndex }, i) => {
-      const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+      const dt = formatDateAndTimeForLog(log);
       const payload = log.payload || {};
       const displayPayload = jpayInternalLogDisplayPayload(log);
       const jsonHeader = Object.keys(displayPayload).join(', ');
@@ -24655,11 +25167,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       const rowCellsDevInt = {
         received_date: '<td class="col-date">' + highlightLogSearchHtml(dt.date, logSearchRawDev, esc) + '</td>',
         received_time:
-          '<td class="col-time">TH: ' +
-          highlightLogSearchHtml(dt.timeTh, logSearchRawDev, esc) +
-          '<br><span class="time-jp">JP: ' +
-          highlightLogSearchHtml(dt.timeJp, logSearchRawDev, esc) +
-          '</span></td>',
+          '<td class="col-time">' + dualTimeCellInner(dt, esc, logSearchRawDev) + '</td>',
         delivery:
           '<td class="col-status"><span class="' + internalClass + '">' + highlightLogSearchHtml(internalLabel, logSearchRawDev, esc) + '</span></td>',
         upstream: '<td class="col-upstream"><pre class="cell-upstream-pre">' + (upStr ? esc(upStr) : '—') + '</pre></td>',
@@ -24909,7 +25417,7 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
     .join('');
   const rows = pageSlice
     .map(({ log, realIndex }) => {
-      const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+      const dt = formatDateAndTimeForLog(log);
       const payload = log.payload || {};
       const event = payload.event || '—';
       const txId =
@@ -25007,7 +25515,7 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
     .join('');
   const rows = logs.slice(0, 100).map((log) => {
     const realIndex = DEALMAI_WEBHOOK_LOGS.indexOf(log);
-    const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+    const dt = formatDateAndTimeForLog(log);
     const payload = log.payload || {};
     const event = payload.event || '—';
     const txId =
@@ -25341,7 +25849,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
 
   const rows = pagedLogsDev
     .map(({ log, realIndex }, i) => {
-      const dt = formatDateAndTimeTHJP(log.storedAtIso || log.storedAt);
+      const dt = formatDateAndTimeForLog(log);
       const normRes2 = normalizeDevInternalDeliveryUi(log.internalDeliveryStatus || '');
       const label = devInternalDeliveryLabel(locale, normRes2);
       const statusClass = devInternalDeliveryRowClass(normRes2);
@@ -25356,11 +25864,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       const rowCellsDevRes = {
         received_date: '<td>' + highlightLogSearchHtml(dt.date, logSearchRawDevRes, esc) + '</td>',
         received_time:
-          '<td>TH: ' +
-          highlightLogSearchHtml(dt.timeTh, logSearchRawDevRes, esc) +
-          '<br><span class="time-jp">JP: ' +
-          highlightLogSearchHtml(dt.timeJp, logSearchRawDevRes, esc) +
-          '</span></td>',
+          '<td>' + dualTimeCellInner(dt, esc, logSearchRawDevRes) + '</td>',
         route: '<td>' + highlightLogSearchHtml(String(log.routeNo || '-'), logSearchRawDevRes, esc) + '</td>',
         env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRawDevRes, esc) + '</td>',
         merchant_id: '<td>' + highlightLogSearchHtml(log.merchantId || '-', logSearchRawDevRes, esc) + '</td>',

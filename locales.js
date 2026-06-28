@@ -6343,6 +6343,170 @@ const messages = {
   },
 };
 
+/** 시간대 설정 UI — ICOPAY 전산설정(시간 및 동기화)과 동일 목록 */
+const NOTI_TZ_OPTION_LABELS = {
+  ko: {
+    Asia_Bangkok: '방콕 (TH)', Asia_Seoul: '서울 (KR)', Asia_Tokyo: '도쿄 (JP)', Asia_Shanghai: '상하이 (CH)',
+    Asia_Ho_Chi_Minh: '호치민 (VT)', Asia_Singapore: '싱가포르 (SG)', Asia_Manila: '마닐라 (PP)', Asia_Jakarta: '자카르타 (IN)',
+    Asia_Dubai: '두바이 (UA)', UTC: 'UTC', Europe_London: '런던 (EU)', America_New_York: '뉴욕 (NY)', America_Los_Angeles: 'LA',
+  },
+  ja: {
+    Asia_Bangkok: 'バンコク (TH)', Asia_Seoul: 'ソウル (KR)', Asia_Tokyo: '東京 (JP)', Asia_Shanghai: '上海 (CH)',
+    Asia_Ho_Chi_Minh: 'ホーチミン (VT)', Asia_Singapore: 'シンガポール (SG)', Asia_Manila: 'マニラ (PP)', Asia_Jakarta: 'ジャカルタ (IN)',
+    Asia_Dubai: 'ドバイ (UA)', UTC: 'UTC', Europe_London: 'ロンドン (EU)', America_New_York: 'ニューヨーク (NY)', America_Los_Angeles: 'LA',
+  },
+  en: {
+    Asia_Bangkok: 'Bangkok (TH)', Asia_Seoul: 'Seoul (KR)', Asia_Tokyo: 'Tokyo (JP)', Asia_Shanghai: 'Shanghai (CH)',
+    Asia_Ho_Chi_Minh: 'Ho Chi Minh (VT)', Asia_Singapore: 'Singapore (SG)', Asia_Manila: 'Manila (PP)', Asia_Jakarta: 'Jakarta (IN)',
+    Asia_Dubai: 'Dubai (UA)', UTC: 'UTC', Europe_London: 'London (EU)', America_New_York: 'New York (NY)', America_Los_Angeles: 'Los Angeles (LA)',
+  },
+  th: {
+    Asia_Bangkok: 'กรุงเทพ (TH)', Asia_Seoul: 'โซล (KR)', Asia_Tokyo: 'โตเกียว (JP)', Asia_Shanghai: 'เซี่ยงไฮ้ (CH)',
+    Asia_Ho_Chi_Minh: 'โฮจิมินห์ (VT)', Asia_Singapore: 'สิงคโปร์ (SG)', Asia_Manila: 'มะนิลา (PP)', Asia_Jakarta: 'จาการ์ตา (IN)',
+    Asia_Dubai: 'ดูไบ (UA)', UTC: 'UTC', Europe_London: 'ลอนดอน (EU)', America_New_York: 'นิวยอร์ก (NY)', America_Los_Angeles: 'ลอสแองเจลิส (LA)',
+  },
+  zh: {
+    Asia_Bangkok: '曼谷 (TH)', Asia_Seoul: '首尔 (KR)', Asia_Tokyo: '东京 (JP)', Asia_Shanghai: '上海 (CH)',
+    Asia_Ho_Chi_Minh: '胡志明 (VT)', Asia_Singapore: '新加坡 (SG)', Asia_Manila: '马尼拉 (PP)', Asia_Jakarta: '雅加达 (IN)',
+    Asia_Dubai: '迪拜 (UA)', UTC: 'UTC', Europe_London: '伦敦 (EU)', America_New_York: '纽约 (NY)', America_Los_Angeles: '洛杉矶 (LA)',
+  },
+};
+
+const NOTI_TZ_UI_STRINGS = {
+  ko: {
+    topbar_time_operational: '운영시간',
+    topbar_time_standard: '표준시간',
+    chillpay_tz_section_title: '시간대 설정',
+    chillpay_tz_hint: 'ICOPAY 전산설정의 「시간 및 동기화 설정」과 동일합니다. 표준 시간대는 일별 집계·무효/환불 구간·기간 프리셋·업무 일자 판정 기준입니다. 운영 시간대는 로그·목록 시각 1줄(운영) 표시입니다. 저장 즉시 반영되며 재배포가 필요 없습니다. 기본값: 표준=Asia/Bangkok(TH), 운영=Asia/Tokyo(JP).',
+    chillpay_tz_standard_label: '표준 시간대 (IANA)',
+    chillpay_tz_operational_label: '운영 시간대',
+    chillpay_tz_standard_tag: '표준 시간대 태그',
+    chillpay_tz_operational_tag: '운영 시간대 태그',
+    chillpay_tz_preview: '현재 시각 미리보기 (1줄=운영, 2줄=표준)',
+    chillpay_time_void_window: '무효/환불 가능 시간 (기준: 표준 시간대)',
+    chillpay_time_hint_dates: '무효/타임아웃 관련 구간은 <strong>TransactionDate</strong> 기준, 정산·환불 관련 기간은 <strong>PaymentDate</strong> 기준으로 판정됩니다. 업무 일자·구간·프리셋은 <strong>표준 시간대</strong> 벽시계 기준이며, 목록·로그에는 <strong>운영(1줄)</strong>·<strong>표준(2줄)</strong> 시각이 함께 표시됩니다. 취소는 ChillPay 노티로만 수신되며, 우리가 API로 처리하는 것은 무효·환불뿐입니다.',
+  },
+  ja: {
+    topbar_time_operational: '運用時刻',
+    topbar_time_standard: '標準時刻',
+    chillpay_tz_section_title: 'タイムゾーン設定',
+    chillpay_tz_hint: 'ICOPAY 全社設定の「時間・同期設定」と同じです。標準タイムゾーンは日次集計・無効/返金区間・期間プリセット・業務日付の基準です。運用タイムゾーンはログ・一覧の時刻1行目(運用)表示です。保存後すぐ反映され、再デプロイは不要です。既定: 標準=Asia/Bangkok(TH)、運用=Asia/Tokyo(JP)。',
+    chillpay_tz_standard_label: '標準タイムゾーン (IANA)',
+    chillpay_tz_operational_label: '運用タイムゾーン',
+    chillpay_tz_standard_tag: '標準タイムゾーンタグ',
+    chillpay_tz_operational_tag: '運用タイムゾーンタグ',
+    chillpay_tz_preview: '現在時刻プレビュー (1行=運用, 2行=標準)',
+    chillpay_time_void_window: '無効/返金可能時間（基準: 標準タイムゾーン）',
+    chillpay_time_hint_dates: '無効/タイムアウトは<strong>TransactionDate</strong>基準、精算・返金は<strong>PaymentDate</strong>基準。業務日付・区間・プリセットは<strong>標準タイムゾーン</strong>の壁時計基準。一覧・ログには<strong>運用(1行)</strong>・<strong>標準(2行)</strong>時刻を表示。取消はChillPay通知のみ。APIで処理するのは無効・返金のみ。',
+  },
+  en: {
+    topbar_time_operational: 'Operational',
+    topbar_time_standard: 'Standard',
+    chillpay_tz_section_title: 'Timezone settings',
+    chillpay_tz_hint: 'Same as ICOPAY HQ ledger time & sync settings. Standard timezone drives daily aggregation, void/refund windows, date presets, and business-day boundaries. Operational timezone is line 1 in log/list time columns. Takes effect on save without redeploy. Defaults: standard=Asia/Bangkok (TH), operational=Asia/Tokyo (JP).',
+    chillpay_tz_standard_label: 'Standard timezone (IANA)',
+    chillpay_tz_operational_label: 'Operational timezone',
+    chillpay_tz_standard_tag: 'Standard timezone tag',
+    chillpay_tz_operational_tag: 'Operational timezone tag',
+    chillpay_tz_preview: 'Live preview (line 1=operational, line 2=standard)',
+    chillpay_time_void_window: 'Void/refund window (standard timezone)',
+    chillpay_time_hint_dates: 'Void/timeout uses <strong>TransactionDate</strong>; settlement/refund uses <strong>PaymentDate</strong>. Business dates, windows, and presets use the <strong>standard timezone</strong> wall clock. Lists/logs show <strong>operational (line 1)</strong> and <strong>standard (line 2)</strong> times. Cancel is ChillPay noti only; we process void/refund via API only.',
+  },
+  th: {
+    topbar_time_operational: 'เวลาปฏิบัติการ',
+    topbar_time_standard: 'เวลามาตรฐาน',
+    chillpay_tz_section_title: 'การตั้งค่าเขตเวลา',
+    chillpay_tz_hint: 'เหมือน ICOPAY HQ การตั้งค่าเวลาและซิงค์ เขตเวลามาตรฐานใช้สำหรับสรุปรายวัน ช่วงโมฆะ/คืนเงิน พรีเซ็ตช่วงวันที่ และขอบเขตวันทำการ เขตเวลาปฏิบัติการคือบรรทัดที่ 1 ในคอลัมน์เวลา บันทึกแล้วมีผลทันที ไม่ต้อง deploy ใหม่ ค่าเริ่มต้น: มาตรฐาน=Asia/Bangkok(TH) ปฏิบัติการ=Asia/Tokyo(JP)',
+    chillpay_tz_standard_label: 'เขตเวลามาตรฐาน (IANA)',
+    chillpay_tz_operational_label: 'เขตเวลาปฏิบัติการ',
+    chillpay_tz_standard_tag: 'แท็กเขตเวลามาตรฐาน',
+    chillpay_tz_operational_tag: 'แท็กเขตเวลาปฏิบัติการ',
+    chillpay_tz_preview: 'ตัวอย่างเวลาปัจจุบัน (บรรทัด1=ปฏิบัติการ, บรรทัด2=มาตรฐาน)',
+    chillpay_time_void_window: 'ช่วงโมฆะ/คืนเงิน (เขตเวลามาตรฐาน)',
+    chillpay_time_hint_dates: 'โมฆะ/หมดเวลาใช้<strong>TransactionDate</strong> ช่วงชำระ/คืนเงินใช้<strong>PaymentDate</strong> วันทำการ·ช่วง·พรีเซ็ตใช้<strong>เขตเวลามาตรฐาน</strong> หน้าจอแสดง<strong>ปฏิบัติการ(บรรทัด1)</strong>·<strong>มาตรฐาน(บรรทัด2)</strong> ยกเลิกรับจาก ChillPay noti อย่างเดียว เรา process ผ่าน API แค่โมฆะ/คืนเงิน',
+  },
+  zh: {
+    topbar_time_operational: '运营时间',
+    topbar_time_standard: '标准时间',
+    chillpay_tz_section_title: '时区设置',
+    chillpay_tz_hint: '与 ICOPAY 总部「时间·同步设置」相同。标准时区用于日汇总、无效/退款区间、日期预设及业务日边界。运营时区为日志/列表时间第1行。保存后立即生效，无需重新部署。默认：标准=Asia/Bangkok(TH)，运营=Asia/Tokyo(JP)。',
+    chillpay_tz_standard_label: '标准时区 (IANA)',
+    chillpay_tz_operational_label: '运营时区',
+    chillpay_tz_standard_tag: '标准时区标签',
+    chillpay_tz_operational_tag: '运营时区标签',
+    chillpay_tz_preview: '当前时间预览（第1行=运营，第2行=标准）',
+    chillpay_time_void_window: '无效/退款窗口（标准时区）',
+    chillpay_time_hint_dates: '无效/超时以<strong>TransactionDate</strong>为准；结算/退款以<strong>PaymentDate</strong>为准。业务日期、区间与预设以<strong>标准时区</strong>墙钟为准。列表/日志显示<strong>运营(第1行)</strong>与<strong>标准(第2行)</strong>时间。取消仅通过 ChillPay 通知；我们通过 API 仅处理无效/退款。',
+  },
+};
+
+const INTERNAL_TARGETS_TZ_STRINGS = {
+  ko: {
+    internal_targets_tz_section_title: '시간대 (표준·운영)',
+    internal_targets_tz_section_hint: '「환경설정 따름」은 시간 및 동기화 설정의 표준·운영 시간대를 사용합니다. 「국가별 리스트」를 선택하면 이 ID에 연결된 거래·노티 로그의 시각 표시(1줄=운영, 2줄=표준)에만 우선 적용됩니다. 무효 마감·환불 구간 등 업무 이벤트는 항상 환경설정(전역) 시간대 기준입니다.',
+    internal_targets_tz_mode_global: '환경설정 따름',
+    internal_targets_tz_mode_custom: '국가별 리스트 (표준·운영 직접 선택)',
+    internal_targets_tz_custom_hint: '저장 시 이 ID의 과거·현재 모든 로그 시각 표시가 선택한 시간대로 바뀝니다. (원본 ISO 시각은 변경되지 않습니다.)',
+    internal_targets_tz_confirm_retroactive: '이 ID의 시간대를 변경하면 해당 전산 대상의 과거 데이터 표시 시각도 모두 새 시간대로 보입니다. 계속하시겠습니까?',
+    internal_targets_tz_follow_global: '환경설정 따름',
+    internal_targets_col_standard_tz: '표준 시간대',
+    internal_targets_col_operational_tz: '운영 시간대',
+  },
+  ja: {
+    internal_targets_tz_section_title: 'タイムゾーン（標準・運用）',
+    internal_targets_tz_section_hint: '「環境設定に従う」は時間・同期設定の標準/運用TZを使用。「国別リスト」選択時はこのIDの取引・通知ログの時刻表示(1行=運用,2行=標準)のみ優先。無効締切・返金区間等の業務イベントは常に環境設定(全体)TZ基準。',
+    internal_targets_tz_mode_global: '環境設定に従う',
+    internal_targets_tz_mode_custom: '国別リスト（標準・運用を選択）',
+    internal_targets_tz_custom_hint: '保存するとこのIDの過去・現在すべてのログ表示時刻が選択TZになります（ISO原本は不変）。',
+    internal_targets_tz_confirm_retroactive: 'このIDのTZを変更すると、当該全社対象の過去データ表示も新TZになります。続行しますか？',
+    internal_targets_tz_follow_global: '環境設定に従う',
+    internal_targets_col_standard_tz: '標準TZ',
+    internal_targets_col_operational_tz: '運用TZ',
+  },
+  en: {
+    internal_targets_tz_section_title: 'Timezone (standard · operational)',
+    internal_targets_tz_section_hint: 'Follow global settings uses Time & sync settings. Country list applies only to display (line 1=operational, line 2=standard) for logs linked to this ID. Void cutoff, refund windows, and other business events always use global (environment) timezone.',
+    internal_targets_tz_mode_global: 'Follow environment settings',
+    internal_targets_tz_mode_custom: 'Country list (pick standard · operational)',
+    internal_targets_tz_custom_hint: 'Saving retroactively changes displayed times for all past and current logs for this ID. (Stored ISO instants are not modified.)',
+    internal_targets_tz_confirm_retroactive: 'Changing this ID timezone will update displayed times for all past data for this target. Continue?',
+    internal_targets_tz_follow_global: 'Follow settings',
+    internal_targets_col_standard_tz: 'Standard TZ',
+    internal_targets_col_operational_tz: 'Operational TZ',
+  },
+  th: {
+    internal_targets_tz_section_title: 'เขตเวลา (มาตรฐาน · ปฏิบัติการ)',
+    internal_targets_tz_section_hint: '「ตามการตั้งค่าระบบ」ใช้ TZ มาตรฐาน/ปฏิบัติการจากการตั้งค่าเวลา 「รายการตามประเทศ」ใช้แสดงเวลา(บรรทัด1=ปฏิบัติการ,2=มาตรฐาน)ของ ID นี้เท่านั้น งานโมฆะ/คืนเงินใช้ TZ ระบบเสมอ',
+    internal_targets_tz_mode_global: 'ตามการตั้งค่าระบบ',
+    internal_targets_tz_mode_custom: 'รายการตามประเทศ (เลือกมาตรฐาน · ปฏิบัติการ)',
+    internal_targets_tz_custom_hint: 'บันทึกแล้วเวลาแสดงของ log ทั้งหมดของ ID นี้จะเปลี่ยน (ISO ต้นฉบับไม่เปลี่ยน)',
+    internal_targets_tz_confirm_retroactive: 'เปลี่ยน TZ ของ ID นี้จะทำให้ข้อมูลเก่าทั้งหมดแสดงตาม TZ ใหม่ ดำเนินการต่อ?',
+    internal_targets_tz_follow_global: 'ตามการตั้งค่าระบบ',
+    internal_targets_col_standard_tz: 'TZ มาตรฐาน',
+    internal_targets_col_operational_tz: 'TZ ปฏิบัติการ',
+  },
+  zh: {
+    internal_targets_tz_section_title: '时区（标准 · 运营）',
+    internal_targets_tz_section_hint: '「跟随环境设置」使用时间·同步设置的标准/运营时区。「国家列表」仅优先用于此 ID 关联交易/通知日志的时间显示（第1行=运营，第2行=标准）。无效截止、退款窗口等业务事件始终按环境（全局）时区。',
+    internal_targets_tz_mode_global: '跟随环境设置',
+    internal_targets_tz_mode_custom: '国家列表（选择标准 · 运营）',
+    internal_targets_tz_custom_hint: '保存后，此 ID 过去与当前所有日志的显示时间将改为所选时区（ISO 原值不变）。',
+    internal_targets_tz_confirm_retroactive: '更改此 ID 时区后，该目标的所有历史数据显示也将更新。是否继续？',
+    internal_targets_tz_follow_global: '跟随环境设置',
+    internal_targets_col_standard_tz: '标准时区',
+    internal_targets_col_operational_tz: '运营时区',
+  },
+};
+
+for (const loc of ['ko', 'ja', 'en', 'th', 'zh']) {
+  Object.assign(messages[loc], NOTI_TZ_UI_STRINGS[loc] || {});
+  Object.assign(messages[loc], INTERNAL_TARGETS_TZ_STRINGS[loc] || {});
+  const tzLabels = NOTI_TZ_OPTION_LABELS[loc] || {};
+  for (const [suffix, label] of Object.entries(tzLabels)) {
+    messages[loc]['noti_tz_' + suffix] = label;
+  }
+}
+
 function t(locale, key) {
   const loc = messages[locale] || messages.ko;
   return loc[key] != null ? loc[key] : (messages.ko[key] != null ? messages.ko[key] : key);

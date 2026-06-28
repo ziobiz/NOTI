@@ -20,6 +20,8 @@
   "syncResultDisplayMinutes": 30,
   "pgTransactionSyncIntervalMinutes": 30,
   "pgTransactionInitialSyncMonths": 3,
+  "standardTimezone": "Asia/Bangkok",
+  "operationalTimezone": "Asia/Tokyo",
   "timezone": "Asia/Bangkok",
   "useSandbox": false,
   "emailFrom": "",
