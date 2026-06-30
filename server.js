@@ -17,6 +17,7 @@ const os = require('os');
 const nodemailer = require('nodemailer');
 const { t } = require('./locales');
 const pgNotifyDelivery = require('./lib/pgNotifyDelivery');
+const devInternalLogDedupe = require('./lib/devInternalLogDedupe');
 
 const app = express();
 /** Nginx 등 리버스 프록시 뒤에서 X-Forwarded-*·req.ip 반영. 끄려면 TRUST_PROXY=0 */
@@ -385,6 +386,11 @@ const INTERNAL_TIMEOUT_MS = 10000;
 /** 개발 노티(JSON POST) 최대 시도 횟수(기본 2 = 최초 1 + 재시도 1). 실패 시 DEV_INTERNAL_RETRY_DELAY_MS 간격으로 반복. */
 const DEV_INTERNAL_HTTP_MAX_ATTEMPTS = Math.min(8, Math.max(1, parseInt(process.env.DEV_INTERNAL_HTTP_MAX_ATTEMPTS || '2', 10) || 2));
 const DEV_INTERNAL_RETRY_DELAY_MS = Math.max(0, parseInt(process.env.DEV_INTERNAL_RETRY_DELAY_MS || '2000', 10) || 2000);
+/** 동일 거래( orderNo·trnId·event ) 개발 전산 재전송 최소 간격 — ICOPAY/PG 오류 시 노티 폭주 방지 */
+const DEV_INTERNAL_FORWARD_COOLDOWN_MS = Math.max(
+  5000,
+  parseInt(process.env.DEV_INTERNAL_FORWARD_COOLDOWN_MS || '60000', 10) || 60000,
+);
 
 /** ICOPAY pg-notify(JSON POST) 재전송: 백오프·지터·상한·422/본문 실패 정책 (환경변수로 조정) */
 const PG_NOTIFY_DELIVERY = {
@@ -3424,7 +3430,186 @@ function appendInternalLog(entry) {
 }
 
 // ===== 개발 노티 로그 (메모리·파일 보관은 환경설정 일수) =====
-let DEV_INTERNAL_LOGS = loadJsonLogFile(DEV_INTERNAL_LOG_PATH, 'storedAtIso');
+/** 개발 노티 전달 결과 저장값: OK=도착, SKIP=시도했으나 미도착, FAIL=전송 불가(URL 없음·예외 등) */
+const DEV_INTERNAL_DELIVER_OK = 'OK';
+const DEV_INTERNAL_DELIVER_SKIP = 'SKIP';
+const DEV_INTERNAL_DELIVER_FAIL = 'FAIL';
+
+const {
+  devInternalForwardSuppressKey,
+  dedupeDevInternalLogObjects,
+  purgeDevInternalLogsByOrderNos,
+} = devInternalLogDedupe;
+
+/** key → { lastAttemptMs, deliveredOk } — 재기동 시 로그에서 복원 */
+const DEV_INTERNAL_FORWARD_STATE = new Map();
+
+function rebuildDevInternalForwardStateFromLogs(logs) {
+  DEV_INTERNAL_FORWARD_STATE.clear();
+  const arr = Array.isArray(logs) ? logs : [];
+  for (const log of arr) {
+    const key = devInternalForwardSuppressKey(
+      log.internalTargetUrl,
+      log.payload,
+      log.merchantId,
+      log.pgProvider || 'chillpay',
+    );
+    if (!key) continue;
+    const t = Date.parse(log.storedAtIso || log.storedAt || '') || 0;
+    const ok = String(log.internalDeliveryStatus || '').toUpperCase() === DEV_INTERNAL_DELIVER_OK;
+    const prev = DEV_INTERNAL_FORWARD_STATE.get(key);
+    if (!prev || t >= prev.lastAttemptMs) {
+      DEV_INTERNAL_FORWARD_STATE.set(key, { lastAttemptMs: t, deliveredOk: ok || (prev && prev.deliveredOk) });
+    } else if (ok) {
+      prev.deliveredOk = true;
+    }
+  }
+}
+
+function shouldSuppressDevInternalForward(devUrl, payload, merchantId, pgProvider) {
+  const key = devInternalForwardSuppressKey(devUrl, payload, merchantId, pgProvider);
+  if (!key) return { suppress: false, key: '', reason: '' };
+  const st = DEV_INTERNAL_FORWARD_STATE.get(key);
+  const now = Date.now();
+  if (st && st.deliveredOk) {
+    return { suppress: true, key, reason: 'already_ok' };
+  }
+  if (st && now - st.lastAttemptMs < DEV_INTERNAL_FORWARD_COOLDOWN_MS) {
+    return { suppress: true, key, reason: 'cooldown' };
+  }
+  return { suppress: false, key, reason: '' };
+}
+
+function recordDevInternalForwardAttempt(key, success) {
+  if (!key) return;
+  const prev = DEV_INTERNAL_FORWARD_STATE.get(key) || { lastAttemptMs: 0, deliveredOk: false };
+  DEV_INTERNAL_FORWARD_STATE.set(key, {
+    lastAttemptMs: Date.now(),
+    deliveredOk: !!success || prev.deliveredOk,
+  });
+}
+
+function createSuppressedDevAggResult(reason) {
+  const alreadyOk = reason === 'already_ok';
+  return {
+    success: alreadyOk,
+    suppressed: true,
+    suppressReason: reason,
+    queued: false,
+    status: 0,
+    responsePreview: reason === 'cooldown' ? 'suppressed:cooldown' : 'suppressed:already_ok',
+    attempts: 0,
+    attemptStatuses: [],
+    deliveryState: alreadyOk ? 'DELIVERED' : 'SUPPRESSED',
+    durationMsTotal: 0,
+  };
+}
+
+/** 개발 노티 로그 전용 로더: 보관 일수 필터 + 업무키 중복 제거 후 파일 재기록 */
+function loadDevInternalJsonLogFile() {
+  try {
+    if (!fs.existsSync(DEV_INTERNAL_LOG_PATH)) return [];
+    const raw = fs.readFileSync(DEV_INTERNAL_LOG_PATH, 'utf8');
+    if (!raw.trim()) return [];
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    const now = Date.now();
+    const cfg = loadChillPayTransactionConfig();
+    const memDays = Number(cfg.logKeepDaysMem) > 0 ? cfg.logKeepDaysMem : DEFAULT_LOG_KEEP_DAYS_MEM;
+    const diskDays = Number(cfg.logKeepDaysDisk) > 0 ? cfg.logKeepDaysDisk : DEFAULT_LOG_KEEP_DAYS_DISK;
+    const memCutoff = now - memDays * 24 * 60 * 60 * 1000;
+    const diskCutoff = now - diskDays * 24 * 60 * 60 * 1000;
+    const corruptOrNoTimeLines = [];
+    const diskObjs = [];
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      let obj;
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        corruptOrNoTimeLines.push(line);
+        continue;
+      }
+      const iso = (obj && obj.storedAtIso) || (obj && obj.storedAt) || null;
+      let t = Number.NaN;
+      if (iso) t = Date.parse(iso);
+      if (Number.isNaN(t)) {
+        corruptOrNoTimeLines.push(JSON.stringify(obj));
+        continue;
+      }
+      if (t >= diskCutoff) diskObjs.push(obj);
+    }
+    const beforeCt = diskObjs.length;
+    const deduped = dedupeDevInternalLogObjects(diskObjs);
+    const removed = beforeCt - deduped.length;
+    if (removed > 0) {
+      console.log('[dev-internal-noti.log] 업무키 중복', removed, '건 제거(디스크 보관 구간), 유지', deduped.length, '건');
+    }
+    deduped.sort((a, b) => {
+      const ta = Date.parse(a.storedAtIso || a.storedAt || '') || 0;
+      const tb = Date.parse(b.storedAtIso || b.storedAt || '') || 0;
+      return ta - tb;
+    });
+    const memEntries = deduped.filter((e) => {
+      const t = Date.parse(e.storedAtIso || e.storedAt);
+      return !Number.isNaN(t) && t >= memCutoff;
+    });
+    const keptLines = deduped.map((o) => JSON.stringify(o));
+    for (let ci = 0; ci < corruptOrNoTimeLines.length; ci++) {
+      keptLines.push(corruptOrNoTimeLines[ci]);
+    }
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(DEV_INTERNAL_LOG_PATH, keptLines.join('\n') + (keptLines.length ? '\n' : ''), 'utf8');
+    } catch {
+      // 파일 정리 실패는 서비스에 영향 없음
+    }
+    rebuildDevInternalForwardStateFromLogs(deduped);
+    return memEntries;
+  } catch {
+    return [];
+  }
+}
+
+function compactDevInternalLogFile(opts) {
+  const o = opts || {};
+  try {
+    if (!fs.existsSync(DEV_INTERNAL_LOG_PATH)) {
+      return { before: 0, after: 0, removed: 0, purgedByOrder: 0 };
+    }
+    const raw = fs.readFileSync(DEV_INTERNAL_LOG_PATH, 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    const objs = [];
+    for (const line of lines) {
+      try {
+        objs.push(JSON.parse(line));
+      } catch (_) {}
+    }
+    const before = objs.length;
+    let working = objs;
+    let purgedByOrder = 0;
+    if (o.orderNos && o.orderNos.length) {
+      const pr = purgeDevInternalLogsByOrderNos(working, o.orderNos, o.keepPerOrder != null ? o.keepPerOrder : 1);
+      working = pr.kept;
+      purgedByOrder = pr.removed;
+    }
+    const deduped = dedupeDevInternalLogObjects(working);
+    const removed = before - deduped.length;
+    deduped.sort((a, b) => {
+      const ta = Date.parse(a.storedAtIso || a.storedAt || '') || 0;
+      const tb = Date.parse(b.storedAtIso || b.storedAt || '') || 0;
+      return ta - tb;
+    });
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(DEV_INTERNAL_LOG_PATH, deduped.map((x) => JSON.stringify(x)).join('\n') + (deduped.length ? '\n' : ''), 'utf8');
+    DEV_INTERNAL_LOGS = loadDevInternalJsonLogFile();
+    return { before, after: deduped.length, removed, purgedByOrder };
+  } catch (e) {
+    console.error('[dev-internal-noti.log] compact 실패', e.message || e);
+    return { before: 0, after: 0, removed: 0, purgedByOrder: 0, error: String(e.message || e) };
+  }
+}
+
+let DEV_INTERNAL_LOGS = loadDevInternalJsonLogFile();
 
 function appendDevInternalLog(entry) {
   const nowIso = new Date().toISOString();
@@ -3433,7 +3618,27 @@ function appendDevInternalLog(entry) {
     storedAt: getThailandNowString(),
     storedAtIso: nowIso,
   };
-  DEV_INTERNAL_LOGS.push(log);
+  const dedupeKey = devInternalLogDedupe.devInternalLogDedupeKey(log);
+  if (dedupeKey) {
+    let idx = -1;
+    for (let i = 0; i < DEV_INTERNAL_LOGS.length; i++) {
+      if (devInternalLogDedupe.devInternalLogDedupeKey(DEV_INTERNAL_LOGS[i]) === dedupeKey) {
+        idx = i;
+        break;
+      }
+    }
+    const tNew = Date.parse(log.storedAtIso || log.storedAt || '');
+    if (idx < 0) {
+      DEV_INTERNAL_LOGS.push(log);
+    } else {
+      const tOld = Date.parse(DEV_INTERNAL_LOGS[idx].storedAtIso || DEV_INTERNAL_LOGS[idx].storedAt || '');
+      if (Number.isNaN(tNew) || Number.isNaN(tOld) || tNew >= tOld) {
+        DEV_INTERNAL_LOGS[idx] = log;
+      }
+    }
+  } else {
+    DEV_INTERNAL_LOGS.push(log);
+  }
   const cutoff = getLogKeepMemCutoffMs();
   DEV_INTERNAL_LOGS = DEV_INTERNAL_LOGS.filter((e) => {
     const t = Date.parse(e.storedAtIso || e.storedAt);
@@ -3447,11 +3652,15 @@ function appendDevInternalLog(entry) {
   }
 }
 
-/** 개발 노티 전달 결과 저장값: OK=도착, SKIP=시도했으나 미도착, FAIL=전송 불가(URL 없음·예외 등) */
-const DEV_INTERNAL_DELIVER_OK = 'OK';
-const DEV_INTERNAL_DELIVER_SKIP = 'SKIP';
-const DEV_INTERNAL_DELIVER_FAIL = 'FAIL';
+function appendDevInternalLogUnlessSuppressed(entry, aggResult) {
+  if (aggResult && (aggResult.suppressed || aggResult.suppressReason)) {
+    console.log('[개발 노티 로그 생략] 전송 억제:', aggResult.suppressReason || 'suppressed');
+    return;
+  }
+  appendDevInternalLog(entry);
+}
 
+/** 개발 노티 전달 결과 저장값: OK=도착, SKIP=시도했으나 미도착, FAIL=전송 불가 — 상단 const 참고 */
 function normalizeDevInternalDeliveryUi(raw) {
   const s = String(raw || '').trim();
   const u = s.toUpperCase();
@@ -3805,10 +4014,23 @@ function jpayCurrencyCodeFromBody(body) {
 async function deliverJpayDevInternalNotify(devUrl, relayPack, merchant, opts) {
   const o = opts || {};
   const pack = normalizeJpayDevRelayPack(relayPack);
+  const merchantId = o.merchantId != null ? String(o.merchantId) : '';
+  const sup = shouldSuppressDevInternalForward(devUrl, pack.body, merchantId, 'jpay');
+  if (sup.suppress) {
+    console.log('[JPAY 개발 전산] 전송 억제:', sup.reason, 'url=', devUrl);
+    return {
+      mode: 'raw',
+      jpayRawRelay: true,
+      devPayload: pack.body,
+      devRelayPack: pack,
+      devAggResult: createSuppressedDevAggResult(sup.reason),
+    };
+  }
   console.log('[JPAY 개발 전산] JPAY 수신 원문 릴레이, url=', devUrl);
   const jpayRes = await relayJpayRawWithRetry(devUrl, pack, null, {
     icopayNotifyHttpAttemptBase: o.icopayNotifyHttpAttemptBase,
   });
+  recordDevInternalForwardAttempt(sup.key, jpayRes.ok);
   const status = jpayRes.res && jpayRes.res.status;
   const respData = jpayRes.res ? jpayRes.res.data : undefined;
   let respPreview = '';
@@ -4507,7 +4729,7 @@ function appendRecurringCallbackLog(entry) {
 function reloadMemLogsFromDisk() {
   NOTI_LOGS = loadPgNotiJsonLogFile();
   INTERNAL_LOGS = loadJsonLogFile(INTERNAL_LOG_PATH, 'storedAtIso');
-  DEV_INTERNAL_LOGS = loadJsonLogFile(DEV_INTERNAL_LOG_PATH, 'storedAtIso');
+  DEV_INTERNAL_LOGS = loadDevInternalJsonLogFile();
   DEALMAI_WEBHOOK_LOGS = loadJsonLogFile(DEALMAI_WEBHOOK_LOG_PATH, 'storedAtIso');
   TEST_LOGS = loadJsonLogFile(TEST_LOG_PATH, 'loggedAtIso');
   MAIL_LOGS = loadJsonLogFile(MAIL_LOG_PATH, 'sentAtIso');
@@ -6552,19 +6774,24 @@ async function sendVoidOrRefundNoti(log, type, mode) {
       } else {
         devInternalTargetUrl = devUrl;
         if (isJpayVr) {
-          const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant);
+          const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant, {
+            merchantId: log.merchantId,
+          });
           devPayload = jpayDevDeliver.devPayload;
           devAggVr = jpayDevDeliver.devAggResult;
           devOk = devAggVr.success;
         } else {
           console.log('[취소 노티 → 개발 전산] url=', devUrl, 'PaymentStatus=', devPayload.PaymentStatus, 'TransactionId=', devPayload.TransactionId);
-          devAggVr = await sendDevInternalHttpNotify(devUrl, devPayload);
+          devAggVr = await sendDevInternalHttpNotify(devUrl, devPayload, {
+            merchantId: log.merchantId,
+            pgProvider: pgProv,
+          });
           devOk = devAggVr.success;
           if (devOk) console.log('[취소 노티 → 개발 전산 완료] attempts=', devAggVr.attempts);
           else console.warn('[취소 노티 → 개발 전산 실패] attempts=', devAggVr.attempts, 'status=', devAggVr.status);
         }
       }
-      appendDevInternalLog({
+      appendDevInternalLogUnlessSuppressed({
         storedAt: new Date().toISOString(),
         merchantId: log.merchantId,
         routeNo: merchant.routeNo || '',
@@ -6581,7 +6808,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
             }
           : {}),
         ...(devInternalTargetUrl && devAggVr && !isJpayVr ? devInternalLogUpstreamExtras(devAggVr) : {}),
-      });
+      }, devAggVr);
     } catch (err) {
       console.error('[무효/환불 노티 → 개발 전산 실패]', err.message);
       let failUrl = devInternalTargetUrl;
@@ -7494,8 +7721,18 @@ async function sendDevInternalHttpNotify(internalUrl, payload, opts) {
     };
   }
   const o = opts || {};
+  const sup = shouldSuppressDevInternalForward(
+    internalUrl,
+    payload,
+    o.merchantId,
+    o.pgProvider || 'chillpay',
+  );
+  if (sup.suppress) {
+    console.log('[개발 전산] 전송 억제:', sup.reason, 'url=', internalUrl);
+    return createSuppressedDevAggResult(sup.reason);
+  }
   const idem = pgNotifyDelivery.buildIdempotencyKey(internalUrl, payload);
-  return runSerializedPgNotify(idem, async () => {
+  const result = await runSerializedPgNotify(idem, async () => {
     const job = createPgNotifyDeliveryJobRecord(internalUrl, payload, idem, {
       icopayNotifyHttpAttemptBase: o.icopayNotifyHttpAttemptBase != null ? o.icopayNotifyHttpAttemptBase : 0,
     });
@@ -7503,6 +7740,8 @@ async function sendDevInternalHttpNotify(internalUrl, payload, opts) {
     persistPgNotifyDeliveryJobs();
     return runPgNotifyDeliveryJobLifecycle(job, false);
   });
+  recordDevInternalForwardAttempt(sup.key, result.success);
+  return result;
 }
 
 /** 관리자 재전송 등: job만 등록하고 백그라운드 전송(nginx 504 방지) */
@@ -8067,7 +8306,10 @@ async function handleNotiRequest(routeKey, req, res) {
       } else {
         devInternalTargetUrl = devUrl;
         console.log('[개발 전산 전송 중] 개발 전산 시스템으로 가공 데이터 전송, merchant=', merchantId, 'url=', devUrl, 'maxAttempts=', DEV_INTERNAL_HTTP_MAX_ATTEMPTS);
-        devAggResult = await sendDevInternalHttpNotify(devUrl, devPayload);
+        devAggResult = await sendDevInternalHttpNotify(devUrl, devPayload, {
+          merchantId,
+          pgProvider: 'chillpay',
+        });
         devDeliverySuccess = devAggResult.success;
         if (devDeliverySuccess) {
           console.log('[개발 전산 전송 완료] attempts=', devAggResult.attempts, 'status=', devAggResult.status);
@@ -8075,7 +8317,7 @@ async function handleNotiRequest(routeKey, req, res) {
           console.warn('[개발 전산 전송 실패] attempts=', devAggResult.attempts, 'lastStatus=', devAggResult.status, devAggResult.error || '');
         }
       }
-      appendDevInternalLog({
+      appendDevInternalLogUnlessSuppressed({
         storedAt: new Date().toISOString(),
         merchantId,
         routeNo: merchant.routeNo || '',
@@ -8084,7 +8326,7 @@ async function handleNotiRequest(routeKey, req, res) {
         internalTargetUrl: devInternalTargetUrl,
         internalDeliveryStatus: devInternalTargetUrl ? (devDeliverySuccess ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP) : DEV_INTERNAL_DELIVER_FAIL,
         ...(devInternalTargetUrl && devAggResult ? devInternalLogUpstreamExtras(devAggResult) : {}),
-      });
+      }, devAggResult);
     } catch (err) {
       console.error('[개발 전산 전송 실패]', err.message);
       let failUrl = devInternalTargetUrl;
@@ -8417,7 +8659,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
         console.log('[JPAY 개발 전산 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
       } else {
         devInternalTargetUrl = devUrl;
-        const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant);
+        const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant, { merchantId });
         devPayloadJpay = jpayDevDeliver.devPayload;
         devAggResultJpay = jpayDevDeliver.devAggResult;
         devDeliverySuccess = devAggResultJpay.success;
@@ -8439,7 +8681,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
           );
         }
       }
-      appendDevInternalLog({
+      appendDevInternalLogUnlessSuppressed({
         storedAt: new Date().toISOString(),
         merchantId,
         routeNo: merchant.routeNo || '',
@@ -8452,7 +8694,7 @@ async function handleJpayNotiRequest(routeKey, req, res) {
         routeKey,
         ...jpayInternalLogExtras(),
         ...jpayDevInternalLogExtrasFromRelayPack(devRelayPackLogged || normalizeJpayDevRelayPack(jpayRelayPack)),
-      });
+      }, devAggResultJpay);
     } catch (err) {
       console.error('[JPAY 개발 전산 전송 실패]', err.message);
       let failUrl = devInternalTargetUrl;
@@ -18071,15 +18313,20 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
     try {
       let devResult = null;
       if (isJpayCr) {
-        const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPackCr, merchant);
+        const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPackCr, merchant, {
+          merchantId: log.merchantId,
+        });
         devPayload = jpayDevDeliver.devPayload;
         devResult = jpayDevDeliver.devAggResult;
         devOk = devResult.success;
       } else {
-        devResult = await sendDevInternalHttpNotify(devUrl, devPayload);
+        devResult = await sendDevInternalHttpNotify(devUrl, devPayload, {
+          merchantId: log.merchantId,
+          pgProvider: isJpayCr ? 'jpay' : 'chillpay',
+        });
         devOk = devResult.success;
       }
-      appendDevInternalLog({
+      appendDevInternalLogUnlessSuppressed({
         storedAt: new Date().toISOString(),
         merchantId: log.merchantId,
         routeNo: merchant.routeNo || '',
@@ -18095,7 +18342,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
               ...jpayDevInternalLogExtrasFromRelayPack(jpayRelayPackCr),
             }
           : {}),
-      });
+      }, devResult);
     } catch (e) {
       devOk = false;
       appendDevInternalLog({
@@ -25283,6 +25530,32 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
   ${devIntColHello.scriptHtml}
 </body>
 </html>`);
+});
+
+// 개발 노티 로그 중복 정리 (수퍼관리자, 디스크 파일 재작성)
+app.post('/admin/dev-internal/compact-logs', requireAuth, (req, res) => {
+  if (!req.session.member || req.session.member.role !== ROLES.SUPER_ADMIN) {
+    return res.status(403).send('Forbidden');
+  }
+  const orderNosRaw = req.body && req.body.orderNos != null ? String(req.body.orderNos) : '';
+  const orderNos = orderNosRaw
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const result = compactDevInternalLogFile({
+    orderNos: orderNos.length ? orderNos : undefined,
+    keepPerOrder: 1,
+  });
+  const srcQ = (req.body.source || '').toString().toLowerCase() === 'jpay' ? 'source=jpay&' : '';
+  const q =
+    srcQ +
+    'compact=1&before=' +
+    encodeURIComponent(String(result.before)) +
+    '&after=' +
+    encodeURIComponent(String(result.after)) +
+    '&removed=' +
+    encodeURIComponent(String(result.removed));
+  return res.redirect('/admin/dev-internal?' + q);
 });
 
 // 개발 노티 재전송
