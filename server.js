@@ -17,7 +17,6 @@ const os = require('os');
 const nodemailer = require('nodemailer');
 const { t } = require('./locales');
 const pgNotifyDelivery = require('./lib/pgNotifyDelivery');
-const devInternalLogDedupe = require('./lib/devInternalLogDedupe');
 
 const app = express();
 /** Nginx 등 리버스 프록시 뒤에서 X-Forwarded-*·req.ip 반영. 끄려면 TRUST_PROXY=0 */
@@ -386,11 +385,6 @@ const INTERNAL_TIMEOUT_MS = 10000;
 /** 개발 노티(JSON POST) 최대 시도 횟수(기본 2 = 최초 1 + 재시도 1). 실패 시 DEV_INTERNAL_RETRY_DELAY_MS 간격으로 반복. */
 const DEV_INTERNAL_HTTP_MAX_ATTEMPTS = Math.min(8, Math.max(1, parseInt(process.env.DEV_INTERNAL_HTTP_MAX_ATTEMPTS || '2', 10) || 2));
 const DEV_INTERNAL_RETRY_DELAY_MS = Math.max(0, parseInt(process.env.DEV_INTERNAL_RETRY_DELAY_MS || '2000', 10) || 2000);
-/** 동일 거래( orderNo·trnId·event ) 개발 전산 재전송 최소 간격 — ICOPAY/PG 오류 시 노티 폭주 방지 */
-const DEV_INTERNAL_FORWARD_COOLDOWN_MS = Math.max(
-  5000,
-  parseInt(process.env.DEV_INTERNAL_FORWARD_COOLDOWN_MS || '60000', 10) || 60000,
-);
 
 /** ICOPAY pg-notify(JSON POST) 재전송: 백오프·지터·상한·422/본문 실패 정책 (환경변수로 조정) */
 const PG_NOTIFY_DELIVERY = {
@@ -3036,6 +3030,494 @@ function removeVoidUiDeletedById(id) {
   }
 }
 
+// ===== 노티/로그 UI 삭제거래 (피지·전산·개발·웹훅) — 원본 로그 파일은 유지, 목록에서만 숨김 =====
+const NOTI_LOG_UI_DELETED_PATH = path.join(DATA_DIR, 'noti-log-ui-deleted.log');
+const NOTI_LOG_UI_DELETED_RETENTION_DAYS = 31;
+const NOTI_LOG_KINDS = ['pg_noti', 'internal', 'dev_internal', 'dealmai_webhook'];
+
+function notiLogPayloadFromEntry(log) {
+  if (!log || typeof log !== 'object') return {};
+  if (log.payload && typeof log.payload === 'object') return log.payload;
+  if (log.body && typeof log.body === 'object') return log.body;
+  if (typeof log.body === 'string') {
+    try {
+      return JSON.parse(log.body);
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function notiLogOrderNoFromEntry(log) {
+  const p = notiLogPayloadFromEntry(log);
+  return String(p.orderNo || p.OrderNo || log.orderNo || '').trim();
+}
+
+function notiLogTransactionIdFromEntry(log) {
+  const p = notiLogPayloadFromEntry(log);
+  return String(
+    p.TransactionId || p.transactionId || p.memberid || p.memberId || log.transactionId || '',
+  ).trim();
+}
+
+function notiLogStoredAtIsoFromEntry(log) {
+  return String(log.storedAtIso || log.receivedAtIso || log.storedAt || log.receivedAt || '').trim();
+}
+
+function loadNotiLogUiDeletedList() {
+  const cutoff = Date.now() - NOTI_LOG_UI_DELETED_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  try {
+    if (!fs.existsSync(NOTI_LOG_UI_DELETED_PATH)) return [];
+    const raw = fs.readFileSync(NOTI_LOG_UI_DELETED_PATH, 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    const entries = [];
+    const toKeep = [];
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line);
+        const t = Date.parse(obj.deletedAtIso || obj.deletedAt || '');
+        if (Number.isNaN(t)) continue;
+        if (t < cutoff) continue;
+        entries.push(obj);
+        toKeep.push(line);
+      } catch (_) {}
+    }
+    if (lines.length !== toKeep.length) {
+      try {
+        fs.writeFileSync(NOTI_LOG_UI_DELETED_PATH, toKeep.join('\n') + (toKeep.length ? '\n' : ''), 'utf8');
+      } catch (_) {}
+    }
+    return entries.sort((a, b) => (Date.parse(b.deletedAtIso || '') || 0) - (Date.parse(a.deletedAtIso || '') || 0));
+  } catch {
+    return [];
+  }
+}
+
+function isNotiLogUiDeleted(log, logKind, deletedList) {
+  const kind = String(logKind || '').trim();
+  const orderNo = notiLogOrderNoFromEntry(log);
+  const transactionId = notiLogTransactionIdFromEntry(log);
+  const storedAtIso = notiLogStoredAtIsoFromEntry(log);
+  const merchantId = String((log && log.merchantId) || '').trim();
+  return (deletedList || []).some((d) => {
+    const dk = String(d.logKind || '*').trim();
+    if (dk !== '*' && dk !== kind) return false;
+    if (d.bulkByOrderNo && d.orderNo) {
+      return String(d.orderNo).trim() === orderNo && orderNo !== '';
+    }
+    if (d.storedAtIso && storedAtIso && String(d.storedAtIso).trim() !== storedAtIso) return false;
+    if (d.orderNo && orderNo && String(d.orderNo).trim() !== orderNo) return false;
+    if (d.transactionId && transactionId && String(d.transactionId).trim() !== transactionId) return false;
+    if (d.merchantId && merchantId && String(d.merchantId).trim() !== merchantId) return false;
+    if (d.storedAtIso && storedAtIso) return String(d.storedAtIso).trim() === storedAtIso;
+    if (d.orderNo && orderNo && !d.storedAtIso) return String(d.orderNo).trim() === orderNo;
+    return false;
+  });
+}
+
+function appendNotiLogUiDeleted(entry) {
+  const id = (entry.id || 'nl_' + Date.now() + '_' + (Math.random().toString(36).slice(2, 10))).toString();
+  const row = { id, deletedAtIso: new Date().toISOString(), ...entry };
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFileSync(NOTI_LOG_UI_DELETED_PATH, JSON.stringify(row) + '\n', 'utf8');
+  } catch (_) {}
+  return id;
+}
+
+function removeNotiLogUiDeletedById(id) {
+  try {
+    if (!fs.existsSync(NOTI_LOG_UI_DELETED_PATH)) return false;
+    const raw = fs.readFileSync(NOTI_LOG_UI_DELETED_PATH, 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    const kept = [];
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line);
+        if (String(obj.id || '') === String(id)) continue;
+        kept.push(line);
+      } catch (_) {
+        kept.push(line);
+      }
+    }
+    if (kept.length === lines.length) return false;
+    fs.writeFileSync(NOTI_LOG_UI_DELETED_PATH, kept.join('\n') + (kept.length ? '\n' : ''), 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function markNotiLogsDeletedByOrderNos(orderNos, deletedBy, logKind) {
+  const by = String(deletedBy || 'admin').trim();
+  const kind = logKind ? String(logKind).trim() : '*';
+  const ids = [];
+  for (const raw of orderNos || []) {
+    const orderNo = String(raw || '').trim();
+    if (!orderNo) continue;
+    ids.push(
+      appendNotiLogUiDeleted({
+        logKind: kind,
+        orderNo,
+        bulkByOrderNo: true,
+        deletedBy: by,
+        note: 'bulk_by_order_no',
+      }),
+    );
+  }
+  return ids;
+}
+
+function getNotiLogsArrayByKind(logKind) {
+  const k = String(logKind || '').trim();
+  if (k === 'internal') return INTERNAL_LOGS;
+  if (k === 'dev_internal') return DEV_INTERNAL_LOGS;
+  if (k === 'dealmai_webhook') return DEALMAI_WEBHOOK_LOGS;
+  return NOTI_LOGS;
+}
+
+function notiLogChronologicalSortKey(log, arrayIndex) {
+  const parsed = Date.parse(notiLogStoredAtIsoFromEntry(log));
+  return { t: Number.isNaN(parsed) ? arrayIndex : parsed, i: arrayIndex };
+}
+
+/** 동일 OrderNo 중복: 수신 시각(최초) 1건만 남기고 나머지 숨김 계획 */
+function planNotiLogOrderDedupeKeepFirst(logKind, orderNo, deletedList) {
+  const order = String(orderNo || '').trim();
+  if (!order) return { keep: null, hide: [], total: 0, orderNo: order };
+  const arr = getNotiLogsArrayByKind(logKind);
+  const matches = [];
+  arr.forEach((log, index) => {
+    if (notiLogOrderNoFromEntry(log) !== order) return;
+    if (isNotiLogUiDeleted(log, logKind, deletedList || [])) return;
+    matches.push({ log, index });
+  });
+  if (matches.length <= 1) {
+    return { keep: matches[0] || null, hide: [], total: matches.length, orderNo: order };
+  }
+  matches.sort((a, b) => {
+    const ka = notiLogChronologicalSortKey(a.log, a.index);
+    const kb = notiLogChronologicalSortKey(b.log, b.index);
+    if (ka.t !== kb.t) return ka.t - kb.t;
+    return ka.i - kb.i;
+  });
+  return { keep: matches[0], hide: matches.slice(1), total: matches.length, orderNo: order };
+}
+
+function executeNotiLogOrderDedupeKeepFirst(logKind, orderNo, deletedBy, deletedList) {
+  const plan = planNotiLogOrderDedupeKeepFirst(logKind, orderNo, deletedList);
+  const by = String(deletedBy || 'admin').trim();
+  const ids = [];
+  for (const { log } of plan.hide) {
+    const storedAtIso = notiLogStoredAtIsoFromEntry(log);
+    const transactionId = notiLogTransactionIdFromEntry(log);
+    const merchantId = String((log && log.merchantId) || '').trim();
+    ids.push(
+      appendNotiLogUiDeleted({
+        logKind,
+        orderNo: plan.orderNo,
+        storedAtIso: storedAtIso || undefined,
+        transactionId: transactionId || undefined,
+        merchantId: merchantId || undefined,
+        deletedBy: by,
+        note: 'dedupe_keep_first',
+      }),
+    );
+  }
+  return { ...plan, hiddenCount: plan.hide.length, ids };
+}
+
+// ===== 개발 노티 자동 전송 중복 억제 (ICOPAY/PG 반복 수신 시 만건 로그·전송 방지) =====
+const DEV_INTERNAL_DEDUP_PATH = path.join(DATA_DIR, 'dev-internal-delivery-dedup.json');
+const DEV_INTERNAL_DEDUP_SUCCESS_RETENTION_MS = Math.max(
+  3600000,
+  parseInt(process.env.DEV_INTERNAL_DEDUP_SUCCESS_MS || String(7 * 24 * 60 * 60 * 1000), 10) || 7 * 24 * 60 * 60 * 1000,
+);
+const DEV_INTERNAL_DEDUP_FAIL_COOLDOWN_MS = Math.max(
+  60000,
+  parseInt(process.env.DEV_INTERNAL_FAIL_COOLDOWN_MS || '300000', 10) || 300000,
+);
+
+function loadDevInternalDedupMap() {
+  try {
+    if (!fs.existsSync(DEV_INTERNAL_DEDUP_PATH)) return {};
+    const raw = fs.readFileSync(DEV_INTERNAL_DEDUP_PATH, 'utf8');
+    const o = JSON.parse(raw);
+    return o && typeof o === 'object' ? o : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDevInternalDedupMap(map) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const now = Date.now();
+    const pruned = {};
+    for (const [k, v] of Object.entries(map || {})) {
+      if (!v || typeof v !== 'object') continue;
+      const t = Number(v.lastAttemptMs) || 0;
+      const retain =
+        v.state === 'SUCCESS'
+          ? now - t < DEV_INTERNAL_DEDUP_SUCCESS_RETENTION_MS
+          : now - t < DEV_INTERNAL_DEDUP_FAIL_COOLDOWN_MS * 48;
+      if (retain) pruned[k] = v;
+    }
+    fs.writeFileSync(DEV_INTERNAL_DEDUP_PATH, JSON.stringify(pruned), 'utf8');
+  } catch (e) {
+    console.warn('[dev-internal-dedup] save failed', e.message || e);
+  }
+}
+
+function buildDevInternalDedupeKey(opts) {
+  const o = opts || {};
+  const p = o.payload || o.body || {};
+  const orderNo = String(p.orderNo || p.OrderNo || '').trim();
+  const txId = String(p.TransactionId || p.transactionId || p.memberid || p.memberId || '').trim();
+  const status = String(
+    p.PaymentStatus ?? p.paymentStatus ?? p.returncode ?? p.returnCode ?? p.status ?? '',
+  ).trim();
+  const url = String(o.devUrl || '').trim();
+  const pg = String(o.pgProvider || 'chillpay').trim().toLowerCase();
+  const mid = String(o.merchantId || '').trim();
+  return crypto
+    .createHash('sha256')
+    .update([pg, mid, url, orderNo, txId, status].join('|'))
+    .digest('hex');
+}
+
+function shouldSkipDevInternalAutoDelivery(dedupeKey) {
+  const map = loadDevInternalDedupMap();
+  const entry = map[String(dedupeKey || '')];
+  if (!entry) return { skip: false };
+  const now = Date.now();
+  const last = Number(entry.lastAttemptMs) || 0;
+  if (entry.state === 'SUCCESS' && now - last < DEV_INTERNAL_DEDUP_SUCCESS_RETENTION_MS) {
+    return { skip: true, reason: 'already_delivered', entry };
+  }
+  if (entry.state === 'FAIL' && now - last < DEV_INTERNAL_DEDUP_FAIL_COOLDOWN_MS) {
+    return { skip: true, reason: 'fail_cooldown', entry };
+  }
+  return { skip: false, entry };
+}
+
+function recordDevInternalDedupAttempt(dedupeKey, result) {
+  const key = String(dedupeKey || '');
+  if (!key) return;
+  const map = loadDevInternalDedupMap();
+  map[key] = {
+    state: result && result.success ? 'SUCCESS' : 'FAIL',
+    lastAttemptMs: Date.now(),
+    lastStatus: result && result.status != null ? result.status : 0,
+    orderNo: result && result.orderNo ? String(result.orderNo) : undefined,
+  };
+  saveDevInternalDedupMap(map);
+}
+
+function isHtmlLikeHttpResponse(data) {
+  const s = typeof data === 'string' ? data.trim() : '';
+  if (!s) return false;
+  const low = s.slice(0, 256).toLowerCase();
+  return low.startsWith('<!doctype') || low.startsWith('<html') || low.includes('<html');
+}
+
+/**
+ * 개발 노티 자동 전송 + 중복 억제. forceResend=true(관리자 재전송) 시 dedup 무시.
+ * @returns {{ skipAppendLog, dedupeSkipped, devInternalTargetUrl, devDeliverySuccess, internalDeliveryStatus, ... }}
+ */
+async function runDevInternalNotifyWithDedup(ctx) {
+  const c = ctx || {};
+  const devUrl = c.devUrl ? String(c.devUrl).trim() : '';
+  const payload = c.payload || c.body || {};
+  const dedupeKey = buildDevInternalDedupeKey({
+    merchantId: c.merchantId,
+    pgProvider: c.pgProvider,
+    devUrl,
+    payload,
+  });
+  if (!devUrl) {
+    return {
+      skipAppendLog: false,
+      dedupeSkipped: false,
+      devInternalTargetUrl: '',
+      devDeliverySuccess: false,
+      internalDeliveryStatus: DEV_INTERNAL_DELIVER_FAIL,
+      devAggResult: null,
+      devPayload: payload,
+      dedupeKey,
+    };
+  }
+  if (!c.forceResend) {
+    const dedup = shouldSkipDevInternalAutoDelivery(dedupeKey);
+    if (dedup.skip) {
+      const wasOk = dedup.entry && dedup.entry.state === 'SUCCESS';
+      console.log(
+        '[개발 전산 자동 스킵]',
+        dedup.reason,
+        'orderNo=',
+        notiLogOrderNoFromEntry({ payload }),
+        'merchant=',
+        c.merchantId,
+      );
+      return {
+        skipAppendLog: true,
+        dedupeSkipped: true,
+        dedupeReason: dedup.reason,
+        devInternalTargetUrl: devUrl,
+        devDeliverySuccess: wasOk,
+        internalDeliveryStatus: wasOk ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP,
+        devAggResult: null,
+        devPayload: payload,
+        dedupeKey,
+      };
+    }
+  }
+  const delivered = (await c.deliver()) || {};
+  const devDeliverySuccess = !!(
+    delivered.devDeliverySuccess ||
+    (delivered.devAggResult && delivered.devAggResult.success)
+  );
+  if (!c.forceResend) {
+    recordDevInternalDedupAttempt(dedupeKey, {
+      success: devDeliverySuccess,
+      status: delivered.devAggResult && delivered.devAggResult.status,
+      orderNo: notiLogOrderNoFromEntry({ payload: delivered.devPayload || payload }),
+    });
+  }
+  return {
+    skipAppendLog: false,
+    dedupeSkipped: false,
+    devInternalTargetUrl: devUrl,
+    devDeliverySuccess,
+    internalDeliveryStatus: devDeliverySuccess ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP,
+    ...delivered,
+    dedupeKey,
+  };
+}
+
+function buildNotiLogDeleteConfirmUrl(logKind, log, opts) {
+  const o = opts || {};
+  const p = new URLSearchParams();
+  p.set('kind', String(logKind || ''));
+  if (o.bulkByOrderNo && log) {
+    const orderNo = notiLogOrderNoFromEntry(log);
+    if (orderNo) p.set('orderNo', orderNo);
+    p.set('bulk', '1');
+  } else if (log) {
+    const storedAtIso = notiLogStoredAtIsoFromEntry(log);
+    const orderNo = notiLogOrderNoFromEntry(log);
+    const transactionId = notiLogTransactionIdFromEntry(log);
+    const merchantId = String(log.merchantId || '').trim();
+    if (storedAtIso) p.set('storedAtIso', storedAtIso);
+    if (orderNo) p.set('orderNo', orderNo);
+    if (transactionId) p.set('transactionId', transactionId);
+    if (merchantId) p.set('merchantId', merchantId);
+  }
+  if (o.back) p.set('back', String(o.back));
+  if (o.source) p.set('source', String(o.source));
+  return '/admin/logs/noti-delete-confirm?' + p.toString();
+}
+
+function buildNotiLogDedupeConfirmUrl(logKind, log, opts) {
+  const o = opts || {};
+  const p = new URLSearchParams();
+  p.set('kind', String(logKind || ''));
+  const orderNo = log ? notiLogOrderNoFromEntry(log) : '';
+  if (orderNo) p.set('orderNo', orderNo);
+  if (o.back) p.set('back', String(o.back));
+  if (o.source) p.set('source', String(o.source));
+  return '/admin/logs/noti-dedupe-confirm?' + p.toString();
+}
+
+function renderNotiLogDeleteButtonHtml(locale, logKind, log, esc, backUrl, source) {
+  const orderNo = notiLogOrderNoFromEntry(log);
+  const singleUrl = buildNotiLogDeleteConfirmUrl(logKind, log, { back: backUrl, source });
+  const bulkUrl = orderNo
+    ? buildNotiLogDeleteConfirmUrl(logKind, log, { bulkByOrderNo: true, back: backUrl, source })
+    : '';
+  const dedupeUrl = orderNo ? buildNotiLogDedupeConfirmUrl(logKind, log, { back: backUrl, source }) : '';
+  let html =
+    '<div class="noti-log-action-btns" style="display:inline-flex;flex-wrap:wrap;gap:4px;justify-content:center;align-items:center;">' +
+    '<a href="' +
+    esc(singleUrl) +
+    '" class="btn-log-delete" style="display:inline-block;padding:3px 8px;font-size:11px;background:#dc2626;color:#fff;border-radius:4px;text-decoration:none;">' +
+    esc(t(locale, 'noti_log_delete_row')) +
+    '</a>';
+  if (bulkUrl) {
+    html +=
+      '<a href="' +
+      esc(bulkUrl) +
+      '" class="btn-log-delete-bulk" style="display:inline-block;padding:3px 8px;font-size:11px;background:#b45309;color:#fff;border-radius:4px;text-decoration:none;" title="' +
+      esc(t(locale, 'noti_log_delete_order_hint')) +
+      '">' +
+      esc(t(locale, 'noti_log_delete_order')) +
+      '</a>';
+  }
+  if (dedupeUrl) {
+    html +=
+      '<a href="' +
+      esc(dedupeUrl) +
+      '" class="btn-log-dedupe" style="display:inline-block;padding:3px 8px;font-size:11px;background:#4f46e5;color:#fff;border-radius:4px;text-decoration:none;" title="' +
+      esc(t(locale, 'noti_log_dedupe_order_hint')) +
+      '">' +
+      esc(t(locale, 'noti_log_dedupe_order')) +
+      '</a>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function buildNotiLogDeletedBannerHtml(locale, esc, kind, deletedFlag) {
+  if (String(deletedFlag || '') !== '1') return '';
+  return (
+    '<div class="alert alert-ok" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#d1fae5;border:1px solid #6ee7b7;color:#065f46;">' +
+    esc(t(locale, 'noti_log_deleted_ok')) +
+    ' <a href="/admin/logs/noti-deleted-list?kind=' +
+    esc(kind) +
+    '" style="color:#065f46;font-weight:600;">' +
+    esc(t(locale, 'noti_log_deleted_list_title')) +
+    '</a></div>'
+  );
+}
+
+function buildNotiLogDeletedListLinkHtml(locale, esc, kind) {
+  return (
+    '<p style="margin:0 0 8px;font-size:12px;"><a href="/admin/logs/noti-deleted-list?kind=' +
+    esc(kind) +
+    '">' +
+    esc(t(locale, 'noti_log_deleted_list_title')) +
+    '</a></p>'
+  );
+}
+
+function buildNotiLogDedupedBannerHtml(locale, esc, kind, q) {
+  if (String((q && q.deduped) || '') !== '1') return '';
+  const n = String((q && q.n) != null ? q.n : '0');
+  if (n === '0') {
+    return (
+      '<div class="alert alert-fail" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#fef3c7;border:1px solid #fcd34d;color:#92400e;">' +
+      esc(t(locale, 'noti_log_deduped_none')) +
+      '</div>'
+    );
+  }
+  return (
+    '<div class="alert alert-ok" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#e0e7ff;border:1px solid #a5b4fc;color:#3730a3;">' +
+    esc(t(locale, 'noti_log_deduped_ok').replace(/\{\{n\}\}/g, n)) +
+    ' <a href="/admin/logs/noti-deleted-list?kind=' +
+    esc(kind) +
+    '" style="color:#3730a3;font-weight:600;">' +
+    esc(t(locale, 'noti_log_deleted_list_title')) +
+    '</a></div>'
+  );
+}
+
+function notiLogDeletedKeyLabel(locale, d) {
+  if (d.bulkByOrderNo) return t(locale, 'noti_log_delete_bulk_tag');
+  if (d.note === 'dedupe_keep_first') return t(locale, 'noti_log_dedupe_tag');
+  return d.storedAtIso || '';
+}
+
 // ===== 공통: JSON Lines 로그 로더 (환경설정 기준: 메모리/파일 보관 기간) =====
 function loadJsonLogFile(filePath, isoKey) {
   try {
@@ -3430,186 +3912,7 @@ function appendInternalLog(entry) {
 }
 
 // ===== 개발 노티 로그 (메모리·파일 보관은 환경설정 일수) =====
-/** 개발 노티 전달 결과 저장값: OK=도착, SKIP=시도했으나 미도착, FAIL=전송 불가(URL 없음·예외 등) */
-const DEV_INTERNAL_DELIVER_OK = 'OK';
-const DEV_INTERNAL_DELIVER_SKIP = 'SKIP';
-const DEV_INTERNAL_DELIVER_FAIL = 'FAIL';
-
-const {
-  devInternalForwardSuppressKey,
-  dedupeDevInternalLogObjects,
-  purgeDevInternalLogsByOrderNos,
-} = devInternalLogDedupe;
-
-/** key → { lastAttemptMs, deliveredOk } — 재기동 시 로그에서 복원 */
-const DEV_INTERNAL_FORWARD_STATE = new Map();
-
-function rebuildDevInternalForwardStateFromLogs(logs) {
-  DEV_INTERNAL_FORWARD_STATE.clear();
-  const arr = Array.isArray(logs) ? logs : [];
-  for (const log of arr) {
-    const key = devInternalForwardSuppressKey(
-      log.internalTargetUrl,
-      log.payload,
-      log.merchantId,
-      log.pgProvider || 'chillpay',
-    );
-    if (!key) continue;
-    const t = Date.parse(log.storedAtIso || log.storedAt || '') || 0;
-    const ok = String(log.internalDeliveryStatus || '').toUpperCase() === DEV_INTERNAL_DELIVER_OK;
-    const prev = DEV_INTERNAL_FORWARD_STATE.get(key);
-    if (!prev || t >= prev.lastAttemptMs) {
-      DEV_INTERNAL_FORWARD_STATE.set(key, { lastAttemptMs: t, deliveredOk: ok || (prev && prev.deliveredOk) });
-    } else if (ok) {
-      prev.deliveredOk = true;
-    }
-  }
-}
-
-function shouldSuppressDevInternalForward(devUrl, payload, merchantId, pgProvider) {
-  const key = devInternalForwardSuppressKey(devUrl, payload, merchantId, pgProvider);
-  if (!key) return { suppress: false, key: '', reason: '' };
-  const st = DEV_INTERNAL_FORWARD_STATE.get(key);
-  const now = Date.now();
-  if (st && st.deliveredOk) {
-    return { suppress: true, key, reason: 'already_ok' };
-  }
-  if (st && now - st.lastAttemptMs < DEV_INTERNAL_FORWARD_COOLDOWN_MS) {
-    return { suppress: true, key, reason: 'cooldown' };
-  }
-  return { suppress: false, key, reason: '' };
-}
-
-function recordDevInternalForwardAttempt(key, success) {
-  if (!key) return;
-  const prev = DEV_INTERNAL_FORWARD_STATE.get(key) || { lastAttemptMs: 0, deliveredOk: false };
-  DEV_INTERNAL_FORWARD_STATE.set(key, {
-    lastAttemptMs: Date.now(),
-    deliveredOk: !!success || prev.deliveredOk,
-  });
-}
-
-function createSuppressedDevAggResult(reason) {
-  const alreadyOk = reason === 'already_ok';
-  return {
-    success: alreadyOk,
-    suppressed: true,
-    suppressReason: reason,
-    queued: false,
-    status: 0,
-    responsePreview: reason === 'cooldown' ? 'suppressed:cooldown' : 'suppressed:already_ok',
-    attempts: 0,
-    attemptStatuses: [],
-    deliveryState: alreadyOk ? 'DELIVERED' : 'SUPPRESSED',
-    durationMsTotal: 0,
-  };
-}
-
-/** 개발 노티 로그 전용 로더: 보관 일수 필터 + 업무키 중복 제거 후 파일 재기록 */
-function loadDevInternalJsonLogFile() {
-  try {
-    if (!fs.existsSync(DEV_INTERNAL_LOG_PATH)) return [];
-    const raw = fs.readFileSync(DEV_INTERNAL_LOG_PATH, 'utf8');
-    if (!raw.trim()) return [];
-    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
-    const now = Date.now();
-    const cfg = loadChillPayTransactionConfig();
-    const memDays = Number(cfg.logKeepDaysMem) > 0 ? cfg.logKeepDaysMem : DEFAULT_LOG_KEEP_DAYS_MEM;
-    const diskDays = Number(cfg.logKeepDaysDisk) > 0 ? cfg.logKeepDaysDisk : DEFAULT_LOG_KEEP_DAYS_DISK;
-    const memCutoff = now - memDays * 24 * 60 * 60 * 1000;
-    const diskCutoff = now - diskDays * 24 * 60 * 60 * 1000;
-    const corruptOrNoTimeLines = [];
-    const diskObjs = [];
-    for (let li = 0; li < lines.length; li++) {
-      const line = lines[li];
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch {
-        corruptOrNoTimeLines.push(line);
-        continue;
-      }
-      const iso = (obj && obj.storedAtIso) || (obj && obj.storedAt) || null;
-      let t = Number.NaN;
-      if (iso) t = Date.parse(iso);
-      if (Number.isNaN(t)) {
-        corruptOrNoTimeLines.push(JSON.stringify(obj));
-        continue;
-      }
-      if (t >= diskCutoff) diskObjs.push(obj);
-    }
-    const beforeCt = diskObjs.length;
-    const deduped = dedupeDevInternalLogObjects(diskObjs);
-    const removed = beforeCt - deduped.length;
-    if (removed > 0) {
-      console.log('[dev-internal-noti.log] 업무키 중복', removed, '건 제거(디스크 보관 구간), 유지', deduped.length, '건');
-    }
-    deduped.sort((a, b) => {
-      const ta = Date.parse(a.storedAtIso || a.storedAt || '') || 0;
-      const tb = Date.parse(b.storedAtIso || b.storedAt || '') || 0;
-      return ta - tb;
-    });
-    const memEntries = deduped.filter((e) => {
-      const t = Date.parse(e.storedAtIso || e.storedAt);
-      return !Number.isNaN(t) && t >= memCutoff;
-    });
-    const keptLines = deduped.map((o) => JSON.stringify(o));
-    for (let ci = 0; ci < corruptOrNoTimeLines.length; ci++) {
-      keptLines.push(corruptOrNoTimeLines[ci]);
-    }
-    try {
-      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-      fs.writeFileSync(DEV_INTERNAL_LOG_PATH, keptLines.join('\n') + (keptLines.length ? '\n' : ''), 'utf8');
-    } catch {
-      // 파일 정리 실패는 서비스에 영향 없음
-    }
-    rebuildDevInternalForwardStateFromLogs(deduped);
-    return memEntries;
-  } catch {
-    return [];
-  }
-}
-
-function compactDevInternalLogFile(opts) {
-  const o = opts || {};
-  try {
-    if (!fs.existsSync(DEV_INTERNAL_LOG_PATH)) {
-      return { before: 0, after: 0, removed: 0, purgedByOrder: 0 };
-    }
-    const raw = fs.readFileSync(DEV_INTERNAL_LOG_PATH, 'utf8');
-    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
-    const objs = [];
-    for (const line of lines) {
-      try {
-        objs.push(JSON.parse(line));
-      } catch (_) {}
-    }
-    const before = objs.length;
-    let working = objs;
-    let purgedByOrder = 0;
-    if (o.orderNos && o.orderNos.length) {
-      const pr = purgeDevInternalLogsByOrderNos(working, o.orderNos, o.keepPerOrder != null ? o.keepPerOrder : 1);
-      working = pr.kept;
-      purgedByOrder = pr.removed;
-    }
-    const deduped = dedupeDevInternalLogObjects(working);
-    const removed = before - deduped.length;
-    deduped.sort((a, b) => {
-      const ta = Date.parse(a.storedAtIso || a.storedAt || '') || 0;
-      const tb = Date.parse(b.storedAtIso || b.storedAt || '') || 0;
-      return ta - tb;
-    });
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DEV_INTERNAL_LOG_PATH, deduped.map((x) => JSON.stringify(x)).join('\n') + (deduped.length ? '\n' : ''), 'utf8');
-    DEV_INTERNAL_LOGS = loadDevInternalJsonLogFile();
-    return { before, after: deduped.length, removed, purgedByOrder };
-  } catch (e) {
-    console.error('[dev-internal-noti.log] compact 실패', e.message || e);
-    return { before: 0, after: 0, removed: 0, purgedByOrder: 0, error: String(e.message || e) };
-  }
-}
-
-let DEV_INTERNAL_LOGS = loadDevInternalJsonLogFile();
+let DEV_INTERNAL_LOGS = loadJsonLogFile(DEV_INTERNAL_LOG_PATH, 'storedAtIso');
 
 function appendDevInternalLog(entry) {
   const nowIso = new Date().toISOString();
@@ -3618,27 +3921,7 @@ function appendDevInternalLog(entry) {
     storedAt: getThailandNowString(),
     storedAtIso: nowIso,
   };
-  const dedupeKey = devInternalLogDedupe.devInternalLogDedupeKey(log);
-  if (dedupeKey) {
-    let idx = -1;
-    for (let i = 0; i < DEV_INTERNAL_LOGS.length; i++) {
-      if (devInternalLogDedupe.devInternalLogDedupeKey(DEV_INTERNAL_LOGS[i]) === dedupeKey) {
-        idx = i;
-        break;
-      }
-    }
-    const tNew = Date.parse(log.storedAtIso || log.storedAt || '');
-    if (idx < 0) {
-      DEV_INTERNAL_LOGS.push(log);
-    } else {
-      const tOld = Date.parse(DEV_INTERNAL_LOGS[idx].storedAtIso || DEV_INTERNAL_LOGS[idx].storedAt || '');
-      if (Number.isNaN(tNew) || Number.isNaN(tOld) || tNew >= tOld) {
-        DEV_INTERNAL_LOGS[idx] = log;
-      }
-    }
-  } else {
-    DEV_INTERNAL_LOGS.push(log);
-  }
+  DEV_INTERNAL_LOGS.push(log);
   const cutoff = getLogKeepMemCutoffMs();
   DEV_INTERNAL_LOGS = DEV_INTERNAL_LOGS.filter((e) => {
     const t = Date.parse(e.storedAtIso || e.storedAt);
@@ -3652,15 +3935,11 @@ function appendDevInternalLog(entry) {
   }
 }
 
-function appendDevInternalLogUnlessSuppressed(entry, aggResult) {
-  if (aggResult && (aggResult.suppressed || aggResult.suppressReason)) {
-    console.log('[개발 노티 로그 생략] 전송 억제:', aggResult.suppressReason || 'suppressed');
-    return;
-  }
-  appendDevInternalLog(entry);
-}
+/** 개발 노티 전달 결과 저장값: OK=도착, SKIP=시도했으나 미도착, FAIL=전송 불가(URL 없음·예외 등) */
+const DEV_INTERNAL_DELIVER_OK = 'OK';
+const DEV_INTERNAL_DELIVER_SKIP = 'SKIP';
+const DEV_INTERNAL_DELIVER_FAIL = 'FAIL';
 
-/** 개발 노티 전달 결과 저장값: OK=도착, SKIP=시도했으나 미도착, FAIL=전송 불가 — 상단 const 참고 */
 function normalizeDevInternalDeliveryUi(raw) {
   const s = String(raw || '').trim();
   const u = s.toUpperCase();
@@ -4014,23 +4293,10 @@ function jpayCurrencyCodeFromBody(body) {
 async function deliverJpayDevInternalNotify(devUrl, relayPack, merchant, opts) {
   const o = opts || {};
   const pack = normalizeJpayDevRelayPack(relayPack);
-  const merchantId = o.merchantId != null ? String(o.merchantId) : '';
-  const sup = shouldSuppressDevInternalForward(devUrl, pack.body, merchantId, 'jpay');
-  if (sup.suppress) {
-    console.log('[JPAY 개발 전산] 전송 억제:', sup.reason, 'url=', devUrl);
-    return {
-      mode: 'raw',
-      jpayRawRelay: true,
-      devPayload: pack.body,
-      devRelayPack: pack,
-      devAggResult: createSuppressedDevAggResult(sup.reason),
-    };
-  }
   console.log('[JPAY 개발 전산] JPAY 수신 원문 릴레이, url=', devUrl);
   const jpayRes = await relayJpayRawWithRetry(devUrl, pack, null, {
     icopayNotifyHttpAttemptBase: o.icopayNotifyHttpAttemptBase,
   });
-  recordDevInternalForwardAttempt(sup.key, jpayRes.ok);
   const status = jpayRes.res && jpayRes.res.status;
   const respData = jpayRes.res ? jpayRes.res.data : undefined;
   let respPreview = '';
@@ -4142,8 +4408,8 @@ async function relayJpayRawWithRetry(url, relayPack, merchant, opts) {
   const sendOpts1 = { ...relayOpts, headers: ingressHeaders };
   console.log('[JPAY 릴레이 시도1] url=', url, 'ct=', relayOpts.contentType || pack.contentType, 'len=', outLen, 'body=', maskJpayBodyForLog(outBody));
   let res = await relayToMerchant(url, pack.body, sendOpts1);
-  let ok = res.status >= 200 && res.status < 400;
-  console.log('[JPAY 릴레이 결과1] url=', url, 'status=', res && res.status, 'ok=', ok);
+  let ok = res.status >= 200 && res.status < 400 && !isHtmlLikeHttpResponse(res.data);
+  console.log('[JPAY 릴레이 결과1] url=', url, 'status=', res && res.status, 'ok=', ok, isHtmlLikeHttpResponse(res.data) ? '(html_body)' : '');
   if (!ok) {
     await new Promise((r) => setTimeout(r, 2000));
     const ingressHeaders2 = {};
@@ -4151,8 +4417,8 @@ async function relayJpayRawWithRetry(url, relayPack, merchant, opts) {
     const sendOpts2 = { ...relayOpts, headers: ingressHeaders2 };
     console.log('[JPAY 릴레이 시도2] url=', url, 'len=', outLen);
     res = await relayToMerchant(url, pack.body, sendOpts2);
-    ok = res.status >= 200 && res.status < 400;
-    console.log('[JPAY 릴레이 결과2] url=', url, 'status=', res && res.status, 'ok=', ok);
+    ok = res.status >= 200 && res.status < 400 && !isHtmlLikeHttpResponse(res.data);
+    console.log('[JPAY 릴레이 결과2] url=', url, 'status=', res && res.status, 'ok=', ok, isHtmlLikeHttpResponse(res.data) ? '(html_body)' : '');
   }
   return { ok, res, relayOpts, pack, outLen };
 }
@@ -4729,7 +4995,7 @@ function appendRecurringCallbackLog(entry) {
 function reloadMemLogsFromDisk() {
   NOTI_LOGS = loadPgNotiJsonLogFile();
   INTERNAL_LOGS = loadJsonLogFile(INTERNAL_LOG_PATH, 'storedAtIso');
-  DEV_INTERNAL_LOGS = loadDevInternalJsonLogFile();
+  DEV_INTERNAL_LOGS = loadJsonLogFile(DEV_INTERNAL_LOG_PATH, 'storedAtIso');
   DEALMAI_WEBHOOK_LOGS = loadJsonLogFile(DEALMAI_WEBHOOK_LOG_PATH, 'storedAtIso');
   TEST_LOGS = loadJsonLogFile(TEST_LOG_PATH, 'loggedAtIso');
   MAIL_LOGS = loadJsonLogFile(MAIL_LOG_PATH, 'sentAtIso');
@@ -6763,7 +7029,6 @@ async function sendVoidOrRefundNoti(log, type, mode) {
   if (deliverChillpayDevInternalVr) {
     try {
       let devUrl = null;
-      let devAggVr = null;
       if (useRelayOffDevUrlsVr) {
         devUrl = resolveRelayOffDevUrl(merchant, 'callback');
       } else {
@@ -6771,44 +7036,55 @@ async function sendVoidOrRefundNoti(log, type, mode) {
       }
       if (!devUrl) {
         console.log('[무효/환불 노티 → 개발 전산 스킵] URL 미설정, merchant=', log.merchantId);
-      } else {
-        devInternalTargetUrl = devUrl;
-        if (isJpayVr) {
-          const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant, {
-            merchantId: log.merchantId,
-          });
-          devPayload = jpayDevDeliver.devPayload;
-          devAggVr = jpayDevDeliver.devAggResult;
-          devOk = devAggVr.success;
-        } else {
-          console.log('[취소 노티 → 개발 전산] url=', devUrl, 'PaymentStatus=', devPayload.PaymentStatus, 'TransactionId=', devPayload.TransactionId);
-          devAggVr = await sendDevInternalHttpNotify(devUrl, devPayload, {
-            merchantId: log.merchantId,
-            pgProvider: pgProv,
-          });
-          devOk = devAggVr.success;
-          if (devOk) console.log('[취소 노티 → 개발 전산 완료] attempts=', devAggVr.attempts);
-          else console.warn('[취소 노티 → 개발 전산 실패] attempts=', devAggVr.attempts, 'status=', devAggVr.status);
-        }
       }
-      appendDevInternalLogUnlessSuppressed({
-        storedAt: new Date().toISOString(),
+      const devRunVr = await runDevInternalNotifyWithDedup({
         merchantId: log.merchantId,
-        routeNo: merchant.routeNo || '',
-        internalTargetId: merchant.internalTargetId || '',
-        payload: devPayload,
-        internalTargetUrl: devInternalTargetUrl,
-        internalDeliveryStatus: devInternalTargetUrl ? (devOk ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP) : DEV_INTERNAL_DELIVER_FAIL,
         pgProvider: pgProv,
-        ...(isJpayVr
-          ? {
-              jpayRawRelay: true,
-              ...jpayInternalLogExtrasFromNotiLog(log),
-              ...jpayDevInternalLogExtrasFromRelayPack(jpayRelayPack),
-            }
-          : {}),
-        ...(devInternalTargetUrl && devAggVr && !isJpayVr ? devInternalLogUpstreamExtras(devAggVr) : {}),
-      }, devAggVr);
+        devUrl: devUrl || '',
+        payload: devPayload,
+        deliver: async () => {
+          if (!devUrl) return { devPayload, devAggResult: null, devDeliverySuccess: false };
+          let devAggVr = null;
+          let outPayload = devPayload;
+          if (isJpayVr) {
+            const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant);
+            outPayload = jpayDevDeliver.devPayload;
+            devAggVr = jpayDevDeliver.devAggResult;
+          } else {
+            console.log('[취소 노티 → 개발 전산] url=', devUrl, 'PaymentStatus=', devPayload.PaymentStatus, 'TransactionId=', devPayload.TransactionId);
+            devAggVr = await sendDevInternalHttpNotify(devUrl, devPayload);
+            if (devAggVr.success) console.log('[취소 노티 → 개발 전산 완료] attempts=', devAggVr.attempts);
+            else console.warn('[취소 노티 → 개발 전산 실패] attempts=', devAggVr.attempts, 'status=', devAggVr.status);
+          }
+          return {
+            devPayload: outPayload,
+            devAggResult: devAggVr,
+            devDeliverySuccess: !!(devAggVr && devAggVr.success),
+          };
+        },
+      });
+      devOk = devRunVr.devDeliverySuccess;
+      devInternalTargetUrl = devRunVr.devInternalTargetUrl;
+      if (!devRunVr.skipAppendLog) {
+        appendDevInternalLog({
+          storedAt: new Date().toISOString(),
+          merchantId: log.merchantId,
+          routeNo: merchant.routeNo || '',
+          internalTargetId: merchant.internalTargetId || '',
+          payload: devRunVr.devPayload || devPayload,
+          internalTargetUrl: devInternalTargetUrl,
+          internalDeliveryStatus: devInternalTargetUrl ? devRunVr.internalDeliveryStatus : DEV_INTERNAL_DELIVER_FAIL,
+          pgProvider: pgProv,
+          ...(isJpayVr
+            ? {
+                jpayRawRelay: true,
+                ...jpayInternalLogExtrasFromNotiLog(log),
+                ...jpayDevInternalLogExtrasFromRelayPack(jpayRelayPack),
+              }
+            : {}),
+          ...(devInternalTargetUrl && devRunVr.devAggResult && !isJpayVr ? devInternalLogUpstreamExtras(devRunVr.devAggResult) : {}),
+        });
+      }
     } catch (err) {
       console.error('[무효/환불 노티 → 개발 전산 실패]', err.message);
       let failUrl = devInternalTargetUrl;
@@ -7504,7 +7780,10 @@ async function sendToInternal(internalUrl, payload, opts) {
     const statusOk = res.status >= 200 && res.status < 300;
     let bodyOk = true;
     let bodyRetryable;
-    if (res.data != null && typeof res.data === 'object') {
+    if (isHtmlLikeHttpResponse(res.data)) {
+      bodyOk = false;
+      console.warn('[전산 응답] HTML/SPA 본문 — JSON 수신 실패로 간주 (로그인 페이지 등)');
+    } else if (res.data != null && typeof res.data === 'object') {
       const d = res.data;
       if (Object.prototype.hasOwnProperty.call(d, 'retryable')) {
         bodyRetryable = !!d.retryable;
@@ -7721,18 +8000,8 @@ async function sendDevInternalHttpNotify(internalUrl, payload, opts) {
     };
   }
   const o = opts || {};
-  const sup = shouldSuppressDevInternalForward(
-    internalUrl,
-    payload,
-    o.merchantId,
-    o.pgProvider || 'chillpay',
-  );
-  if (sup.suppress) {
-    console.log('[개발 전산] 전송 억제:', sup.reason, 'url=', internalUrl);
-    return createSuppressedDevAggResult(sup.reason);
-  }
   const idem = pgNotifyDelivery.buildIdempotencyKey(internalUrl, payload);
-  const result = await runSerializedPgNotify(idem, async () => {
+  return runSerializedPgNotify(idem, async () => {
     const job = createPgNotifyDeliveryJobRecord(internalUrl, payload, idem, {
       icopayNotifyHttpAttemptBase: o.icopayNotifyHttpAttemptBase != null ? o.icopayNotifyHttpAttemptBase : 0,
     });
@@ -7740,8 +8009,6 @@ async function sendDevInternalHttpNotify(internalUrl, payload, opts) {
     persistPgNotifyDeliveryJobs();
     return runPgNotifyDeliveryJobLifecycle(job, false);
   });
-  recordDevInternalForwardAttempt(sup.key, result.success);
-  return result;
 }
 
 /** 관리자 재전송 등: job만 등록하고 백그라운드 전송(nginx 504 방지) */
@@ -8299,34 +8566,35 @@ async function handleNotiRequest(routeKey, req, res) {
     try {
       const devPayload = transformForDevInternal(body, merchant);
       const devUrl = useRelayOffDevUrls ? resolveRelayOffDevUrl(merchant, kind) : resolveMerchantDevInternalUrl(merchant, kind);
-      let devAggResult = null;
-
-      if (!devUrl) {
-        console.log('[개발 전산 전송 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
-      } else {
-        devInternalTargetUrl = devUrl;
-        console.log('[개발 전산 전송 중] 개발 전산 시스템으로 가공 데이터 전송, merchant=', merchantId, 'url=', devUrl, 'maxAttempts=', DEV_INTERNAL_HTTP_MAX_ATTEMPTS);
-        devAggResult = await sendDevInternalHttpNotify(devUrl, devPayload, {
-          merchantId,
-          pgProvider: 'chillpay',
-        });
-        devDeliverySuccess = devAggResult.success;
-        if (devDeliverySuccess) {
-          console.log('[개발 전산 전송 완료] attempts=', devAggResult.attempts, 'status=', devAggResult.status);
-        } else {
-          console.warn('[개발 전산 전송 실패] attempts=', devAggResult.attempts, 'lastStatus=', devAggResult.status, devAggResult.error || '');
-        }
-      }
-      appendDevInternalLogUnlessSuppressed({
-        storedAt: new Date().toISOString(),
+      const devRun = await runDevInternalNotifyWithDedup({
         merchantId,
-        routeNo: merchant.routeNo || '',
-        internalTargetId: merchant.internalTargetId || '',
+        pgProvider: 'chillpay',
+        devUrl: devUrl || '',
         payload: devPayload,
-        internalTargetUrl: devInternalTargetUrl,
-        internalDeliveryStatus: devInternalTargetUrl ? (devDeliverySuccess ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP) : DEV_INTERNAL_DELIVER_FAIL,
-        ...(devInternalTargetUrl && devAggResult ? devInternalLogUpstreamExtras(devAggResult) : {}),
-      }, devAggResult);
+        deliver: async () => {
+          if (!devUrl) return { devAggResult: null, devPayload };
+          console.log('[개발 전산 전송 중] 개발 전산 시스템으로 가공 데이터 전송, merchant=', merchantId, 'url=', devUrl, 'maxAttempts=', DEV_INTERNAL_HTTP_MAX_ATTEMPTS);
+          const devAggResult = await sendDevInternalHttpNotify(devUrl, devPayload);
+          const ok = devAggResult.success;
+          if (ok) console.log('[개발 전산 전송 완료] attempts=', devAggResult.attempts, 'status=', devAggResult.status);
+          else console.warn('[개발 전산 전송 실패] attempts=', devAggResult.attempts, 'lastStatus=', devAggResult.status, devAggResult.error || '');
+          return { devAggResult, devPayload, devDeliverySuccess: ok };
+        },
+      });
+      devDeliverySuccess = devRun.devDeliverySuccess;
+      devInternalTargetUrl = devRun.devInternalTargetUrl;
+      if (!devRun.skipAppendLog) {
+        appendDevInternalLog({
+          storedAt: new Date().toISOString(),
+          merchantId,
+          routeNo: merchant.routeNo || '',
+          internalTargetId: merchant.internalTargetId || '',
+          payload: devRun.devPayload || devPayload,
+          internalTargetUrl: devInternalTargetUrl,
+          internalDeliveryStatus: devInternalTargetUrl ? devRun.internalDeliveryStatus : DEV_INTERNAL_DELIVER_FAIL,
+          ...(devInternalTargetUrl && devRun.devAggResult ? devInternalLogUpstreamExtras(devRun.devAggResult) : {}),
+        });
+      }
     } catch (err) {
       console.error('[개발 전산 전송 실패]', err.message);
       let failUrl = devInternalTargetUrl;
@@ -8649,7 +8917,6 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   let devDeliverySuccess = false;
   let devInternalTargetUrl = '';
   if (enableDevInternalChecked) {
-    let devAggResultJpay = null;
     let devPayloadJpay = null;
     let devRelayPackLogged = null;
     try {
@@ -8657,44 +8924,57 @@ async function handleJpayNotiRequest(routeKey, req, res) {
       const devUrl = useRelayOffDevUrlsJpay ? resolveRelayOffDevUrl(merchant, kind) : resolveMerchantDevInternalUrl(merchant, kind);
       if (!devUrl) {
         console.log('[JPAY 개발 전산 스킵] internalTargetId 또는 INTERNAL_NOTI_URL 미설정, merchant=', merchantId);
-      } else {
-        devInternalTargetUrl = devUrl;
-        const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant, { merchantId });
-        devPayloadJpay = jpayDevDeliver.devPayload;
-        devAggResultJpay = jpayDevDeliver.devAggResult;
-        devDeliverySuccess = devAggResultJpay.success;
-        devRelayPackLogged = jpayDevDeliver.devRelayPack || normalizeJpayDevRelayPack(jpayRelayPack);
-        if (devDeliverySuccess) {
-          console.log(
-            '[JPAY 개발 전산 전송]',
-            'JPAY 원문 릴레이 완료',
-            'status=',
-            devAggResultJpay.status,
-          );
-        } else {
-          console.warn(
-            '[JPAY 개발 전산 전송 실패] attempts=',
-            devAggResultJpay.attempts,
-            'lastStatus=',
-            devAggResultJpay.status,
-            devAggResultJpay.error || '',
-          );
-        }
       }
-      appendDevInternalLogUnlessSuppressed({
-        storedAt: new Date().toISOString(),
+      const devRun = await runDevInternalNotifyWithDedup({
         merchantId,
-        routeNo: merchant.routeNo || '',
-        internalTargetId: merchant.internalTargetId || '',
-        payload: devPayloadJpay || body,
-        internalTargetUrl: devInternalTargetUrl,
-        internalDeliveryStatus: devInternalTargetUrl ? (devDeliverySuccess ? DEV_INTERNAL_DELIVER_OK : DEV_INTERNAL_DELIVER_SKIP) : DEV_INTERNAL_DELIVER_FAIL,
         pgProvider: 'jpay',
-        jpayRawRelay: true,
-        routeKey,
-        ...jpayInternalLogExtras(),
-        ...jpayDevInternalLogExtrasFromRelayPack(devRelayPackLogged || normalizeJpayDevRelayPack(jpayRelayPack)),
-      }, devAggResultJpay);
+        devUrl: devUrl || '',
+        body,
+        payload: body,
+        deliver: async () => {
+          if (!devUrl) return { devPayload: body, devAggResult: null, devDeliverySuccess: false };
+          const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant);
+          devPayloadJpay = jpayDevDeliver.devPayload;
+          devRelayPackLogged = jpayDevDeliver.devRelayPack || normalizeJpayDevRelayPack(jpayRelayPack);
+          const ok = jpayDevDeliver.devAggResult.success;
+          if (ok) {
+            console.log('[JPAY 개발 전산 전송]', 'JPAY 원문 릴레이 완료', 'status=', jpayDevDeliver.devAggResult.status);
+          } else {
+            console.warn(
+              '[JPAY 개발 전산 전송 실패] attempts=',
+              jpayDevDeliver.devAggResult.attempts,
+              'lastStatus=',
+              jpayDevDeliver.devAggResult.status,
+              jpayDevDeliver.devAggResult.error || '',
+            );
+          }
+          return {
+            devPayload: devPayloadJpay,
+            devAggResult: jpayDevDeliver.devAggResult,
+            devRelayPackLogged,
+            devDeliverySuccess: ok,
+          };
+        },
+      });
+      devDeliverySuccess = devRun.devDeliverySuccess;
+      devInternalTargetUrl = devRun.devInternalTargetUrl;
+      if (!devRun.skipAppendLog) {
+        appendDevInternalLog({
+          storedAt: new Date().toISOString(),
+          merchantId,
+          routeNo: merchant.routeNo || '',
+          internalTargetId: merchant.internalTargetId || '',
+          payload: devRun.devPayload || devPayloadJpay || body,
+          internalTargetUrl: devInternalTargetUrl,
+          internalDeliveryStatus: devInternalTargetUrl ? devRun.internalDeliveryStatus : DEV_INTERNAL_DELIVER_FAIL,
+          pgProvider: 'jpay',
+          jpayRawRelay: true,
+          routeKey,
+          ...jpayInternalLogExtras(),
+          ...jpayDevInternalLogExtrasFromRelayPack(devRelayPackLogged || normalizeJpayDevRelayPack(jpayRelayPack)),
+          ...(devInternalTargetUrl && devRun.devAggResult ? devInternalLogUpstreamExtras(devRun.devAggResult) : {}),
+        });
+      }
     } catch (err) {
       console.error('[JPAY 개발 전산 전송 실패]', err.message);
       let failUrl = devInternalTargetUrl;
@@ -12855,7 +13135,10 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
 
   const logPg = parseTxSourceFromReq(req);
-  const filteredLogsPg = getEnvFilteredLogs(req).filter((log) => getNotiLogPgAcquirer(log) === logPg);
+  const deletedNotiLogsPg = loadNotiLogUiDeletedList();
+  const filteredLogsPg = getEnvFilteredLogs(req).filter(
+    (log) => getNotiLogPgAcquirer(log) === logPg && !isNotiLogUiDeleted(log, 'pg_noti', deletedNotiLogsPg),
+  );
   let reversed = [...filteredLogsPg].slice().reverse();
 
   // 날짜/프리셋 필터 + 페이징
@@ -12898,6 +13181,10 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
   const pgLogsColDefs = getPgLogsListColumnDefs(locale, logPg);
   const pgLogsColFiltered = filterListColDefs(req.session.member, 'pg_logs', logPg, pgLogsColDefs);
   const pgLogsColHello = buildListColHelloHtml(locale, esc, req.session.member, 'pg_logs', logPg, pgLogsColDefs, '.pg-logs-table');
+  const pgLogsBackUrl = '/admin/logs?' + buildQueryString({ ...(q || {}), page: pageNumPg });
+  const deletedBannerPg = buildNotiLogDeletedBannerHtml(locale, esc, 'pg_noti', q.deleted);
+  const dedupedBannerPg = buildNotiLogDedupedBannerHtml(locale, esc, 'pg_noti', q);
+  const pgLogsDeletedListLink = buildNotiLogDeletedListLinkHtml(locale, esc, 'pg_noti');
   const pgLogsTheadHtml = pgLogsColFiltered
     .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
     .join('');
@@ -13008,6 +13295,10 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
         resend: '<td class="col-action">' + resendBtn + '</td>',
         webhook: jpayWebhookCellHtml(locale, log, esc),
         void_refund: '<td class="col-void-refund">' + voidRefundBtns + '</td>',
+        delete:
+          '<td class="col-action">' +
+          renderNotiLogDeleteButtonHtml(locale, 'pg_noti', log, esc, pgLogsBackUrl, logPg === 'jpay' ? 'jpay' : '') +
+          '</td>',
       };
       return '<tr>' + pgLogsColFiltered.map((c) => rowCells[c.key] || '').join('') + '</tr>';
     })
@@ -13106,8 +13397,11 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       ${resendMsg}
+      ${deletedBannerPg}
+      ${dedupedBannerPg}
       ${jpaySyncAlert}
       <h1 class="cr-page-title">${esc(t(locale, 'nav_pg_noti_log'))}</h1>
+      ${pgLogsDeletedListLink}
       ${hubHtmlLogs}
       <div style="margin:8px 0;display:flex;flex-wrap:wrap;align-items:center;gap:8px;">${pgLogsColHello.helloBtn}</div>
       ${pgLogsColHello.panelHtml}
@@ -14073,6 +14367,7 @@ function getPgLogsListColumnDefs(locale, logPg) {
   ];
   if (logPg === 'jpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
   cols.push({ key: 'void_refund', label: t(locale, 'pg_logs_th_void_refund') });
+  cols.push({ key: 'delete', label: t(locale, 'noti_log_th_delete') });
   return cols;
 }
 
@@ -14116,6 +14411,7 @@ function getLogsResultListColumnDefs(locale, logPg) {
   ];
   if (logPg === 'jpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
   cols.push({ key: 'resend', label: t(locale, 'pg_logs_th_resend') });
+  cols.push({ key: 'delete', label: t(locale, 'noti_log_th_delete') });
   return cols;
 }
 
@@ -14289,6 +14585,7 @@ function getInternalLogsListColumnDefs(locale) {
     { key: 'header', label: t(locale, 'internal_logs_header') },
     { key: 'value', label: t(locale, 'internal_logs_value') },
     { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+    { key: 'delete', label: t(locale, 'noti_log_th_delete') },
   ];
 }
 
@@ -14305,6 +14602,7 @@ function getInternalResultListColumnDefs(locale) {
     { key: 'internal_delivery', label: t(locale, 'cr_th_internal_delivery') },
     { key: 'fail_reason', label: t(locale, 'cr_th_fail_reason') },
     { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+    { key: 'delete', label: t(locale, 'noti_log_th_delete') },
   ];
 }
 
@@ -14317,6 +14615,7 @@ function getDevInternalLogsListColumnDefs(locale) {
     { key: 'header', label: t(locale, 'internal_logs_header') },
     { key: 'value', label: t(locale, 'internal_logs_value') },
     { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+    { key: 'delete', label: t(locale, 'noti_log_th_delete') },
   ];
 }
 
@@ -14330,6 +14629,7 @@ function getDevInternalResultListColumnDefs(locale) {
     { key: 'delivery', label: t(locale, 'dev_noti_th_delivery') },
     { key: 'upstream', label: t(locale, 'dev_internal_th_upstream') },
     { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+    { key: 'delete', label: t(locale, 'noti_log_th_delete') },
   ];
 }
 
@@ -14344,6 +14644,7 @@ function getDealmaiWebhookListColumnDefs(locale) {
     { key: 'http_status', label: 'HTTP' },
     { key: 'url', label: 'URL' },
     { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+    { key: 'delete', label: t(locale, 'noti_log_th_delete') },
   ];
 }
 
@@ -14357,6 +14658,7 @@ function getDealmaiWebhookResultListColumnDefs(locale) {
     { key: 'delivery', label: t(locale, 'dev_noti_th_delivery') },
     { key: 'http_status', label: 'HTTP' },
     { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
+    { key: 'delete', label: t(locale, 'noti_log_th_delete') },
   ];
 }
 
@@ -18313,20 +18615,15 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
     try {
       let devResult = null;
       if (isJpayCr) {
-        const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPackCr, merchant, {
-          merchantId: log.merchantId,
-        });
+        const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPackCr, merchant);
         devPayload = jpayDevDeliver.devPayload;
         devResult = jpayDevDeliver.devAggResult;
         devOk = devResult.success;
       } else {
-        devResult = await sendDevInternalHttpNotify(devUrl, devPayload, {
-          merchantId: log.merchantId,
-          pgProvider: isJpayCr ? 'jpay' : 'chillpay',
-        });
+        devResult = await sendDevInternalHttpNotify(devUrl, devPayload);
         devOk = devResult.success;
       }
-      appendDevInternalLogUnlessSuppressed({
+      appendDevInternalLog({
         storedAt: new Date().toISOString(),
         merchantId: log.merchantId,
         routeNo: merchant.routeNo || '',
@@ -18342,7 +18639,7 @@ app.post('/admin/cancel-refund/cancel-resend-internal', requireAuth, requirePage
               ...jpayDevInternalLogExtrasFromRelayPack(jpayRelayPackCr),
             }
           : {}),
-      }, devResult);
+      });
     } catch (e) {
       devOk = false;
       appendDevInternalLog({
@@ -20178,6 +20475,346 @@ app.get('/admin/cancel-refund/void-deleted-list', requireAuth, requirePage('cr_v
   res.send(renderCancelRefundPage(locale, adminUser, appendCrListCountToTitle(t(locale, 'cr_void_deleted_list'), totalCountVd), tableContent, '', req.originalUrl, req.session.member, req, undefined, env));
 });
 
+function notiLogKindToPerm(kind) {
+  const perms = notiLogKindToPerms(kind);
+  return perms[0];
+}
+
+function notiLogKindToPerms(kind) {
+  const k = String(kind || '').trim();
+  if (k === 'pg_noti') return ['pg_logs', 'pg_result'];
+  if (k === 'internal') return ['internal_logs', 'internal_result'];
+  if (k === 'dev_internal') return ['dev_internal_logs', 'dev_result'];
+  if (k === 'dealmai_webhook') return ['dealmai_webhook_logs', 'dealmai_webhook_result'];
+  return ['pg_logs', 'pg_result'];
+}
+
+function notiLogKindToResultPath(kind, source) {
+  const k = String(kind || '').trim();
+  const src = String(source || '').toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
+  const q = src === 'jpay' ? '?source=jpay' : '';
+  if (k === 'internal') return '/admin/internal-result' + q;
+  if (k === 'dev_internal') return '/admin/dev-internal-result' + q;
+  if (k === 'dealmai_webhook') return '/admin/dealmai-webhook-result' + q;
+  return '/admin/logs-result' + q;
+}
+
+function requireNotiLogKindAccess(kind) {
+  return requirePageAny(notiLogKindToPerms(kind));
+}
+
+const NOTI_LOG_DELETED_LIST_PERMS = [
+  'pg_logs',
+  'pg_result',
+  'internal_logs',
+  'internal_result',
+  'dev_internal_logs',
+  'dev_result',
+  'dealmai_webhook_logs',
+  'dealmai_webhook_result',
+];
+
+function notiLogKindToListPath(kind, source) {
+  const k = String(kind || '').trim();
+  const src = String(source || '').toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
+  const q = src === 'jpay' ? '?source=jpay' : '';
+  if (k === 'internal') return '/admin/internal' + q;
+  if (k === 'dev_internal') return '/admin/dev-internal' + q;
+  if (k === 'dealmai_webhook') return '/admin/dealmai-webhook' + q;
+  return '/admin/logs' + q;
+}
+
+function notiLogKindLabel(locale, kind) {
+  const k = String(kind || '').trim();
+  if (k === 'pg_noti') return t(locale, 'nav_pg_noti_log');
+  if (k === 'internal') return t(locale, 'nav_internal_noti_log');
+  if (k === 'dev_internal') return t(locale, 'nav_dev_internal_noti_log');
+  if (k === 'dealmai_webhook') return t(locale, 'nav_dealmai_webhook_log');
+  return k;
+}
+
+app.get('/admin/logs/noti-delete-confirm', requireAuth, (req, res, next) => {
+  const kind = String((req.query || {}).kind || '').trim();
+  return requireNotiLogKindAccess(kind)(req, res, () => {
+    const locale = getLocale(req);
+    const adminUser = req.session.adminUser || '';
+    const q = req.query || {};
+    const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const orderNo = String(q.orderNo || '').trim();
+    const storedAtIso = String(q.storedAtIso || '').trim();
+    const transactionId = String(q.transactionId || '').trim();
+    const merchantId = String(q.merchantId || '').trim();
+    const bulk = String(q.bulk || '') === '1';
+    const source = String(q.source || '').trim();
+    const back = String(q.back || notiLogKindToListPath(kind, source)).trim();
+    if (!NOTI_LOG_KINDS.includes(kind) || (!bulk && !storedAtIso && !orderNo)) {
+      return res.redirect(notiLogKindToListPath(kind, source));
+    }
+    const title = bulk ? t(locale, 'noti_log_delete_confirm_title_bulk') : t(locale, 'noti_log_delete_confirm_title');
+    const bodyDesc = bulk
+      ? t(locale, 'noti_log_delete_confirm_body_bulk').replace(/\{\{orderNo\}\}/g, esc(orderNo)).replace(/\{\{kind\}\}/g, esc(notiLogKindLabel(locale, kind)))
+      : t(locale, 'noti_log_delete_confirm_body');
+    const detail =
+      '<p class="admin-page-desc"><strong>' +
+      esc(notiLogKindLabel(locale, kind)) +
+      '</strong>' +
+      (orderNo ? '<br />OrderNo: ' + esc(orderNo) : '') +
+      (transactionId ? '<br />TxId: ' + esc(transactionId) : '') +
+      (storedAtIso ? '<br />' + esc(storedAtIso) : '') +
+      (merchantId ? '<br />merchant: ' + esc(merchantId) : '') +
+      '</p>';
+    const form =
+      '<form method="post" action="/admin/logs/noti-delete" id="noti-log-delete-form">' +
+      '<input type="hidden" name="logKind" value="' +
+      esc(kind) +
+      '" />' +
+      (bulk ? '<input type="hidden" name="bulkByOrderNo" value="1" />' : '') +
+      (orderNo ? '<input type="hidden" name="orderNo" value="' + esc(orderNo) + '" />' : '') +
+      (storedAtIso ? '<input type="hidden" name="storedAtIso" value="' + esc(storedAtIso) + '" />' : '') +
+      (transactionId ? '<input type="hidden" name="transactionId" value="' + esc(transactionId) + '" />' : '') +
+      (merchantId ? '<input type="hidden" name="merchantId" value="' + esc(merchantId) + '" />' : '') +
+      '<input type="hidden" name="back" value="' +
+      esc(back) +
+      '" />' +
+      '<p style="margin-bottom:12px;font-size:12px;"><label><input type="checkbox" id="noti-log-delete-cb" name="confirm" value="1" /> ' +
+      esc(t(locale, 'noti_log_delete_confirm_label')) +
+      '</label></p>' +
+      '<button type="submit" id="noti-log-delete-submit" style="padding:8px 16px;background:#9ca3af;color:#fff;border:none;border-radius:6px;cursor:not-allowed;" disabled>' +
+      esc(t(locale, 'noti_log_delete_execute')) +
+      '</button> ' +
+      '<a href="' +
+      esc(back) +
+      '" style="padding:8px 16px;background:#6b7280;color:#fff;border-radius:6px;text-decoration:none;">' +
+      esc(t(locale, 'common_cancel')) +
+      '</a></form>' +
+      '<script>document.getElementById("noti-log-delete-cb").addEventListener("change",function(){var b=document.getElementById("noti-log-delete-submit");b.disabled=!this.checked;b.style.cursor=this.checked?"pointer":"not-allowed";b.style.background=this.checked?"#dc2626":"#9ca3af";});</script>';
+    const html =
+      '<!DOCTYPE html><html lang="' +
+      locale +
+      '"><head><meta charset="UTF-8" /><title>' +
+      esc(title) +
+      '</title><style>body{font-family:system-ui,sans-serif;background:#edf2f7;margin:0;padding:24px;}.card{background:#fff;padding:20px;border-radius:10px;max-width:640px;border:1px solid #e5e7eb;}</style></head><body><div class="card"><h1 style="font-size:18px;margin:0 0 12px;">' +
+      esc(title) +
+      '</h1><p class="admin-page-desc">' +
+      esc(bodyDesc) +
+      '</p>' +
+      detail +
+      form +
+      '</div></body></html>';
+    res.send(html);
+  });
+});
+
+app.post('/admin/logs/noti-delete', requireAuth, (req, res, next) => {
+  const kind = String((req.body || {}).logKind || '').trim();
+  return requireNotiLogKindAccess(kind)(req, res, () => {
+    const back = String((req.body || {}).back || notiLogKindToListPath(kind, req.body.source)).trim();
+    if (String((req.body || {}).confirm || '') !== '1') {
+      return res.redirect(back);
+    }
+    const orderNo = String((req.body || {}).orderNo || '').trim();
+    const bulkByOrderNo = String((req.body || {}).bulkByOrderNo || '') === '1';
+    const deletedBy = (req.session.adminUser || 'unknown').toString();
+    appendNotiLogUiDeleted({
+      logKind: kind,
+      orderNo: orderNo || undefined,
+      bulkByOrderNo: bulkByOrderNo && !!orderNo,
+      storedAtIso: bulkByOrderNo ? undefined : String((req.body || {}).storedAtIso || '').trim() || undefined,
+      transactionId: String((req.body || {}).transactionId || '').trim() || undefined,
+      merchantId: String((req.body || {}).merchantId || '').trim() || undefined,
+      deletedBy,
+    });
+    const sep = back.indexOf('?') >= 0 ? '&' : '?';
+    return res.redirect(back + sep + 'deleted=1');
+  });
+});
+
+app.get('/admin/logs/noti-dedupe-confirm', requireAuth, (req, res, next) => {
+  const kind = String((req.query || {}).kind || '').trim();
+  return requireNotiLogKindAccess(kind)(req, res, () => {
+    const locale = getLocale(req);
+    const q = req.query || {};
+    const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const orderNo = String(q.orderNo || '').trim();
+    const source = String(q.source || '').trim();
+    const back = String(q.back || notiLogKindToListPath(kind, source)).trim();
+    if (!NOTI_LOG_KINDS.includes(kind) || !orderNo) {
+      return res.redirect(back);
+    }
+    const deletedList = loadNotiLogUiDeletedList();
+    const plan = planNotiLogOrderDedupeKeepFirst(kind, orderNo, deletedList);
+    const title = t(locale, 'noti_log_dedupe_confirm_title');
+    const bodyDesc = t(locale, 'noti_log_dedupe_confirm_body')
+      .replace(/\{\{orderNo\}\}/g, esc(orderNo))
+      .replace(/\{\{kind\}\}/g, esc(notiLogKindLabel(locale, kind)))
+      .replace(/\{\{total\}\}/g, String(plan.total))
+      .replace(/\{\{hide\}\}/g, String(plan.hide.length));
+    const keepIso = plan.keep ? notiLogStoredAtIsoFromEntry(plan.keep.log) : '';
+    const detail =
+      '<p class="admin-page-desc"><strong>' +
+      esc(notiLogKindLabel(locale, kind)) +
+      '</strong><br />OrderNo: ' +
+      esc(orderNo) +
+      '<br />' +
+      esc(t(locale, 'noti_log_dedupe_confirm_total')) +
+      ': ' +
+      esc(String(plan.total)) +
+      '<br />' +
+      esc(t(locale, 'noti_log_dedupe_confirm_keep')) +
+      ': ' +
+      esc(keepIso || '—') +
+      '<br />' +
+      esc(t(locale, 'noti_log_dedupe_confirm_hide')) +
+      ': ' +
+      esc(String(plan.hide.length)) +
+      '</p>';
+    const canExecute = plan.hide.length > 0;
+    const form =
+      '<form method="post" action="/admin/logs/noti-dedupe" id="noti-log-dedupe-form">' +
+      '<input type="hidden" name="logKind" value="' +
+      esc(kind) +
+      '" />' +
+      '<input type="hidden" name="orderNo" value="' +
+      esc(orderNo) +
+      '" />' +
+      '<input type="hidden" name="back" value="' +
+      esc(back) +
+      '" />' +
+      (canExecute
+        ? '<p style="margin-bottom:12px;font-size:12px;"><label><input type="checkbox" id="noti-log-dedupe-cb" name="confirm" value="1" /> ' +
+          esc(t(locale, 'noti_log_dedupe_confirm_label')) +
+          '</label></p>' +
+          '<button type="submit" id="noti-log-dedupe-submit" style="padding:8px 16px;background:#9ca3af;color:#fff;border:none;border-radius:6px;cursor:not-allowed;" disabled>' +
+          esc(t(locale, 'noti_log_dedupe_execute')) +
+          '</button> '
+        : '<p style="margin-bottom:12px;font-size:12px;color:#6b7280;">' +
+          esc(t(locale, 'noti_log_deduped_none')) +
+          '</p>') +
+      '<a href="' +
+      esc(back) +
+      '" style="padding:8px 16px;background:#6b7280;color:#fff;border-radius:6px;text-decoration:none;">' +
+      esc(t(locale, 'common_cancel')) +
+      '</a></form>' +
+      (canExecute
+        ? '<script>document.getElementById("noti-log-dedupe-cb").addEventListener("change",function(){var b=document.getElementById("noti-log-dedupe-submit");b.disabled=!this.checked;b.style.cursor=this.checked?"pointer":"not-allowed";b.style.background=this.checked?"#4f46e5":"#9ca3af";});</script>'
+        : '');
+    const html =
+      '<!DOCTYPE html><html lang="' +
+      locale +
+      '"><head><meta charset="UTF-8" /><title>' +
+      esc(title) +
+      '</title><style>body{font-family:system-ui,sans-serif;background:#edf2f7;margin:0;padding:24px;}.card{background:#fff;padding:20px;border-radius:10px;max-width:640px;border:1px solid #e5e7eb;}</style></head><body><div class="card"><h1 style="font-size:18px;margin:0 0 12px;">' +
+      esc(title) +
+      '</h1><p class="admin-page-desc">' +
+      esc(bodyDesc) +
+      '</p>' +
+      detail +
+      form +
+      '</div></body></html>';
+    res.send(html);
+  });
+});
+
+app.post('/admin/logs/noti-dedupe', requireAuth, (req, res, next) => {
+  const kind = String((req.body || {}).logKind || '').trim();
+  return requireNotiLogKindAccess(kind)(req, res, () => {
+    const back = String((req.body || {}).back || notiLogKindToListPath(kind, req.body.source)).trim();
+    const orderNo = String((req.body || {}).orderNo || '').trim();
+    if (String((req.body || {}).confirm || '') !== '1' || !orderNo) {
+      return res.redirect(back);
+    }
+    const deletedBy = (req.session.adminUser || 'unknown').toString();
+    const result = executeNotiLogOrderDedupeKeepFirst(kind, orderNo, deletedBy, loadNotiLogUiDeletedList());
+    const sep = back.indexOf('?') >= 0 ? '&' : '?';
+    return res.redirect(back + sep + 'deduped=1&n=' + encodeURIComponent(String(result.hiddenCount || 0)));
+  });
+});
+
+app.get('/admin/logs/noti-deleted-list', requireAuth, requirePageAny(NOTI_LOG_DELETED_LIST_PERMS), (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser || '';
+  const q = req.query || {};
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const deletedList = loadNotiLogUiDeletedList();
+  const kindFilter = String(q.kind || '').trim();
+  let filtered = deletedList;
+  if (kindFilter && NOTI_LOG_KINDS.includes(kindFilter)) {
+    filtered = filtered.filter((d) => d.logKind === kindFilter || d.logKind === '*');
+  }
+  const rows = filtered
+    .map((d) => {
+      const restoreForm =
+        '<form method="post" action="/admin/logs/noti-deleted-restore" style="display:inline;"><input type="hidden" name="id" value="' +
+        esc(d.id || '') +
+        '" /><button type="submit" style="padding:4px 10px;font-size:12px;background:#16a34a;color:#fff;border:none;border-radius:4px;cursor:pointer;">' +
+        esc(t(locale, 'cr_restore')) +
+        '</button></form>';
+      return (
+        '<tr><td>' +
+        esc(d.deletedAtIso || '') +
+        '</td><td>' +
+        esc(d.deletedBy || '') +
+        '</td><td>' +
+        esc(notiLogKindLabel(locale, d.logKind)) +
+        '</td><td>' +
+        esc(d.orderNo || '') +
+        '</td><td>' +
+        esc(d.transactionId || '') +
+        '</td><td>' +
+        esc(notiLogDeletedKeyLabel(locale, d)) +
+        '</td><td>' +
+        restoreForm +
+        '</td></tr>'
+      );
+    })
+    .join('');
+  const listAlert =
+    q.restore === 'ok'
+      ? '<div class="alert alert-ok" style="padding:10px;background:#d1fae5;border-radius:8px;margin-bottom:12px;">' + esc(t(locale, 'cr_restore_ok_msg')) + '</div>'
+      : q.restore === 'fail'
+        ? '<div class="alert alert-fail" style="padding:10px;background:#fee2e2;border-radius:8px;margin-bottom:12px;">' + esc(t(locale, 'cr_restore_fail_msg')) + '</div>'
+        : '';
+  const html =
+    '<!DOCTYPE html><html lang="' +
+    locale +
+    '"><head><meta charset="UTF-8" /><title>' +
+    esc(t(locale, 'noti_log_deleted_list_title')) +
+    '</title><style>body{font-family:system-ui,sans-serif;background:#edf2f7;margin:0;padding:24px;}table{border-collapse:collapse;width:100%;background:#fff;}th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;}th{background:#f1f5f9;}</style></head><body><div style="max-width:1100px;margin:0 auto;"><h1>' +
+    esc(t(locale, 'noti_log_deleted_list_title')) +
+    '</h1><p class="admin-page-desc">' +
+    esc(t(locale, 'noti_log_deleted_list_desc')) +
+    '</p>' +
+    listAlert +
+    '<p><a href="/admin/logs">' +
+    esc(t(locale, 'nav_pg_noti_log')) +
+    '</a> · <a href="/admin/internal">' +
+    esc(t(locale, 'nav_internal_noti_log')) +
+    '</a> · <a href="/admin/dev-internal">' +
+    esc(t(locale, 'nav_dev_internal_noti_log')) +
+    '</a> · <a href="/admin/dealmai-webhook">' +
+    esc(t(locale, 'nav_dealmai_webhook_log')) +
+    '</a></p><table><thead><tr><th>' +
+    esc(t(locale, 'account_reset_th_requested')) +
+    '</th><th>' +
+    esc(t(locale, 'noti_log_deleted_by')) +
+    '</th><th>' +
+    esc(t(locale, 'noti_log_deleted_kind')) +
+    '</th><th>OrderNo</th><th>TxId</th><th>' +
+    esc(t(locale, 'noti_log_deleted_key')) +
+    '</th><th>' +
+    esc(t(locale, 'cr_th_action')) +
+    '</th></tr></thead><tbody>' +
+    (rows || '<tr><td colspan="7" style="text-align:center;color:#777;">' + esc(t(locale, 'account_reset_no_requests')) + '</td></tr>') +
+    '</tbody></table></div></body></html>';
+  res.send(html);
+});
+
+app.post('/admin/logs/noti-deleted-restore', requireAuth, requirePageAny(NOTI_LOG_DELETED_LIST_PERMS), (req, res) => {
+  const id = (req.body.id || '').toString().trim();
+  const ok = id ? removeNotiLogUiDeletedById(id) : false;
+  return res.redirect('/admin/logs/noti-deleted-list?restore=' + (ok ? 'ok' : 'fail'));
+});
+
 app.post('/admin/cancel-refund/void-deleted-restore', requireAuth, requirePage('cr_void_deleted'), (req, res) => {
   const id = (req.body.id || '').toString().trim();
   const env = (req.body.env || 'live').toString();
@@ -21459,7 +22096,10 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const logPgResult = parseTxSourceFromReq(req);
-  const filteredLogsResult = getEnvFilteredLogs(req).filter((log) => getNotiLogPgAcquirer(log) === logPgResult);
+  const deletedNotiLogsPgRes = loadNotiLogUiDeletedList();
+  const filteredLogsResult = getEnvFilteredLogs(req).filter(
+    (log) => getNotiLogPgAcquirer(log) === logPgResult && !isNotiLogUiDeleted(log, 'pg_noti', deletedNotiLogsPgRes),
+  );
   let reversed = [...filteredLogsResult].slice().reverse();
   // 날짜/프리셋 필터 + 페이징
   const todayYmd = getBangkokTodayYmd();
@@ -21524,6 +22164,11 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
     )
     .join('');
 
+  const logsResultBackUrl = '/admin/logs-result?' + buildQueryString({ ...(q || {}), page: pageNumResult });
+  const deletedBannerPgRes = buildNotiLogDeletedBannerHtml(locale, esc, 'pg_noti', q.deleted);
+  const dedupedBannerPgRes = buildNotiLogDedupedBannerHtml(locale, esc, 'pg_noti', q);
+  const logsResultDeletedListLink = buildNotiLogDeletedListLinkHtml(locale, esc, 'pg_noti');
+
   const rows = pagedLogsResult
     .map((log) => {
       const realIndex = NOTI_LOGS.indexOf(log);
@@ -21574,6 +22219,10 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
         noti_kind: '<td class="col-noti-kind">' + notiKindCell + '</td>',
         webhook: jpayWebhookCellHtml(locale, log, esc),
         resend: '<td>' + resendBtn + '</td>',
+        delete:
+          '<td>' +
+          renderNotiLogDeleteButtonHtml(locale, 'pg_noti', log, esc, logsResultBackUrl, logPgResult === 'jpay' ? 'jpay' : '') +
+          '</td>',
       };
       return '<tr>' + logsResultColFiltered.map((c) => lrCells[c.key] || '').join('') + '</tr>';
     })
@@ -21653,11 +22302,15 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       ${resendMsg}
+      ${deletedBannerPgRes}
+      ${dedupedBannerPgRes}
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_pg_result')} (${totalCountResult})</h1>
+      ${logsResultDeletedListLink}
       ${hubHtmlLogsResult}
       <div style="margin:8px 0;">${logsResultColHello.helloBtn}</div>
       ${logsResultColHello.panelHtml}
       <p class="admin-page-desc">${t(locale, 'logs_result_desc')}</p>
+      <p class="admin-page-desc">${t(locale, 'noti_log_result_action_hint')}</p>
       ${(() => {
         const fh =
           (logPgResult === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
@@ -24848,9 +25501,12 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
   const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const deletedNotiLogsInternal = loadNotiLogUiDeletedList();
   const reversedInternal = [...INTERNAL_LOGS].slice().reverse();
   const memberInternal = getMemberForAccessControl(req);
-  const withIndexInternal = reversedInternal.map((log, i) => ({ log, realIndex: INTERNAL_LOGS.length - 1 - i }));
+  const withIndexInternal = reversedInternal
+    .map((log, revIdx) => ({ log, realIndex: INTERNAL_LOGS.length - 1 - revIdx }))
+    .filter(({ log }) => !isNotiLogUiDeleted(log, 'internal', deletedNotiLogsInternal));
   let filteredReversedInternal = (memberInternal && getMemberInternalTargetIds(memberInternal) !== null)
     ? withIndexInternal.filter(({ log }) => internalNotiLogVisibleToMember(log, memberInternal))
     : withIndexInternal;
@@ -24902,6 +25558,10 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
   const internalTheadHtml = internalColFiltered
     .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
     .join('');
+  const internalBackUrl = '/admin/internal?' + buildQueryString({ ...qIn, page: pageNumInternal });
+  const deletedBannerInternal = buildNotiLogDeletedBannerHtml(locale, esc, 'internal', qIn.deleted);
+  const dedupedBannerInternal = buildNotiLogDedupedBannerHtml(locale, esc, 'internal', qIn);
+  const internalDeletedListLink = buildNotiLogDeletedListLinkHtml(locale, esc, 'internal');
 
   const rows = pagedLogsInternal
     .map(({ log, realIndex }, i) => {
@@ -24930,6 +25590,10 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
         header: '<td class="col-header"><pre>' + highlightLogSearchHtml(jsonHeader, logSearchRawInternal, esc) + '</pre></td>',
         value: '<td class="col-json"><pre>' + highlightLogSearchHtml(jsonValue, logSearchRawInternal, esc) + '</pre></td>',
         resend: '<td class="col-action">' + resendBtn + '</td>',
+        delete:
+          '<td class="col-action">' +
+          renderNotiLogDeleteButtonHtml(locale, 'internal', log, esc, internalBackUrl, logPgInternal === 'jpay' ? 'jpay' : '') +
+          '</td>',
       };
       return '<tr>' + joinListColCells(internalColFiltered, rowCellsInternal) + '</tr>';
     })
@@ -24992,7 +25656,10 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
     <main class="main">
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
+      ${deletedBannerInternal}
+      ${dedupedBannerInternal}
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'internal_logs_title')} (${totalCountInternal})</h1>
+      ${internalDeletedListLink}
       ${hubHtmlInternal}
       <p class="admin-page-desc">${t(locale, 'internal_logs_desc')}</p>
       ${(() => {
@@ -25095,9 +25762,12 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
   const envLabel = APP_ENV === 'test' ? 'sandbox' : 'live';
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const logPgIntRes = parseTxSourceFromReq(req);
+  const deletedNotiLogsIntRes = loadNotiLogUiDeletedList();
   const reversed = [...INTERNAL_LOGS].slice().reverse();
   const memberInternalResult = getMemberForAccessControl(req);
-  const withIndexInternalResult = reversed.map((log, i) => ({ log, realIndex: INTERNAL_LOGS.length - 1 - i }));
+  const withIndexInternalResult = reversed
+    .map((log, revIdx) => ({ log, realIndex: INTERNAL_LOGS.length - 1 - revIdx }))
+    .filter(({ log }) => !isNotiLogUiDeleted(log, 'internal', deletedNotiLogsIntRes));
   let filteredReversedInternalResult = (memberInternalResult && getMemberInternalTargetIds(memberInternalResult) !== null)
     ? withIndexInternalResult.filter(({ log }) => internalNotiLogVisibleToMember(log, memberInternalResult))
     : withIndexInternalResult;
@@ -25151,6 +25821,10 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
   const intResTheadHtml = intResColFiltered
     .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
     .join('');
+  const internalResultBackUrl = '/admin/internal-result?' + buildQueryString({ ...q, page: pageNumInternalResult });
+  const deletedBannerIntRes = buildNotiLogDeletedBannerHtml(locale, esc, 'internal', q.deleted);
+  const dedupedBannerIntRes = buildNotiLogDedupedBannerHtml(locale, esc, 'internal', q);
+  const internalResultDeletedListLink = buildNotiLogDeletedListLinkHtml(locale, esc, 'internal');
 
   const rows = pagedLogsInternal
     .map(({ log, realIndex }, i) => {
@@ -25183,6 +25857,10 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
           '<td><span class="' + statusClass + '">' + highlightLogSearchHtml(label, logSearchRawIntRes, esc) + '</span></td>',
         fail_reason: '<td class="col-fail-reason">-</td>',
         resend: '<td>' + resendBtn + '</td>',
+        delete:
+          '<td>' +
+          renderNotiLogDeleteButtonHtml(locale, 'internal', log, esc, internalResultBackUrl, logPgIntRes === 'jpay' ? 'jpay' : '') +
+          '</td>',
       };
       return '<tr>' + joinListColCells(intResColFiltered, rowCellsIntRes) + '</tr>';
     })
@@ -25245,9 +25923,13 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       ${resendMsg}
+      ${deletedBannerIntRes}
+      ${dedupedBannerIntRes}
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_internal_result')} (${totalCountInternalResult})</h1>
+      ${internalResultDeletedListLink}
       ${hubHtmlInternalResult}
       <p class="admin-page-desc">${t(locale, 'internal_result_desc').replace('{{cancelRefundNotiUrl}}', '/admin/cancel-refund/noti')}</p>
+      <p class="admin-page-desc">${t(locale, 'noti_log_result_action_hint')}</p>
       ${(() => {
         const fh =
           (logPgIntRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
@@ -25334,9 +26016,21 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
               ) +
               '</div>'
             : '';
+  const deletedBannerDev =
+    qDev.deleted === '1'
+      ? '<div class="alert alert-ok" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#d1fae5;border:1px solid #6ee7b7;color:#065f46;">' +
+        esc(t(locale, 'noti_log_deleted_ok')) +
+        ' <a href="/admin/logs/noti-deleted-list?kind=dev_internal" style="color:#065f46;font-weight:600;">' +
+        esc(t(locale, 'noti_log_deleted_list_title')) +
+        '</a></div>'
+      : '';
+  const dedupedBannerDev = buildNotiLogDedupedBannerHtml(locale, esc, 'dev_internal', qDev);
   const reversedDev = [...DEV_INTERNAL_LOGS].slice().reverse();
+  const deletedNotiLogsDev = loadNotiLogUiDeletedList();
   const memberDev = getMemberForAccessControl(req);
-  const withIndexDev = reversedDev.map((log, i) => ({ log, realIndex: DEV_INTERNAL_LOGS.length - 1 - i }));
+  const withIndexDev = reversedDev
+    .map((log, revIdx) => ({ log, realIndex: DEV_INTERNAL_LOGS.length - 1 - revIdx }))
+    .filter(({ log }) => !isNotiLogUiDeleted(log, 'dev_internal', deletedNotiLogsDev));
   let filteredReversedDev = (memberDev && getMemberInternalTargetIds(memberDev) !== null)
     ? withIndexDev.filter(({ log }) => canAccessInternalTarget(memberDev, log.internalTargetId))
     : withIndexDev;
@@ -25394,6 +26088,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
   const devIntTheadHtml = devIntColFiltered
     .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
     .join('');
+  const devInternalDeletedListLink = buildNotiLogDeletedListLinkHtml(locale, esc, 'dev_internal');
   const rows = pagedLogsDevInternal
     .map(({ log, realIndex }, i) => {
       const dt = formatDateAndTimeForLog(log);
@@ -25421,6 +26116,10 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
         header: '<td class="col-header"><pre>' + highlightLogSearchHtml(jsonHeader, logSearchRawDev, esc) + '</pre></td>',
         value: '<td class="col-json"><pre>' + highlightLogSearchHtml(jsonValue, logSearchRawDev, esc) + '</pre></td>',
         resend: '<td class="col-action">' + resendBtn + '</td>',
+        delete:
+          '<td class="col-action">' +
+          renderNotiLogDeleteButtonHtml(locale, 'dev_internal', log, esc, '/admin/dev-internal?' + buildQueryString({ ...qDev, page: pageNumDevInternal }), logPgDev === 'jpay' ? 'jpay' : '') +
+          '</td>',
       };
       return '<tr>' + joinListColCells(devIntColFiltered, rowCellsDevInt) + '</tr>';
     })
@@ -25486,11 +26185,15 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       ${resendMsgDev}
+      ${deletedBannerDev}
+      ${dedupedBannerDev}
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_internal_noti_log')} (${totalCountDevInternal})</h1>
+      ${devInternalDeletedListLink}
       ${hubHtmlDevInternal}
       <p class="admin-page-desc">${t(locale, 'internal_logs_desc')}</p>
       <p class="admin-page-desc">${t(locale, 'dev_internal_delivery_legend')}</p>
       <p class="admin-page-desc">${t(locale, 'dev_internal_logs_retry_hint')}</p>
+      <p class="admin-page-desc">${t(locale, 'dev_internal_dedup_hint')}</p>
       ${(() => {
         const fh =
           (logPgDev === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
@@ -25530,32 +26233,6 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
   ${devIntColHello.scriptHtml}
 </body>
 </html>`);
-});
-
-// 개발 노티 로그 중복 정리 (수퍼관리자, 디스크 파일 재작성)
-app.post('/admin/dev-internal/compact-logs', requireAuth, (req, res) => {
-  if (!req.session.member || req.session.member.role !== ROLES.SUPER_ADMIN) {
-    return res.status(403).send('Forbidden');
-  }
-  const orderNosRaw = req.body && req.body.orderNos != null ? String(req.body.orderNos) : '';
-  const orderNos = orderNosRaw
-    .split(/[\s,]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const result = compactDevInternalLogFile({
-    orderNos: orderNos.length ? orderNos : undefined,
-    keepPerOrder: 1,
-  });
-  const srcQ = (req.body.source || '').toString().toLowerCase() === 'jpay' ? 'source=jpay&' : '';
-  const q =
-    srcQ +
-    'compact=1&before=' +
-    encodeURIComponent(String(result.before)) +
-    '&after=' +
-    encodeURIComponent(String(result.after)) +
-    '&removed=' +
-    encodeURIComponent(String(result.removed));
-  return res.redirect('/admin/dev-internal?' + q);
 });
 
 // 개발 노티 재전송
@@ -25615,6 +26292,15 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
       }
       const respTail = result.responsePreview ? ' | resp: ' + String(result.responsePreview).slice(0, 160) : '';
       if (result.success) {
+        recordDevInternalDedupAttempt(
+          buildDevInternalDedupeKey({
+            merchantId: log.merchantId,
+            pgProvider: log.pgProvider,
+            devUrl: url,
+            payload: log.payload,
+          }),
+          { success: true, status: result.status, orderNo: notiLogOrderNoFromEntry({ payload: log.payload }) },
+        );
         const okMsg = 'HTTP ' + (result.status || '') + ' → ' + shortHost + ' (len ' + sentLen + ')' + respTail;
         return res.redirect(base + '?resend=ok&reason=' + encodeURIComponent(okMsg) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
       }
@@ -25625,7 +26311,18 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
     }
     const result = queueDevInternalHttpNotify(url, log.payload, { icopayNotifyHttpAttemptBase: 1 });
     if (result.queued) return res.redirect(queuedRedirect);
-    if (result.success) return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+    if (result.success) {
+      recordDevInternalDedupAttempt(
+        buildDevInternalDedupeKey({
+          merchantId: log.merchantId,
+          pgProvider: log.pgProvider,
+          devUrl: url,
+          payload: log.payload,
+        }),
+        { success: true, status: result.status, orderNo: notiLogOrderNoFromEntry({ payload: log.payload }) },
+      );
+      return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+    }
     const reason =
       (result.attempts > 1 ? result.attempts + ' attempts, ' : '') +
       (result.status ? 'HTTP ' + result.status : result.error || '');
@@ -25645,8 +26342,11 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
   const nowDate = new Date();
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const deletedNotiLogsDw = loadNotiLogUiDeletedList();
   const reversed = [...DEALMAI_WEBHOOK_LOGS].slice().reverse();
-  const withIndex = reversed.map((log, i) => ({ log, realIndex: DEALMAI_WEBHOOK_LOGS.length - 1 - i }));
+  const withIndex = reversed
+    .map((log, revIdx) => ({ log, realIndex: DEALMAI_WEBHOOK_LOGS.length - 1 - revIdx }))
+    .filter(({ log }) => !isNotiLogUiDeleted(log, 'dealmai_webhook', deletedNotiLogsDw));
   let filtered = withIndex.filter(({ log }) => {
     const pg = String(log.pgProvider || 'chillpay').toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
     return pg === logPg;
@@ -25688,6 +26388,10 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
   const dwTheadHtml = dwColFiltered
     .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
     .join('');
+  const dwBackUrl = '/admin/dealmai-webhook?' + buildQueryString({ ...(q || {}), page: pageNum });
+  const deletedBannerDw = buildNotiLogDeletedBannerHtml(locale, esc, 'dealmai_webhook', q.deleted);
+  const dedupedBannerDw = buildNotiLogDedupedBannerHtml(locale, esc, 'dealmai_webhook', q);
+  const dwDeletedListLink = buildNotiLogDeletedListLinkHtml(locale, esc, 'dealmai_webhook');
   const rows = pageSlice
     .map(({ log, realIndex }) => {
       const dt = formatDateAndTimeForLog(log);
@@ -25717,6 +26421,10 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
         url:
           '<td style="font-size:11px;word-break:break-all;text-align:left;">' + esc((log.webhookTargetUrl || '').slice(0, 80)) + '</td>',
         resend: '<td>' + resendBtn + '</td>',
+        delete:
+          '<td>' +
+          renderNotiLogDeleteButtonHtml(locale, 'dealmai_webhook', log, esc, dwBackUrl, logPg === 'jpay' ? 'jpay' : '') +
+          '</td>',
       };
       return '<tr>' + joinListColCells(dwColFiltered, rowCellsDw) + '</tr>';
     })
@@ -25730,7 +26438,10 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
 ${getAdminSidebar(locale, adminUser, req.session.member, '/admin/dealmai-webhook', req)}
 <main class="main">
 ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, '/admin/dealmai-webhook')}
+${deletedBannerDw}
+${dedupedBannerDw}
 <div class="cr-title-hub-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:14px;"><h1>${esc(t(locale, 'nav_dealmai_webhook_log'))} (${totalCount})</h1>${hubHtml}</div>
+${dwDeletedListLink}
 <div style="margin:8px 0;">${dwColHello.helloBtn}</div>
 ${dwColHello.panelHtml}
 <table class="dealmai-webhook-table list-view-table"><thead><tr>${dwTheadHtml}</tr></thead><tbody>${rows || '<tr><td colspan="' + dwColFiltered.length + '" style="text-align:center;color:#777;">' + esc(t(locale, 'internal_logs_empty')) + '</td></tr>'}</tbody></table>
@@ -25748,6 +26459,7 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
   const nowDate = new Date();
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const deletedNotiLogsDwr = loadNotiLogUiDeletedList();
   const resendMsg =
     q.resend === 'ok'
       ? '<div class="alert alert-ok" style="margin-bottom:12px;padding:10px;background:#d1fae5;border-radius:8px;">' + esc(t(locale, 'pg_logs_resend_pay_ok')) + '</div>'
@@ -25756,7 +26468,7 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
       : '';
   let logs = [...DEALMAI_WEBHOOK_LOGS].reverse().filter((log) => {
     const pg = String(log.pgProvider || 'chillpay').toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
-    return pg === logPg;
+    return pg === logPg && !isNotiLogUiDeleted(log, 'dealmai_webhook', deletedNotiLogsDwr);
   });
   const dr = parseLogDateRangeFromQuery(q);
   if (dr.startDate || dr.endDate) {
@@ -25786,6 +26498,10 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
   const dwrTheadHtml = dwrColFiltered
     .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
     .join('');
+  const dwrBackUrl = '/admin/dealmai-webhook-result?' + buildQueryString({ ...(q || {}), page: q.page || 1 });
+  const deletedBannerDwr = buildNotiLogDeletedBannerHtml(locale, esc, 'dealmai_webhook', q.deleted);
+  const dedupedBannerDwr = buildNotiLogDedupedBannerHtml(locale, esc, 'dealmai_webhook', q);
+  const dwrDeletedListLink = buildNotiLogDeletedListLinkHtml(locale, esc, 'dealmai_webhook');
   const rows = logs.slice(0, 100).map((log) => {
     const realIndex = DEALMAI_WEBHOOK_LOGS.indexOf(log);
     const dt = formatDateAndTimeForLog(log);
@@ -25813,6 +26529,10 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
       delivery: '<td>' + esc(statusLabel) + '</td>',
       http_status: '<td>' + (log.webhookHttpStatus != null ? esc(String(log.webhookHttpStatus)) : '—') + '</td>',
       resend: '<td>' + resendBtn + '</td>',
+      delete:
+        '<td>' +
+        renderNotiLogDeleteButtonHtml(locale, 'dealmai_webhook', log, esc, dwrBackUrl, logPg === 'jpay' ? 'jpay' : '') +
+        '</td>',
     };
     return '<tr>' + joinListColCells(dwrColFiltered, rowCellsDwr) + '</tr>';
   }).join('');
@@ -25824,7 +26544,11 @@ ${getAdminSidebar(locale, adminUser, req.session.member, '/admin/dealmai-webhook
 <main class="main">
 ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, '/admin/dealmai-webhook-result')}
 ${resendMsg}
+${deletedBannerDwr}
+${dedupedBannerDwr}
 <div class="cr-title-hub-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:14px;"><h1>${esc(t(locale, 'nav_dealmai_webhook_result'))}</h1>${hubHtml}</div>
+${dwrDeletedListLink}
+<p class="admin-page-desc" style="font-size:12px;margin-bottom:10px;">${esc(t(locale, 'noti_log_result_action_hint'))}</p>
 <div class="summary"><span>OK: ${okN}</span><span>FAIL: ${failN}</span><span>SKIP: ${skipN}</span></div>
 <div style="margin:8px 0;">${dwrColHello.helloBtn}</div>
 ${dwrColHello.panelHtml}
@@ -26063,9 +26787,12 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
   const envLabel = APP_ENV === 'test' ? 'sandbox' : 'live';
   const logPgDevRes = parseTxSourceFromReq(req);
+  const deletedNotiLogsDevRes = loadNotiLogUiDeletedList();
   const reversed = [...DEV_INTERNAL_LOGS].slice().reverse();
   const memberDevResult = getMemberForAccessControl(req);
-  const withIndexDevResult = reversed.map((log, i) => ({ log, realIndex: DEV_INTERNAL_LOGS.length - 1 - i }));
+  const withIndexDevResult = reversed
+    .map((log, revIdx) => ({ log, realIndex: DEV_INTERNAL_LOGS.length - 1 - revIdx }))
+    .filter(({ log }) => !isNotiLogUiDeleted(log, 'dev_internal', deletedNotiLogsDevRes));
   let filteredReversedDevResult = (memberDevResult && getMemberInternalTargetIds(memberDevResult) !== null)
     ? withIndexDevResult.filter(({ log }) => canAccessInternalTarget(memberDevResult, log.internalTargetId))
     : withIndexDevResult;
@@ -26119,6 +26846,10 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   const devResTheadHtml = devResColFiltered
     .map((c) => '<th data-col-key="' + esc(c.key) + '">' + esc(c.label) + '</th>')
     .join('');
+  const devResultBackUrl = '/admin/dev-internal-result?' + buildQueryString({ ...q, page: pageNumDevResult });
+  const deletedBannerDevRes = buildNotiLogDeletedBannerHtml(locale, esc, 'dev_internal', q.deleted);
+  const dedupedBannerDevRes = buildNotiLogDedupedBannerHtml(locale, esc, 'dev_internal', q);
+  const devResultDeletedListLink = buildNotiLogDeletedListLinkHtml(locale, esc, 'dev_internal');
 
   const rows = pagedLogsDev
     .map(({ log, realIndex }, i) => {
@@ -26145,6 +26876,10 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
         upstream:
           '<td class="col-fail-reason"><pre class="cell-upstream-pre">' + (upStrRes ? esc(upStrRes) : '—') + '</pre></td>',
         resend: '<td>' + resendBtn + '</td>',
+        delete:
+          '<td>' +
+          renderNotiLogDeleteButtonHtml(locale, 'dev_internal', log, esc, devResultBackUrl, logPgDevRes === 'jpay' ? 'jpay' : '') +
+          '</td>',
       };
       return '<tr>' + joinListColCells(devResColFiltered, rowCellsDevRes) + '</tr>';
     })
@@ -26209,10 +26944,14 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       ${resendMsg}
+      ${deletedBannerDevRes}
+      ${dedupedBannerDevRes}
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_result')} (${totalCountDevResult})</h1>
+      ${devResultDeletedListLink}
       ${hubHtmlDevResult}
       <p class="admin-page-desc">${t(locale, 'dev_result_desc')}</p>
       <p class="admin-page-desc">${t(locale, 'dev_internal_delivery_legend')}</p>
+      <p class="admin-page-desc">${t(locale, 'noti_log_result_action_hint')}</p>
       <p class="admin-page-desc">${t(locale, 'dev_internal_logs_retry_hint')}</p>
       ${(() => {
         const fh =
