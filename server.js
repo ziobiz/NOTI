@@ -755,6 +755,74 @@ function localDatePartsInTz(ms, tz) {
   }
 }
 
+/** IANA TZ 기준 시·분·초(24h, 24→0 정규화) */
+function wallClockPartsInTz(ms, tz) {
+  const z = normalizeNotiIanaTimezone(tz, DEFAULT_CHILLPAY_TIMEZONE);
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: z,
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: 'numeric',
+      second: 'numeric',
+      hour12: false,
+      hourCycle: 'h23',
+    }).formatToParts(new Date(ms));
+    const get = (type) => {
+      const p = parts.find((x) => x.type === type);
+      return p ? parseInt(p.value, 10) : 0;
+    };
+    let hour = get('hour');
+    if (hour === 24) hour = 0;
+    return { year: get('year'), month: get('month'), day: get('day'), hour, minute: get('minute'), second: get('second') };
+  } catch {
+    return { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 };
+  }
+}
+
+/** YYYYMMDDHHmmss 등 PG wall-clock → UTC Date (서버 로컬·UTC 해석 금지) */
+function wallClockToDateInTimezone(y, mo, day, h, min, sec, tz) {
+  const targetMs = Date.UTC(y, mo - 1, day, h, min, sec || 0);
+  let guess = targetMs;
+  for (let i = 0; i < 4; i++) {
+    const lp = wallClockPartsInTz(guess, tz);
+    const gotMs = Date.UTC(lp.year, lp.month - 1, lp.day, lp.hour, lp.minute, lp.second);
+    const diff = targetMs - gotMs;
+    if (diff === 0) break;
+    guess += diff;
+  }
+  return new Date(guess);
+}
+
+function formatTimeInNotiTimezone(d, tz) {
+  const z = normalizeNotiIanaTimezone(tz, DEFAULT_CHILLPAY_TIMEZONE);
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: z,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+      hourCycle: 'h23',
+    }).formatToParts(d);
+    const get = (type) => (parts.find((p) => p.type === type) || {}).value || '00';
+    let hour = get('hour');
+    if (hour === '24') hour = '00';
+    return `${hour}:${get('minute')}:${get('second')}`;
+  } catch {
+    return '-';
+  }
+}
+
+/** 노티 PaymentDate(YYYYMMDDHHmmss) wall-clock 해석용 운영 TZ */
+function resolvePaymentWallClockTimezone(log, merchant) {
+  const tid = resolveLogDisplayInternalTargetId(log, merchant);
+  const iso = log && (log.receivedAtIso || log.receivedAt);
+  return resolveDisplayTimezones(iso, tid).operationalTimezone;
+}
+
 function dayOfWeekInTz(ms, tz) {
   const lp = localDatePartsInTz(ms, tz);
   const wd = String(lp.weekday || '').slice(0, 3);
@@ -6237,10 +6305,9 @@ function formatDateAndTimeTHJP(isoString, internalTargetId) {
   const opTz = zones.operationalTimezone;
   const stdTz = zones.standardTimezone;
   const dateOpts = { year: 'numeric', month: '2-digit', day: '2-digit' };
-  const timeOpts = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
   const date = d.toLocaleDateString('en-CA', { ...dateOpts, timeZone: stdTz });
-  const timeTh = d.toLocaleTimeString('en-CA', { ...timeOpts, timeZone: opTz });
-  const timeJp = d.toLocaleTimeString('en-CA', { ...timeOpts, timeZone: stdTz });
+  const timeTh = formatTimeInNotiTimezone(d, opTz);
+  const timeJp = formatTimeInNotiTimezone(d, stdTz);
   const tagOp = timezoneTagFromIana(opTz);
   const tagStd = timezoneTagFromIana(stdTz);
   return { date, timeTh, timeJp, tagOp, tagStd };
@@ -7258,10 +7325,14 @@ async function syncChillPayRefundNoti() {
 // - 날짜가 바뀐 이후(결제일이 오늘이 아닌 경우)          → 'refund_only'(무효 불가, 환불만 가능)
 // 환불 가능 일자(결제 다음날 00:00からN日間）は isWithinRefundWindow で別途判定
 /** PaymentDate·ISO·에포크 등 → Date (getVoidRefundWindow와 동일 규칙). 실패 시 null */
-function parseVoidRefundScheduleDateRaw(raw) {
+function parseVoidRefundScheduleDateRaw(raw, wallClockTz) {
   if (raw == null || raw === '') return null;
   const str = String(raw).trim();
   if (!str) return null;
+  const opTz = normalizeNotiIanaTimezone(
+    wallClockTz != null ? wallClockTz : getNotiOperationalTimezone(),
+    DEFAULT_NOTI_OPERATIONAL_TIMEZONE,
+  );
   let date = null;
   if (typeof raw === 'number' && Number.isFinite(raw)) {
     date = raw > 1e12 ? new Date(raw) : new Date(raw * 1000);
@@ -7280,31 +7351,31 @@ function parseVoidRefundScheduleDateRaw(raw) {
       h = Number(parts[0]) || 12;
       min = Number(parts[1]) || 0;
     }
-    date = new Date(Number(yyyy), Number(mm) - 1, Number(dd), h, min, 0, 0);
+    date = wallClockToDateInTimezone(Number(yyyy), Number(mm), Number(dd), h, min, 0, opTz);
   } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) {
     const [dd, mm, yyyy] = str.split('/').map(Number);
-    date = new Date(Date.UTC(yyyy, mm - 1, dd, 12, 0, 0, 0));
+    date = wallClockToDateInTimezone(yyyy, mm, dd, 12, 0, 0, opTz);
   } else if (/^\d{14}$/.test(str)) {
-    // ChillPay 노티 PaymentDate: YYYYMMDDHHmmss (숫자만 14자리 — epoch ms 아님)
+    // ChillPay 노티 PaymentDate: YYYYMMDDHHmmss (운영 TZ wall-clock, epoch 아님)
     const y = Number(str.slice(0, 4));
     const mo = Number(str.slice(4, 6));
     const da = Number(str.slice(6, 8));
     const h = Number(str.slice(8, 10));
     const min = Number(str.slice(10, 12));
     const sec = Number(str.slice(12, 14));
-    date = new Date(y, mo - 1, da, h, min, sec, 0);
+    date = wallClockToDateInTimezone(y, mo, da, h, min, sec, opTz);
   } else if (/^\d{12}$/.test(str)) {
     const y = Number(str.slice(0, 4));
     const mo = Number(str.slice(4, 6));
     const da = Number(str.slice(6, 8));
     const h = Number(str.slice(8, 10));
     const min = Number(str.slice(10, 12));
-    date = new Date(y, mo - 1, da, h, min, 0, 0);
+    date = wallClockToDateInTimezone(y, mo, da, h, min, 0, opTz);
   } else if (/^\d{8}$/.test(str)) {
     const y = Number(str.slice(0, 4));
     const mo = Number(str.slice(4, 6));
     const da = Number(str.slice(6, 8));
-    date = new Date(y, mo - 1, da, 12, 0, 0, 0);
+    date = wallClockToDateInTimezone(y, mo, da, 12, 0, 0, opTz);
   } else if (/^\d+$/.test(str)) {
     const n = parseInt(str, 10);
     date = n > 1e12 ? new Date(n) : new Date(n * 1000);
@@ -7338,7 +7409,9 @@ function getCrVoidRefundPaymentCalendarYmd(log, tzFallback) {
       '',
   ).trim();
   if (!payRaw) return '';
-  const pd = parseVoidRefundScheduleDateRaw(payRaw);
+  const merchant = log.merchantId && typeof MERCHANTS !== 'undefined' && MERCHANTS ? MERCHANTS.get(log.merchantId) : null;
+  const wallTz = resolvePaymentWallClockTimezone(log, merchant);
+  const pd = parseVoidRefundScheduleDateRaw(payRaw, wallTz);
   if (!pd) return '';
   const ymd = formatDateYmdInChillpayTimezone(pd, tzFallback);
   return ymd || '';
@@ -7378,8 +7451,10 @@ function logMatchesNotiTransactionDateRange(log, dateFrom, dateTo, tzFallback) {
 function formatNotiLogPaymentDateTimeTHJP(log, _tzFallback, merchant) {
   const body = parseNotiBody(log);
   const payRaw = notifBodyPaymentDateForWindow(body);
-  const pd = payRaw ? parseVoidRefundScheduleDateRaw(payRaw) : null;
-  const tid = resolveLogDisplayInternalTargetId(log, merchant);
+  const m = merchant || (log && log.merchantId && typeof MERCHANTS !== 'undefined' && MERCHANTS ? MERCHANTS.get(log.merchantId) : null);
+  const wallTz = resolvePaymentWallClockTimezone(log, m);
+  const pd = payRaw ? parseVoidRefundScheduleDateRaw(payRaw, wallTz) : null;
+  const tid = resolveLogDisplayInternalTargetId(log, m);
   if (pd && !Number.isNaN(pd.getTime())) {
     return formatDateAndTimeTHJP(pd.toISOString(), tid);
   }
@@ -7408,11 +7483,8 @@ function getVoidRefundWindow(paymentDateOrIso, nowIso) {
   if (payYmd !== nowYmd) return 'refund_only';
 
   // 오늘(당일 거래)인 경우: 현재 시각 기준으로 구간 판정
-  const timeParts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(nowDate);
-  const getValTime = (parts, name) => (parts.find((p) => p.type === name) || {}).value || '0';
-  const nowHour = parseInt(getValTime(timeParts, 'hour'), 10) || 0;
-  const nowMin = parseInt(getValTime(timeParts, 'minute'), 10) || 0;
-  const nowMins = nowHour * 60 + nowMin;
+  const nowLp = wallClockPartsInTz(nowDate.getTime(), tz);
+  const nowMins = nowLp.hour * 60 + nowLp.minute;
 
   const cutoffMins = cfg.voidCutoffHour * 60 + cfg.voidCutoffMinute; // 예: 21:00
   const manualEndMins = 23 * 60 + 59;                                // 23:59 までメール可
@@ -7431,11 +7503,8 @@ function isThailandTimePast2359(nowDate) {
   const tz = getNotiStandardTimezone();
   const d = nowDate && nowDate instanceof Date ? nowDate : new Date(nowDate);
   if (Number.isNaN(d.getTime())) return false;
-  const timeParts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(d);
-  const get = (name) => (timeParts.find((p) => p.type === name) || {}).value || '0';
-  const hour = parseInt(get('hour'), 10) || 0;
-  const minute = parseInt(get('minute'), 10) || 0;
-  return hour >= 23 && minute >= 59;
+  const lp = wallClockPartsInTz(d.getTime(), tz);
+  return lp.hour >= 23 && lp.minute >= 59;
 }
 
 // 환불 요청 버튼 활성화 여부: 결제 다음날(d+1) ~ d+환불 가능 기간(일) 안인지 검사. 당일(d) 결제는 비활성화 (환경설정의 환불 가능 기간(일) 적용)
