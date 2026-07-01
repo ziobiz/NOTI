@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "apiKey": "change-me-to-a-long-random-secret",
+  "allowedIps": []
+}

@@ -525,6 +525,7 @@ const CHILLPAY_TRANSACTION_CONFIG_PATH = path.join(CONFIG_DIR, 'chillpay-transac
 const JPAY_PROFILES_CONFIG_PATH = path.join(CONFIG_DIR, 'jpay-profiles.json');
 /** 종합거래·트래픽 ICOPAY 전용 통화별 금액 규칙 (노티 환경설정 파일과 분리) */
 const ICOPAY_AMOUNT_SETTINGS_PATH = path.join(CONFIG_DIR, 'icopay-amount-settings.json');
+const NOTI_PROVISION_CONFIG_PATH = path.join(CONFIG_DIR, 'noti-provision.json');
 const DEFAULT_SIDEBAR_TITLE = 'PG 노티 관리자';
 const DEFAULT_SIDEBAR_SUB = 'Webhooks & Internal Notices';
 
@@ -2632,6 +2633,8 @@ const TEST_LOG_PATH = path.join(DATA_DIR, 'test-payments.log');
 const CONFIG_LOG_PATH = path.join(DATA_DIR, 'config-change.log');
 const VOID_REFUND_NOTI_LOG_PATH = path.join(DATA_DIR, 'void-refund-noti.log');
 const VOID_UI_DELETED_PATH = path.join(DATA_DIR, 'void-ui-deleted.log');
+const ICOPAY_PROVISION_IDEMPOTENCY_PATH = path.join(DATA_DIR, 'icopay-provision-idempotency.json');
+const ICOPAY_PROVISION_IDEMPOTENCY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAIL_LOG_PATH = path.join(DATA_DIR, 'mail-logs.log');
 const SYSTEM_MONITOR_STATE_PATH = path.join(DATA_DIR, 'system-monitor-state.json');
 const SSL_MONITOR_STATE_PATH = path.join(DATA_DIR, 'ssl-monitor-state.json');
@@ -2639,6 +2642,492 @@ const SERVER_SITUATION_ANALYSES_PATH = path.join(DATA_DIR, 'server-situation-ana
 const RECURRING_CALLBACK_LOG_PATH = path.join(DATA_DIR, 'recurring-callback.log');
 const PG_NOTIFY_DELIVERY_JOBS_PATH = path.join(DATA_DIR, 'pg-notify-delivery-jobs.json');
 const VOID_UI_DELETED_RETENTION_DAYS = 31;
+
+// ========== ICOPAY JPAY Provision API ==========
+function loadNotiProvisionConfigFile() {
+  const file = loadJsonConfig(NOTI_PROVISION_CONFIG_PATH, {});
+  const fromFile = file && typeof file === 'object' ? file : {};
+  return {
+    apiKey: String(fromFile.apiKey || '').trim(),
+    allowedIps: Array.isArray(fromFile.allowedIps)
+      ? fromFile.allowedIps.map((x) => String(x).trim()).filter(Boolean)
+      : [],
+    enabled: fromFile.enabled !== false,
+    apiKeyGeneratedAt: fromFile.apiKeyGeneratedAt ? String(fromFile.apiKeyGeneratedAt) : '',
+  };
+}
+
+function loadNotiProvisionConfig() {
+  const file = loadNotiProvisionConfigFile();
+  const envKey = String(process.env.NOTI_PROVISION_API_KEY || '').trim();
+  return {
+    ...file,
+    apiKey: envKey || file.apiKey,
+    apiKeySource: envKey ? 'env' : file.apiKey ? 'file' : 'none',
+  };
+}
+
+function generateProvisionApiKey() {
+  return 'np_' + crypto.randomBytes(32).toString('hex');
+}
+
+function maskProvisionApiKey(key) {
+  const s = String(key || '').trim();
+  if (!s) return '';
+  if (s.length <= 8) return '••••••••';
+  return s.slice(0, 4) + '••••••••••••' + s.slice(-4);
+}
+
+function verifySessionMemberOtp(req, otp) {
+  if (!req.session || !req.session.member) return { ok: false, code: 'no_member' };
+  MEMBERS = loadMembers();
+  const m = getMemberById(req.session.member.id);
+  if (!m) return { ok: false, code: 'no_member' };
+  const secret = String(m.otpSecret || '').trim();
+  if (!secret) return { ok: false, code: 'otp_not_configured' };
+  if (!verifyOtp(secret, String(otp || '').trim())) return { ok: false, code: 'otp_invalid' };
+  return { ok: true, member: m };
+}
+
+function consumeProvisionApiKeyRevealSession(req) {
+  const entry = req.session && req.session.provisionApiKeyRevealOnce;
+  delete req.session.provisionApiKeyRevealOnce;
+  if (!entry || !entry.key) return '';
+  if (Date.now() - Number(entry.at || 0) > 120000) return '';
+  return String(entry.key);
+}
+
+function stashProvisionApiKeyRevealSession(req, key, reason) {
+  req.session.provisionApiKeyRevealOnce = {
+    key: String(key || ''),
+    at: Date.now(),
+    reason: reason || 'reveal',
+  };
+}
+
+function saveNotiProvisionConfig(patch) {
+  const cur = loadNotiProvisionConfigFile();
+  const next = {
+    enabled: patch.enabled !== undefined ? !!patch.enabled : cur.enabled,
+    apiKey: patch.apiKey !== undefined ? String(patch.apiKey || '').trim() : cur.apiKey,
+    allowedIps:
+      patch.allowedIps !== undefined
+        ? String(patch.allowedIps || '')
+            .split(/[\n,]+/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : cur.allowedIps,
+    apiKeyGeneratedAt:
+      patch.apiKeyGeneratedAt !== undefined ? patch.apiKeyGeneratedAt : cur.apiKeyGeneratedAt || '',
+  };
+  saveJsonConfig(NOTI_PROVISION_CONFIG_PATH, next);
+  return next;
+}
+
+function getNotiPublicBaseUrl() {
+  const fromEnv = String(process.env.NOTI_PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (fromEnv) return fromEnv;
+  return APP_ENV === 'test' ? 'https://test.noti.icopay.net' : 'https://noti.icopay.net';
+}
+
+function jpayPgPublicUrlsFromKeys(jpayRouteCallbackKey, jpayRouteResultKey) {
+  const tok = extractJpayPathToken(String(jpayRouteCallbackKey || '').trim());
+  const base = getNotiPublicBaseUrl();
+  const cb = tok ? `${base}/noti/callback/${tok}` : '';
+  const rs =
+    tok || extractJpayPathToken(String(jpayRouteResultKey || '').trim())
+      ? `${base}/noti/result/${tok || extractJpayPathToken(String(jpayRouteResultKey || '').trim())}`
+      : '';
+  return {
+    pgCallbackUrl: cb,
+    pgResultUrl: rs,
+    icopayJpayNotifyUrl: cb,
+    icopayJpayCallbackUrl: rs,
+  };
+}
+
+function normalizeProvisionMerchantId(raw) {
+  const s = String(raw || '').trim();
+  if (!s || s.length > 64) return null;
+  if (!/^[A-Za-z0-9._-]+$/.test(s)) return null;
+  return s;
+}
+
+function provisionApiLocale(req) {
+  const q = req.query && req.query.lang;
+  if (q && SUPPORTED_LOCALES.includes(q)) return q;
+  const al = String(req.headers['accept-language'] || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  if (al.startsWith('ja')) return 'ja';
+  if (al.startsWith('th')) return 'th';
+  if (al.startsWith('zh')) return 'zh';
+  if (al.startsWith('en')) return 'en';
+  return 'ko';
+}
+
+function provisionErrorMessage(locale, errorCode) {
+  const key = 'provision_err_' + String(errorCode || '').toLowerCase();
+  const msg = t(locale, key);
+  return msg && msg !== key ? msg : String(errorCode || 'ERROR');
+}
+
+function sendProvisionJson(res, status, payload, locale) {
+  const body = payload && typeof payload === 'object' ? { ...payload } : { success: false };
+  if (body.errorCode && !body.message) {
+    body.message = provisionErrorMessage(locale, body.errorCode);
+  }
+  res.status(status).json(body);
+}
+
+function extractBearerProvisionToken(req) {
+  const h = String(req.headers.authorization || '').trim();
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1].trim() : '';
+}
+
+function provisionClientIp(req) {
+  return (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+}
+
+function authenticateIcopayProvisionRequest(req, locale) {
+  const cfg = loadNotiProvisionConfig();
+  if (!cfg.enabled) {
+    return {
+      ok: false,
+      status: 403,
+      errorCode: 'FORBIDDEN',
+      message: provisionErrorMessage(locale, 'FORBIDDEN'),
+    };
+  }
+  const token = extractBearerProvisionToken(req);
+  if (!cfg.apiKey || !token || token !== cfg.apiKey) {
+    return {
+      ok: false,
+      status: 401,
+      errorCode: 'UNAUTHORIZED',
+      message: provisionErrorMessage(locale, 'UNAUTHORIZED'),
+    };
+  }
+  if (cfg.allowedIps.length) {
+    const ip = provisionClientIp(req);
+    const allowed = cfg.allowedIps.some((a) => a === ip || (a.endsWith('*') && ip.startsWith(a.slice(0, -1))));
+    if (!allowed) {
+      return {
+        ok: false,
+        status: 403,
+        errorCode: 'FORBIDDEN',
+        message: provisionErrorMessage(locale, 'FORBIDDEN'),
+      };
+    }
+  }
+  return { ok: true, cfg };
+}
+
+function normalizeJpayProvisionOptions(options) {
+  const o = options && typeof options === 'object' ? options : {};
+  const enableRelay = o.enableRelay !== false;
+  const enableInternal = o.enableInternal !== false;
+  const enableDevInternal = o.enableDevInternal === true;
+  const rf = String(o.relayFormat || 'raw').trim().toLowerCase();
+  const relayFormat = enableRelay && (rf === 'json' || rf === 'form') ? rf : 'raw';
+  const rdmRaw = String(o.resultDeliveryMode || 'auto').trim().toLowerCase();
+  const resultDeliveryMode =
+    rdmRaw === 'no_browser_redirect' || rdmRaw === 'post_only'
+      ? 'no_browser_redirect'
+      : rdmRaw === 'post_force_redirect' || rdmRaw === 'post_with_browser_redirect'
+      ? 'post_force_redirect'
+      : rdmRaw === 'autot'
+      ? 'autot'
+      : 'auto';
+  return { enableRelay, enableInternal, enableDevInternal, relayFormat, resultDeliveryMode };
+}
+
+function jpayMerchantProvisionSnapshot(rec) {
+  if (!rec || inferMerchantPgKind(rec) !== 'jpay') return null;
+  const slot = parseJpayNotiSlotFromToken(extractJpayPathToken(rec.jpayRouteCallbackKey));
+  return {
+    slot,
+    routeNo: String(rec.routeNo || '').trim(),
+    jpayRouteCallbackKey: String(rec.jpayRouteCallbackKey || '').trim(),
+    jpayRouteResultKey: String(rec.jpayRouteResultKey || '').trim(),
+    callbackUrl: String(rec.callbackUrl || '').trim(),
+    resultUrl: String(rec.resultUrl || '').trim(),
+    internalTargetId: String(rec.internalTargetId || '').trim(),
+    enableRelay: !!rec.enableRelay,
+    enableInternal: !!rec.enableInternal,
+    enableDevInternal: !!rec.enableDevInternal,
+    relayFormat: String(rec.relayFormat || 'raw').trim(),
+    resultDeliveryMode: String(rec.resultDeliveryMode || 'auto').trim(),
+  };
+}
+
+function buildJpayMerchantObject(input) {
+  const {
+    merchantId,
+    slot,
+    callbackUrl,
+    resultUrl,
+    routeNo,
+    internalTargetId,
+    options,
+    prev,
+    icopayMeta,
+  } = input;
+  const jpayCb = buildJpayRouteCallbackKey(slot);
+  const jpayRs = buildJpayRouteResultKey(slot);
+  const opts = normalizeJpayProvisionOptions(options);
+  const cbSaved = String(callbackUrl || '').trim();
+  const rsSaved = String(resultUrl || '').trim();
+  const rnManual = String(routeNo || '').trim();
+  const rnSaved = rnManual || jpayRouteTokenForSlot(slot);
+  const out = {
+    ...(prev || {}),
+    merchantId,
+    routeCallbackKey: '',
+    routeResultKey: '',
+    callbackUrl: cbSaved,
+    resultUrl: rsSaved,
+    routeNo: rnSaved,
+    internalCustomerId: '',
+    internalTargetId: String(internalTargetId || '').trim(),
+    enableRelay: opts.enableRelay,
+    enableInternal: opts.enableInternal,
+    enableDevInternal: opts.enableDevInternal,
+    enableDealmaiWebhook: false,
+    dealmaiPartnerCode: '',
+    relayOffForwardTarget: '',
+    relayOffInternalCallbackUrl: '',
+    relayOffInternalResultUrl: '',
+    relayOffDevCallbackUrl: '',
+    relayOffDevResultUrl: '',
+    relayOffDevDedicatedUse: false,
+    relayFormat: opts.relayFormat,
+    jpayRouteCallbackKey: jpayCb,
+    jpayRouteResultKey: jpayRs,
+    jpayCallbackUrl: '',
+    jpayResultUrl: '',
+    merchantPgKind: 'jpay',
+    chillpayRecurring: 'N',
+    resultDeliveryMode: opts.resultDeliveryMode,
+    relayEnrichmentMode: 'plain',
+  };
+  if (icopayMeta && typeof icopayMeta === 'object') {
+    out.icopayProvisionMeta = icopayMeta;
+  }
+  return out;
+}
+
+function merchantToProvisionApiData(merchant, extras) {
+  const m = merchant || {};
+  const slot = parseJpayNotiSlotFromToken(extractJpayPathToken(m.jpayRouteCallbackKey));
+  const urls = jpayPgPublicUrlsFromKeys(m.jpayRouteCallbackKey, m.jpayRouteResultKey);
+  return {
+    merchantId: m.merchantId || '',
+    pgKind: 'jpay',
+    slot: slot || null,
+    routeNo: String(m.routeNo || '').trim() || (slot ? jpayRouteTokenForSlot(slot) : ''),
+    jpayRouteCallbackKey: String(m.jpayRouteCallbackKey || '').trim(),
+    jpayRouteResultKey: String(m.jpayRouteResultKey || '').trim(),
+    ...urls,
+    internalTargetId: String(m.internalTargetId || '').trim(),
+    callbackUrl: String(m.callbackUrl || '').trim(),
+    resultUrl: String(m.resultUrl || '').trim(),
+    created: extras && extras.created === false ? false : true,
+    provisionRequestId: extras && extras.provisionRequestId ? String(extras.provisionRequestId) : undefined,
+  };
+}
+
+function resolveJpaySlotForProvisionInput(body, merchantId) {
+  const existing = MERCHANTS.get(merchantId);
+  const hasSlotNo = body.jpaySlotNo != null && String(body.jpaySlotNo).trim() !== '';
+  if (hasSlotNo) {
+    const n = normalizePgNotiRouteNumber(body.jpaySlotNo);
+    if (!n) return { errorCode: 'JPAY_SLOT_INVALID' };
+    return { slot: n };
+  }
+  const rn = String(body.routeNo || '').trim();
+  if (rn) {
+    const tok = rn.match(/^j/i) ? rn : 'j' + rn;
+    const fromRn = parseJpayNotiSlotFromToken(tok);
+    if (!fromRn) return { errorCode: 'JPAY_SLOT_INVALID' };
+    return { slot: fromRn };
+  }
+  if (existing && inferMerchantPgKind(existing) === 'jpay') {
+    const slot = parseJpayNotiSlotFromToken(extractJpayPathToken(existing.jpayRouteCallbackKey));
+    if (slot) return { slot };
+  }
+  const next = findNextAvailableJpayMerchantSlot();
+  if (!next) return { errorCode: 'JPAY_SLOT_EXHAUSTED' };
+  return { slot: next, autoAssigned: true };
+}
+
+function assertJpayRoutesAvailable(slot, excludeMerchantIds) {
+  const jpayCb = buildJpayRouteCallbackKey(slot);
+  const jpayRs = buildJpayRouteResultKey(slot);
+  if (!jpayCb || !jpayRs) return { errorCode: 'JPAY_SLOT_INVALID' };
+  const ex = new Set([...(excludeMerchantIds || [])].filter(Boolean));
+  for (const [id, m] of MERCHANTS.entries()) {
+    if (ex.has(id)) continue;
+    if ((m.jpayRouteCallbackKey || '').trim() === jpayCb) {
+      return { errorCode: 'JPAY_ROUTE_CONFLICT', details: { slot, conflictingMerchantId: id, kind: 'callback' } };
+    }
+    if ((m.jpayRouteResultKey || '').trim() === jpayRs) {
+      return { errorCode: 'JPAY_ROUTE_CONFLICT', details: { slot, conflictingMerchantId: id, kind: 'result' } };
+    }
+  }
+  return { jpayCb, jpayRs };
+}
+
+function loadProvisionIdempotencyStore() {
+  const raw = loadJsonConfig(ICOPAY_PROVISION_IDEMPOTENCY_PATH, { requests: {} });
+  return raw && typeof raw === 'object' ? raw : { requests: {} };
+}
+
+function pruneProvisionIdempotency(store) {
+  const now = Date.now();
+  const reqs = store.requests || {};
+  for (const [k, v] of Object.entries(reqs)) {
+    const t0 = Date.parse(v && v.at);
+    if (!Number.isFinite(t0) || now - t0 > ICOPAY_PROVISION_IDEMPOTENCY_TTL_MS) delete reqs[k];
+  }
+}
+
+function getProvisionIdempotencyResponse(requestId) {
+  const rid = String(requestId || '').trim();
+  if (!rid) return null;
+  const store = loadProvisionIdempotencyStore();
+  pruneProvisionIdempotency(store);
+  const hit = store.requests && store.requests[rid];
+  if (!hit || !hit.response) return null;
+  return { status: hit.status, body: hit.response };
+}
+
+function saveProvisionIdempotencyResponse(requestId, status, body) {
+  const rid = String(requestId || '').trim();
+  if (!rid) return;
+  const store = loadProvisionIdempotencyStore();
+  pruneProvisionIdempotency(store);
+  if (!store.requests) store.requests = {};
+  store.requests[rid] = { at: new Date().toISOString(), status, response: body };
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    saveJsonConfig(ICOPAY_PROVISION_IDEMPOTENCY_PATH, store);
+  } catch {
+    // ignore
+  }
+}
+
+function provisionJpayMerchant(body, meta) {
+  const locale = (meta && meta.locale) || 'ko';
+  const requestId = meta && meta.requestId ? String(meta.requestId).trim() : '';
+  const clientIp = (meta && meta.clientIp) || '';
+  const actor = (meta && meta.actor) || 'icopay-provision';
+
+  if (!body || typeof body !== 'object') {
+    return { ok: false, status: 400, errorCode: 'INVALID_REQUEST' };
+  }
+
+  const merchantId = normalizeProvisionMerchantId(body.merchantId);
+  if (!merchantId) {
+    return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  }
+
+  const pgKind = String(body.pgKind || '').toLowerCase().trim();
+  if (pgKind !== 'jpay') {
+    return { ok: false, status: 400, errorCode: pgKind ? 'INVALID_PG_KIND' : 'INVALID_REQUEST' };
+  }
+
+  const internalTargetId = String(body.internalTargetId || '').trim();
+  if (!internalTargetId || !INTERNAL_TARGETS.has(internalTargetId)) {
+    return { ok: false, status: 400, errorCode: 'INVALID_INTERNAL_TARGET' };
+  }
+
+  const options = normalizeJpayProvisionOptions(body.options);
+  const callbackUrl = String(body.callbackUrl || '').trim();
+  const resultUrl = String(body.resultUrl || '').trim();
+  if (options.enableRelay && (!callbackUrl || !resultUrl)) {
+    return { ok: false, status: 400, errorCode: 'MERCHANT_URL_REQUIRED' };
+  }
+
+  const existing = MERCHANTS.get(merchantId) || null;
+  if (existing && inferMerchantPgKind(existing) !== 'jpay') {
+    return { ok: false, status: 409, errorCode: 'MERCHANT_ALREADY_EXISTS' };
+  }
+
+  const slotRes = resolveJpaySlotForProvisionInput(body, merchantId);
+  if (slotRes.errorCode) {
+    const status = slotRes.errorCode === 'JPAY_SLOT_EXHAUSTED' ? 409 : 400;
+    return { ok: false, status, errorCode: slotRes.errorCode };
+  }
+
+  const conflict = assertJpayRoutesAvailable(slotRes.slot, [merchantId]);
+  if (conflict.errorCode) {
+    return { ok: false, status: 400, errorCode: conflict.errorCode, details: conflict.details || {} };
+  }
+
+  const desiredRecord = buildJpayMerchantObject({
+    merchantId,
+    slot: slotRes.slot,
+    callbackUrl,
+    resultUrl,
+    routeNo: body.routeNo,
+    internalTargetId,
+    options,
+    prev: existing || {},
+    icopayMeta: body.icopayMeta,
+  });
+
+  const desiredSnap = jpayMerchantProvisionSnapshot(desiredRecord);
+  const existingSnap = jpayMerchantProvisionSnapshot(existing);
+
+  if (existingSnap) {
+    if (JSON.stringify(existingSnap) === JSON.stringify(desiredSnap)) {
+      const data = merchantToProvisionApiData(existing, { created: false, provisionRequestId: requestId || undefined });
+      const responseBody = { success: true, data };
+      return { ok: true, status: 200, body: responseBody, idempotent: true };
+    }
+    return { ok: false, status: 409, errorCode: 'MERCHANT_ALREADY_EXISTS' };
+  }
+
+  MERCHANTS.set(merchantId, desiredRecord);
+  try {
+    saveMerchants();
+  } catch (e) {
+    MERCHANTS.delete(merchantId);
+    if (existing) MERCHANTS.set(merchantId, existing);
+    return { ok: false, status: 503, errorCode: 'NOTI_CONFIG_LOCKED', details: { message: (e && e.message) || String(e) } };
+  }
+
+  appendConfigChangeLog({
+    type: 'merchant_update',
+    source: 'icopay-provision',
+    actor,
+    clientIp,
+    merchantId,
+    before: existing,
+    after: MERCHANTS.get(merchantId),
+    provisionRequestId: requestId || undefined,
+    icopayMeta: body.icopayMeta,
+  });
+
+  const data = merchantToProvisionApiData(MERCHANTS.get(merchantId), {
+    created: true,
+    provisionRequestId: requestId || undefined,
+  });
+  return { ok: true, status: 201, body: { success: true, data } };
+}
+
+function getJpayMerchantProvision(merchantId) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const m = MERCHANTS.get(id);
+  if (!m || inferMerchantPgKind(m) !== 'jpay') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  return { ok: true, status: 200, body: { success: true, data: merchantToProvisionApiData(m, { created: false }) } };
+}
 
 /** 저장값이 없을 때만 사용: 환경변수 SYSTEM_MONITOR_MONTHLY_QUOTA_GB (기본 300GB) */
 function systemMonitorDefaultQuotaGb() {
@@ -3051,14 +3540,12 @@ function notiLogPayloadFromEntry(log) {
 
 function notiLogOrderNoFromEntry(log) {
   const p = notiLogPayloadFromEntry(log);
-  return String(p.orderNo || p.OrderNo || log.orderNo || '').trim();
+  return notifBodyOrderNo(p) || String(log.orderNo || '').trim();
 }
 
 function notiLogTransactionIdFromEntry(log) {
   const p = notiLogPayloadFromEntry(log);
-  return String(
-    p.TransactionId || p.transactionId || p.memberid || p.memberId || log.transactionId || '',
-  ).trim();
+  return notifBodyTxId(p) || String(log.transactionId || '').trim();
 }
 
 function notiLogStoredAtIsoFromEntry(log) {
@@ -3273,17 +3760,18 @@ function saveDevInternalDedupMap(map) {
 function buildDevInternalDedupeKey(opts) {
   const o = opts || {};
   const p = o.payload || o.body || {};
-  const orderNo = String(p.orderNo || p.OrderNo || '').trim();
-  const txId = String(p.TransactionId || p.transactionId || p.memberid || p.memberId || '').trim();
+  const orderNo = notifBodyOrderNo(p);
+  const txId = notifBodyTxId(p) || String(p.memberid || p.memberId || '').trim();
   const status = String(
     p.PaymentStatus ?? p.paymentStatus ?? p.returncode ?? p.returnCode ?? p.status ?? '',
   ).trim();
   const url = String(o.devUrl || '').trim();
   const pg = String(o.pgProvider || 'chillpay').trim().toLowerCase();
   const mid = String(o.merchantId || '').trim();
+  // v2: JPAY orderid·transaction_id 반영 (v1은 주문번호 없이 가맹당 1건만 전송되는 버그)
   return crypto
     .createHash('sha256')
-    .update([pg, mid, url, orderNo, txId, status].join('|'))
+    .update(['v2', pg, mid, url, orderNo, txId, status].join('|'))
     .digest('hex');
 }
 
@@ -3382,7 +3870,7 @@ async function runDevInternalNotifyWithDedup(ctx) {
     recordDevInternalDedupAttempt(dedupeKey, {
       success: devDeliverySuccess,
       status: delivered.devAggResult && delivered.devAggResult.status,
-      orderNo: notiLogOrderNoFromEntry({ payload: delivered.devPayload || payload }),
+      orderNo: notifBodyOrderNo(delivered.devPayload || payload) || notiLogOrderNoFromEntry({ payload: delivered.devPayload || payload }),
     });
   }
   return {
@@ -3394,6 +3882,240 @@ async function runDevInternalNotifyWithDedup(ctx) {
     ...delivered,
     dedupeKey,
   };
+}
+
+function ymdInBangkok(isoOrDate) {
+  const d = typeof isoOrDate === 'string' || typeof isoOrDate === 'number' ? new Date(isoOrDate) : isoOrDate;
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok' }).format(d);
+}
+
+function devInternalOkMatchKey(merchantId, body) {
+  const mid = String(merchantId || '').trim();
+  const orderNo = notifBodyOrderNo(body);
+  const txId = notifBodyTxId(body);
+  if (!mid || (!orderNo && !txId)) return '';
+  return mid + '|' + orderNo + '|' + txId;
+}
+
+function loadDevInternalOkMatchKeysFromFile() {
+  const keys = new Set();
+  try {
+    if (!fs.existsSync(DEV_INTERNAL_LOG_PATH)) return keys;
+    for (const line of fs.readFileSync(DEV_INTERNAL_LOG_PATH, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let log;
+      try {
+        log = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (normalizeDevInternalDeliveryUi(log.internalDeliveryStatus) !== DEV_INTERNAL_DELIVER_OK) continue;
+      const body =
+        log.payload && typeof log.payload === 'object' ? log.payload : parseNotiBody(log) || {};
+      const k = devInternalOkMatchKey(log.merchantId, body);
+      if (k) keys.add(k);
+    }
+  } catch (e) {
+    console.warn('[resend-missed-dev] dev-internal-noti.log read failed:', e.message || e);
+  }
+  return keys;
+}
+
+/** 오늘(태국일) PG 노티는 있으나 개발노티 OK 가 없는 건을 일괄 재전송 */
+async function resendMissedDevInternalFromPgLogs(opts) {
+  const o = opts || {};
+  const dryRun = !!o.dryRun;
+  const forceResend = o.forceResend !== false;
+  const targetYmd =
+    !o.dateYmd || o.dateYmd === 'today' ? ymdInBangkok(new Date()) : String(o.dateYmd).trim();
+
+  const okKeys = loadDevInternalOkMatchKeysFromFile();
+  const byMatch = new Map();
+  let pgScanned = 0;
+
+  if (!fs.existsSync(PG_NOTI_LOG_PATH)) {
+    return { targetYmd, pgScanned: 0, candidates: 0, sent: 0, ok: 0, fail: 0, skipped: 0, dryRun, results: [] };
+  }
+
+  for (const line of fs.readFileSync(PG_NOTI_LOG_PATH, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    let pgLog;
+    try {
+      pgLog = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    pgScanned++;
+    const iso = pgLog.receivedAtIso || pgLog.receivedAt || '';
+    if (ymdInBangkok(iso) !== targetYmd) continue;
+
+    const kind = String(pgLog.kind || 'callback').toLowerCase();
+    if (kind !== 'callback') continue;
+
+    const body = parseNotiBody(pgLog) || (typeof pgLog.body === 'object' ? pgLog.body : {});
+    if (!body || typeof body !== 'object' || isCancelNotiBody(body)) continue;
+
+    const merchantId = String(pgLog.merchantId || '').trim();
+    if (!merchantId) continue;
+    const merchant = MERCHANTS.get(merchantId);
+    if (!merchant || merchant.enableDevInternal !== true) continue;
+
+    const matchKey = devInternalOkMatchKey(merchantId, body);
+    if (!matchKey || okKeys.has(matchKey)) continue;
+
+    const prev = byMatch.get(matchKey);
+    const tNew = Date.parse(iso) || 0;
+    const tOld = prev ? Date.parse(prev.receivedAtIso || prev.receivedAt || '') || 0 : 0;
+    if (!prev || tNew >= tOld) byMatch.set(matchKey, pgLog);
+  }
+
+  const candidates = [...byMatch.values()];
+  const results = [];
+  let sent = 0;
+  let ok = 0;
+  let fail = 0;
+  let skipped = 0;
+
+  for (const pgLog of candidates) {
+    const merchantId = String(pgLog.merchantId || '').trim();
+    const merchant = MERCHANTS.get(merchantId);
+    const body = parseNotiBody(pgLog) || pgLog.body || {};
+    const orderNo = notifBodyOrderNo(body);
+    const txId = notifBodyTxId(body);
+    const pgProvider = getNotiLogPgAcquirer(pgLog);
+    const devUrl = resolveMerchantDevInternalUrl(merchant, 'callback');
+
+    if (!devUrl) {
+      skipped++;
+      results.push({ merchantId, orderNo, txId, status: 'skip', reason: 'no_dev_url' });
+      if (!dryRun) {
+        appendDevInternalLog({
+          storedAt: new Date().toISOString(),
+          merchantId,
+          routeNo: (merchant && merchant.routeNo) || '',
+          internalTargetId: (merchant && merchant.internalTargetId) || '',
+          payload: body,
+          internalTargetUrl: '',
+          internalDeliveryStatus: DEV_INTERNAL_DELIVER_FAIL,
+          pgProvider,
+          routeKey: pgLog.routeKey || '',
+          resendMissedBackfill: true,
+        });
+      }
+      continue;
+    }
+
+    if (dryRun) {
+      results.push({ merchantId, orderNo, txId, status: 'dry_run', url: devUrl });
+      continue;
+    }
+
+    sent++;
+    try {
+      let devRun;
+      if (pgProvider === 'jpay') {
+        const jpayRelayPack = {
+          body,
+          contentType: pgLog.contentType || '',
+          rawBody: pgLog.rawBody != null ? String(pgLog.rawBody) : undefined,
+        };
+        let devRelayPackLogged = null;
+        devRun = await runDevInternalNotifyWithDedup({
+          merchantId,
+          pgProvider: 'jpay',
+          devUrl,
+          body,
+          payload: body,
+          forceResend: forceResend,
+          deliver: async () => {
+            const jpayDevDeliver = await deliverJpayDevInternalNotify(devUrl, jpayRelayPack, merchant);
+            devRelayPackLogged = jpayDevDeliver.devRelayPack || normalizeJpayDevRelayPack(jpayRelayPack);
+            const okDel = !!(jpayDevDeliver.devAggResult && jpayDevDeliver.devAggResult.success);
+            return {
+              devPayload: jpayDevDeliver.devPayload,
+              devAggResult: jpayDevDeliver.devAggResult,
+              devRelayPackLogged,
+              devDeliverySuccess: okDel,
+            };
+          },
+        });
+        if (!devRun.skipAppendLog) {
+          appendDevInternalLog({
+            storedAt: new Date().toISOString(),
+            merchantId,
+            routeNo: merchant.routeNo || '',
+            internalTargetId: merchant.internalTargetId || '',
+            payload: devRun.devPayload || body,
+            internalTargetUrl: devRun.devInternalTargetUrl || devUrl,
+            internalDeliveryStatus: devRun.devInternalTargetUrl ? devRun.internalDeliveryStatus : DEV_INTERNAL_DELIVER_FAIL,
+            pgProvider: 'jpay',
+            jpayRawRelay: true,
+            routeKey: pgLog.routeKey || '',
+            resendMissedBackfill: true,
+            ...jpayDevInternalLogExtrasFromRelayPack(devRelayPackLogged || normalizeJpayDevRelayPack(jpayRelayPack)),
+            ...(devRun.devAggResult ? devInternalLogUpstreamExtras(devRun.devAggResult) : {}),
+          });
+        }
+      } else {
+        const devPayload = transformForDevInternal(body, merchant);
+        devRun = await runDevInternalNotifyWithDedup({
+          merchantId,
+          pgProvider: 'chillpay',
+          devUrl,
+          payload: devPayload,
+          forceResend: forceResend,
+          deliver: async () => {
+            const devAggResult = await sendDevInternalHttpNotify(devUrl, devPayload);
+            return { devAggResult, devPayload, devDeliverySuccess: devAggResult.success };
+          },
+        });
+        if (!devRun.skipAppendLog) {
+          appendDevInternalLog({
+            storedAt: new Date().toISOString(),
+            merchantId,
+            routeNo: merchant.routeNo || '',
+            internalTargetId: merchant.internalTargetId || '',
+            payload: devRun.devPayload || devPayload,
+            internalTargetUrl: devRun.devInternalTargetUrl || devUrl,
+            internalDeliveryStatus: devRun.devInternalTargetUrl ? devRun.internalDeliveryStatus : DEV_INTERNAL_DELIVER_FAIL,
+            pgProvider: 'chillpay',
+            routeKey: pgLog.routeKey || '',
+            resendMissedBackfill: true,
+            ...(devRun.devAggResult ? devInternalLogUpstreamExtras(devRun.devAggResult) : {}),
+          });
+        }
+      }
+
+      if (devRun.devDeliverySuccess) {
+        ok++;
+        okKeys.add(devInternalOkMatchKey(merchantId, body));
+        results.push({
+          merchantId,
+          orderNo,
+          txId,
+          status: 'ok',
+          http: devRun.devAggResult && devRun.devAggResult.status,
+        });
+      } else {
+        fail++;
+        results.push({
+          merchantId,
+          orderNo,
+          txId,
+          status: 'fail',
+          http: devRun.devAggResult && devRun.devAggResult.status,
+          error: devRun.devAggResult && devRun.devAggResult.error,
+        });
+      }
+    } catch (e) {
+      fail++;
+      results.push({ merchantId, orderNo, txId, status: 'error', reason: (e && e.message) || String(e) });
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+
+  return { targetYmd, pgScanned, candidates: candidates.length, sent, ok, fail, skipped, dryRun, results };
 }
 
 function buildNotiLogDeleteConfirmUrl(logKind, log, opts) {
@@ -10288,6 +11010,124 @@ function renderIcopaySettingsCard(locale) {
   );
 }
 
+function renderNotiProvisionSettingsCard(locale, uiState) {
+  const q = (v) =>
+    v != null && typeof v === 'string'
+      ? String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      : '';
+  const ui = uiState && typeof uiState === 'object' ? uiState : {};
+  const cfg = loadNotiProvisionConfig();
+  const fileCfg = loadNotiProvisionConfigFile();
+  const confirmMsg = (t(locale, 'provision_settings_confirm_save') || '저장하시겠습니까?').replace(/'/g, "\\'");
+  const genConfirm = (t(locale, 'provision_settings_generate_confirm') || '').replace(/'/g, "\\'");
+  const ipsVal = (cfg.allowedIps || []).join('\n');
+  const enabledChecked = cfg.enabled !== false ? ' checked' : '';
+  const hasKey = !!(cfg.apiKey || fileCfg.apiKey);
+  const masked = hasKey ? maskProvisionApiKey(cfg.apiKey || fileCfg.apiKey) : t(locale, 'provision_settings_api_key_none');
+  const envActive = cfg.apiKeySource === 'env';
+  const revealErr = ui.revealError ? String(ui.revealError) : '';
+  const revealedKey = ui.revealedKey ? String(ui.revealedKey) : '';
+  let keyAlert = '';
+  if (revealedKey) {
+    keyAlert =
+      '<div class="alert alert-ok" style="margin-top:12px;">' +
+      '<strong>' +
+      q(t(locale, 'provision_settings_key_revealed')) +
+      '</strong><p style="margin:8px 0 6px;font-size:12px;">' +
+      q(t(locale, 'provision_settings_reveal_once_hint')) +
+      '</p>' +
+      '<code id="provision-api-key-revealed" style="display:block;word-break:break-all;padding:8px;background:#f3f4f6;border-radius:6px;font-size:12px;">' +
+      q(revealedKey) +
+      '</code>' +
+      '<button type="button" id="provision-api-key-copy" style="margin-top:8px;padding:6px 12px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;">' +
+      q(t(locale, 'provision_settings_copy_key')) +
+      '</button></div>' +
+      '<script>(function(){var b=document.getElementById("provision-api-key-copy");var c=document.getElementById("provision-api-key-revealed");if(!b||!c)return;b.onclick=function(){try{navigator.clipboard.writeText(c.textContent||"");b.textContent=' +
+      JSON.stringify(t(locale, 'provision_settings_copied')) +
+      ';}catch(e){}};})();</script>';
+  } else if (revealErr === 'otp') {
+    keyAlert =
+      '<div class="alert alert-fail" style="margin-top:12px;">' + q(t(locale, 'provision_settings_otp_invalid')) + '</div>';
+  } else if (revealErr === 'otp_not_configured') {
+    keyAlert =
+      '<div class="alert alert-fail" style="margin-top:12px;">' +
+      q(t(locale, 'provision_settings_otp_required')) +
+      ' <a href="/admin/account" style="color:#1d4ed8;font-weight:600;">' +
+      q(t(locale, 'nav_account')) +
+      '</a></div>';
+  } else if (revealErr === 'none') {
+    keyAlert =
+      '<div class="alert alert-fail" style="margin-top:12px;">' + q(t(locale, 'provision_settings_api_key_none')) + '</div>';
+  }
+  const envWarn = envActive
+    ? '<p class="admin-page-desc" style="border-left:3px solid #f59e0b;padding-left:10px;background:#fffbeb;margin-top:8px;font-size:12px;">' +
+      q(t(locale, 'provision_settings_env_key_active')) +
+      '</p>'
+    : '';
+  return (
+    '<div class="card card-chillpay" style="margin-top:18px;">' +
+    '<h2 style="margin-top:0;">' +
+    q(t(locale, 'provision_settings_title')) +
+    '</h2>' +
+    '<p class="admin-page-desc">' +
+    q(t(locale, 'provision_settings_desc')) +
+    '</p>' +
+    '<p class="admin-page-desc" style="font-size:12px;color:#6b7280;">' +
+    q(t(locale, 'provision_settings_env_hint')) +
+    '</p>' +
+    envWarn +
+    keyAlert +
+    '<div style="margin-top:14px;padding:12px 14px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;max-width:640px;">' +
+    '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">' +
+    q(t(locale, 'provision_settings_api_key')) +
+    '</div>' +
+    '<code style="display:block;font-size:13px;letter-spacing:0.02em;color:#374151;">' +
+    q(masked) +
+    '</code>' +
+    '<p class="hint" style="margin-top:8px;">' +
+    q(t(locale, 'provision_settings_api_key_stored_hint')) +
+    '</p>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;">' +
+    '<form method="post" action="/admin/settings/noti-provision/generate-key" style="margin:0;" onsubmit="return confirm(\'' +
+    genConfirm +
+    '\');">' +
+    '<button type="submit" style="margin:0;padding:7px 14px;font-size:13px;background:#059669;color:#fff;border:none;border-radius:6px;cursor:pointer;">' +
+    q(t(locale, 'provision_settings_generate_key')) +
+    '</button></form>' +
+    '<form method="post" action="/admin/settings/noti-provision/reveal-key" style="margin:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px;">' +
+    '<input type="text" name="otp" maxlength="6" placeholder="' +
+    q(t(locale, 'login_otp')) +
+    '" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" style="width:88px;padding:6px 8px;border-radius:6px;border:1px solid #d1d5db;font-size:13px;" />' +
+    '<button type="submit" style="margin:0;padding:7px 14px;font-size:13px;background:#4b5563;color:#fff;border:none;border-radius:6px;cursor:pointer;">' +
+    q(t(locale, 'provision_settings_reveal_key')) +
+    '</button></form>' +
+    '</div></div>' +
+    '<form method="post" action="/admin/settings/noti-provision" style="margin-top:16px;" onsubmit="return confirm(\'' +
+    confirmMsg +
+    '\');">' +
+    '<label class="chillpay-checkbox-wrap" style="margin-top:8px;">' +
+    '<input type="checkbox" name="enabled" value="on"' +
+    enabledChecked +
+    ' /> ' +
+    q(t(locale, 'provision_settings_enabled')) +
+    '</label>' +
+    '<label style="margin-top:12px;">' +
+    q(t(locale, 'provision_settings_allowed_ips')) +
+    '<textarea name="allowedIps" rows="4" style="width:100%;max-width:480px;margin-top:4px;padding:8px;border-radius:6px;border:1px solid #d1d5db;font-family:monospace;font-size:12px;">' +
+    q(ipsVal) +
+    '</textarea></label>' +
+    '<p class="hint">' +
+    q(t(locale, 'provision_settings_allowed_ips_hint')) +
+    '</p>' +
+    '<p class="hint" style="margin-top:8px;">' +
+    q(t(locale, 'provision_settings_file_hint')) +
+    '</p>' +
+    '<button type="submit" style="margin-top:14px;">' +
+    q(t(locale, 'common_save')) +
+    '</button></form></div>'
+  );
+}
+
 app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
   const locale = getLocale(req);
   const clientIp = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
@@ -10306,6 +11146,10 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
     alertHtml = '<div class="alert alert-fail">' + reason + '</div>';
   } else if (q.icopaySaved === '1') {
     alertHtml = '<div class="alert alert-ok">' + escQ(t(locale, 'settings_icopay_saved') || 'ICOPAY 금액 규칙을 저장했습니다.') + '</div>';
+  } else if (q.provisionSaved === '1') {
+    alertHtml = '<div class="alert alert-ok">' + escQ(t(locale, 'provision_settings_saved')) + '</div>';
+  } else if (q.provisionKeyGenerated === '1') {
+    alertHtml = '<div class="alert alert-ok">' + escQ(t(locale, 'provision_settings_key_generated')) + '</div>';
   } else if (q.redirectRoutes === '1') {
     alertHtml =
       '<div class="alert alert-ok">' +
@@ -10316,6 +11160,14 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
   const subVal = (site.sidebarSub || '').replace(/"/g, '&quot;');
   const pageTitleVal = (site.pageTitle || '').replace(/"/g, '&quot;');
   const faviconVal = (site.favicon || '').replace(/"/g, '&quot;');
+  let provisionRevealKey = '';
+  if (q.provisionKeyGenerated === '1' || q.provisionReveal === '1') {
+    provisionRevealKey = consumeProvisionApiKeyRevealSession(req);
+  }
+  const provisionUi = {
+    revealedKey: provisionRevealKey,
+    revealError: q.provisionRevealErr ? String(q.provisionRevealErr) : '',
+  };
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -10418,6 +11270,7 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
         </form>
       </div>
       ${renderIcopaySettingsCard(locale)}
+      ${renderNotiProvisionSettingsCard(locale, provisionUi)}
       ${(function() {
         const c = loadChillPayTransactionConfig();
         const q = (v) => (v != null && typeof v === 'string' ? String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
@@ -10680,6 +11533,59 @@ app.post('/admin/settings/icopay-amount', requireAuth, requireSettingsOrRedirect
     }
   }
   return res.redirect('/admin/settings?icopaySaved=1');
+});
+
+app.post('/admin/settings/noti-provision', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
+  const cur = loadNotiProvisionConfigFile();
+  const patch = {
+    enabled: req.body && req.body.enabled === 'on',
+    allowedIps: String((req.body && req.body.allowedIps) || ''),
+    apiKey: cur.apiKey,
+  };
+  saveNotiProvisionConfig(patch);
+  appendConfigChangeLog({
+    action: 'noti_provision_settings',
+    actor: req.session.adminUser || 'unknown',
+    clientIp: (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '',
+    payload: { enabled: patch.enabled, allowedIpCount: patch.allowedIps.split(/[\n,]+/).filter((s) => s.trim()).length },
+  });
+  return res.redirect('/admin/settings?provisionSaved=1');
+});
+
+app.post('/admin/settings/noti-provision/generate-key', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
+  const newKey = generateProvisionApiKey();
+  saveNotiProvisionConfig({
+    apiKey: newKey,
+    apiKeyGeneratedAt: new Date().toISOString(),
+  });
+  appendConfigChangeLog({
+    action: 'noti_provision_api_key_generate',
+    actor: req.session.adminUser || 'unknown',
+    clientIp: (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '',
+    payload: { masked: maskProvisionApiKey(newKey), source: 'file' },
+  });
+  stashProvisionApiKeyRevealSession(req, newKey, 'generated');
+  return res.redirect('/admin/settings?provisionKeyGenerated=1');
+});
+
+app.post('/admin/settings/noti-provision/reveal-key', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
+  const otp = (req.body && req.body.otp) || '';
+  const check = verifySessionMemberOtp(req, otp);
+  if (!check.ok) {
+    return res.redirect('/admin/settings?provisionRevealErr=' + encodeURIComponent(check.code || 'otp'));
+  }
+  const cfg = loadNotiProvisionConfig();
+  if (!cfg.apiKey) {
+    return res.redirect('/admin/settings?provisionRevealErr=none');
+  }
+  appendConfigChangeLog({
+    action: 'noti_provision_api_key_reveal',
+    actor: req.session.adminUser || 'unknown',
+    clientIp: (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '',
+    payload: { apiKeySource: cfg.apiKeySource },
+  });
+  stashProvisionApiKeyRevealSession(req, cfg.apiKey, 'reveal');
+  return res.redirect('/admin/settings?provisionReveal=1');
 });
 
 app.post('/admin/settings/chillpay-credentials', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
@@ -13020,37 +13926,66 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     }
   }
   const enableDevInternalSaved = enableDevInternal === 'on' || relayOffDevDedicatedSaved;
-  MERCHANTS.set(merchantId, {
-    ...prev,
-    merchantId,
-    routeCallbackKey: chillCb,
-    routeResultKey: chillRs,
-    callbackUrl: cbSaved,
-    resultUrl: rsSaved,
-    routeNo: pgKind === 'jpay' ? rnSaved : rnSaved || '7',
-    internalCustomerId: pgKind === 'jpay' ? '' : icSaved || 'M035594',
-    internalTargetId: internalTargetId || '',
-    enableRelay: enableRelayOn,
-    enableInternal: enableInternal === 'on',
-    enableDevInternal: enableDevInternalSaved,
-    enableDealmaiWebhook: enableDealmaiWebhook === 'on',
-    dealmaiPartnerCode: String(rawDealmaiPartnerCode || '').trim(),
-    relayOffForwardTarget: relayOffForwardSaved,
-    relayOffInternalCallbackUrl: relayOffInternalCbSaved,
-    relayOffInternalResultUrl: relayOffInternalRsSaved,
-    relayOffDevCallbackUrl: relayOffDevCbSaved,
-    relayOffDevResultUrl: relayOffDevRsSaved,
-    relayOffDevDedicatedUse: relayOffDevDedicatedSaved,
-    relayFormat: fmt,
-    jpayRouteCallbackKey: jpayCb,
-    jpayRouteResultKey: jpayRs,
-    jpayCallbackUrl: '',
-    jpayResultUrl: '',
-    merchantPgKind: pgKind,
-    chillpayRecurring: chillpayRecurringYn,
-    resultDeliveryMode: resultDeliveryModeSaved,
-    relayEnrichmentMode: relayEnrichmentModeSaved,
-  });
+  let merchantRecord;
+  if (pgKind === 'jpay') {
+    merchantRecord = buildJpayMerchantObject({
+      merchantId,
+      slot: jpaySlotSaved,
+      callbackUrl: cbSaved,
+      resultUrl: rsSaved,
+      routeNo: rnSaved,
+      internalTargetId,
+      options: {
+        enableRelay: enableRelayOn,
+        enableInternal: enableInternal === 'on',
+        enableDevInternal: enableDevInternalSaved,
+        relayFormat: fmt,
+        resultDeliveryMode: resultDeliveryModeSaved,
+      },
+      prev,
+    });
+    merchantRecord.enableDealmaiWebhook = enableDealmaiWebhook === 'on';
+    merchantRecord.dealmaiPartnerCode = String(rawDealmaiPartnerCode || '').trim();
+    merchantRecord.relayOffForwardTarget = relayOffForwardSaved;
+    merchantRecord.relayOffInternalCallbackUrl = relayOffInternalCbSaved;
+    merchantRecord.relayOffInternalResultUrl = relayOffInternalRsSaved;
+    merchantRecord.relayOffDevCallbackUrl = relayOffDevCbSaved;
+    merchantRecord.relayOffDevResultUrl = relayOffDevRsSaved;
+    merchantRecord.relayOffDevDedicatedUse = relayOffDevDedicatedSaved;
+  } else {
+    merchantRecord = {
+      ...prev,
+      merchantId,
+      routeCallbackKey: chillCb,
+      routeResultKey: chillRs,
+      callbackUrl: cbSaved,
+      resultUrl: rsSaved,
+      routeNo: rnSaved || '7',
+      internalCustomerId: icSaved || 'M035594',
+      internalTargetId: internalTargetId || '',
+      enableRelay: enableRelayOn,
+      enableInternal: enableInternal === 'on',
+      enableDevInternal: enableDevInternalSaved,
+      enableDealmaiWebhook: enableDealmaiWebhook === 'on',
+      dealmaiPartnerCode: String(rawDealmaiPartnerCode || '').trim(),
+      relayOffForwardTarget: relayOffForwardSaved,
+      relayOffInternalCallbackUrl: relayOffInternalCbSaved,
+      relayOffInternalResultUrl: relayOffInternalRsSaved,
+      relayOffDevCallbackUrl: relayOffDevCbSaved,
+      relayOffDevResultUrl: relayOffDevRsSaved,
+      relayOffDevDedicatedUse: relayOffDevDedicatedSaved,
+      relayFormat: fmt,
+      jpayRouteCallbackKey: jpayCb,
+      jpayRouteResultKey: jpayRs,
+      jpayCallbackUrl: '',
+      jpayResultUrl: '',
+      merchantPgKind: pgKind,
+      chillpayRecurring: chillpayRecurringYn,
+      resultDeliveryMode: resultDeliveryModeSaved,
+      relayEnrichmentMode: relayEnrichmentModeSaved,
+    };
+  }
+  MERCHANTS.set(merchantId, merchantRecord);
 
   console.log('[관리자] 가맹점 저장:', merchantId, MERCHANTS.get(merchantId));
   saveMerchants();
@@ -13095,6 +14030,57 @@ app.post('/admin/merchants/delete', requireAuth, requirePage('merchants'), (req,
   });
 
   return res.redirect(merchantsRegisterKindUrl(inferMerchantPgKind(before)));
+});
+
+// ICOPAY JPAY Provision API (Bearer 인증)
+app.post('/api/v1/icopay/merchants/provision', (req, res) => {
+  const locale = provisionApiLocale(req);
+  const auth = authenticateIcopayProvisionRequest(req, locale);
+  if (!auth.ok) {
+    return sendProvisionJson(res, auth.status, { success: false, errorCode: auth.errorCode }, locale);
+  }
+  const requestId = String(req.headers['x-icopay-request-id'] || '').trim();
+  if (requestId) {
+    const cached = getProvisionIdempotencyResponse(requestId);
+    if (cached) {
+      return res.status(cached.status).json(cached.body);
+    }
+  }
+  const result = provisionJpayMerchant(req.body, {
+    locale,
+    requestId,
+    clientIp: provisionClientIp(req),
+    actor: 'icopay-provision',
+  });
+  if (!result.ok) {
+    return sendProvisionJson(
+      res,
+      result.status,
+      { success: false, errorCode: result.errorCode, details: result.details || {} },
+      locale,
+    );
+  }
+  if (requestId) {
+    saveProvisionIdempotencyResponse(requestId, result.status, result.body);
+  }
+  return res.status(result.status).json(result.body);
+});
+
+app.get('/api/v1/icopay/merchants/:merchantId', (req, res) => {
+  const locale = provisionApiLocale(req);
+  const auth = authenticateIcopayProvisionRequest(req, locale);
+  if (!auth.ok) {
+    return sendProvisionJson(res, auth.status, { success: false, errorCode: auth.errorCode }, locale);
+  }
+  const pgKind = String(req.query.pgKind || '').toLowerCase().trim();
+  if (pgKind !== 'jpay') {
+    return sendProvisionJson(res, 400, { success: false, errorCode: pgKind ? 'INVALID_PG_KIND' : 'INVALID_REQUEST' }, locale);
+  }
+  const result = getJpayMerchantProvision(req.params.merchantId);
+  if (!result.ok) {
+    return sendProvisionJson(res, result.status, { success: false, errorCode: result.errorCode }, locale);
+  }
+  return res.status(result.status).json(result.body);
 });
 
 // PG 노티 로그 페이지 (수신시간 4타임존, 1건 1줄, Json/callback·json/result)
@@ -26025,6 +27011,24 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
         '</a></div>'
       : '';
   const dedupedBannerDev = buildNotiLogDedupedBannerHtml(locale, esc, 'dev_internal', qDev);
+  const resendMissedBanner =
+    qDev.resendMissed === '1'
+      ? '<div class="alert alert-ok" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#d1fae5;border:1px solid #6ee7b7;color:#065f46;">' +
+        esc(
+          (t(locale, 'dev_internal_resend_missed_ok') || '오늘 누락 개발노티 일괄 재전송 완료') +
+            ' — ' +
+            (t(locale, 'dev_internal_resend_missed_summary') || '대상 {{total}}건 · 성공 {{ok}} · 실패 {{fail}}')
+              .replace('{{total}}', String(qDev.rmTotal || '0'))
+              .replace('{{ok}}', String(qDev.rmOk || '0'))
+              .replace('{{fail}}', String(qDev.rmFail || '0')),
+        ) +
+        '</div>'
+      : qDev.resendMissed === 'fail'
+        ? '<div class="alert alert-fail" style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;">' +
+          esc(t(locale, 'dev_internal_resend_missed_fail') || '누락 개발노티 일괄 재전송 실패') +
+          (qDev.reason ? ': ' + esc(String(qDev.reason)) : '') +
+          '</div>'
+        : '';
   const reversedDev = [...DEV_INTERNAL_LOGS].slice().reverse();
   const deletedNotiLogsDev = loadNotiLogUiDeletedList();
   const memberDev = getMemberForAccessControl(req);
@@ -26185,6 +27189,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       ${getAdminTopbar(locale, clientIp, nowDate, nowTh, adminUser, req.originalUrl)}
       <div class="card">
       ${resendMsgDev}
+      ${resendMissedBanner}
       ${deletedBannerDev}
       ${dedupedBannerDev}
       <h1 style="margin:0 0 12px 0;font-size:1.35rem;font-weight:700;color:#111827;">${t(locale, 'nav_dev_internal_noti_log')} (${totalCountDevInternal})</h1>
@@ -26329,6 +27334,38 @@ app.post('/admin/dev-internal/resend', requireAuth, requirePageAny(['dev_interna
     return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(reason) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
   } catch (err) {
     return res.redirect(base + '?resend=fail&reason=' + encodeURIComponent(err.message || String(err)) + '&resendKind=' + encodeURIComponent(resendKind) + srcQ);
+  }
+});
+
+app.post('/admin/dev-internal/resend-missed-today', requireAuth, requireSettingsOrRedirect, requirePage('settings'), async (req, res) => {
+  const srcQ = req.body && req.body.source === 'jpay' ? '&source=jpay' : '';
+  try {
+    const summary = await resendMissedDevInternalFromPgLogs({ dateYmd: 'today', forceResend: true });
+    appendConfigChangeLog({
+      action: 'dev_internal_resend_missed_today',
+      actor: req.session.adminUser || 'unknown',
+      clientIp: (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '',
+      payload: {
+        targetYmd: summary.targetYmd,
+        candidates: summary.candidates,
+        ok: summary.ok,
+        fail: summary.fail,
+        skipped: summary.skipped,
+      },
+    });
+    return res.redirect(
+      '/admin/dev-internal?resendMissed=1&rmOk=' +
+        encodeURIComponent(String(summary.ok)) +
+        '&rmFail=' +
+        encodeURIComponent(String(summary.fail)) +
+        '&rmTotal=' +
+        encodeURIComponent(String(summary.candidates)) +
+        srcQ,
+    );
+  } catch (e) {
+    return res.redirect(
+      '/admin/dev-internal?resendMissed=fail&reason=' + encodeURIComponent((e && e.message) || String(e)) + srcQ,
+    );
   }
 });
 
@@ -28539,12 +29576,30 @@ app.get('/admin/traffic', requireAuth, requirePage('traffic_analysis'), (req, re
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`[${APP_ENV}] PG 노티 미들웨어 서버 listening on port ${PORT} (config: ${CONFIG_DIR})`);
-  console.log('POST /noti/:merchantId');
-  if (!INTERNAL_NOTI_URL) {
-    console.log('INTERNAL_NOTI_URL 미설정 → 전산 전송 비활성');
-  }
-  startPgTransactionFetchInterval();
-  setInterval(tickPgNotifyDeliveryWorker, PG_NOTIFY_DELIVERY.workerIntervalMs);
-});
+if (process.env.NOTI_RUN_RESEND_DEV_MISSED === '1') {
+  (async () => {
+    const dryRun = process.env.NOTI_RESEND_DEV_DRY_RUN === '1';
+    try {
+      const summary = await resendMissedDevInternalFromPgLogs({
+        dateYmd: process.env.NOTI_RESEND_DEV_DATE || 'today',
+        dryRun,
+        forceResend: true,
+      });
+      console.log('[resend-missed-dev-internal]', JSON.stringify(summary, null, 2));
+      process.exit(summary.fail > 0 ? 1 : 0);
+    } catch (e) {
+      console.error('[resend-missed-dev-internal] fatal', e);
+      process.exit(1);
+    }
+  })();
+} else {
+  app.listen(PORT, () => {
+    console.log(`[${APP_ENV}] PG 노티 미들웨어 서버 listening on port ${PORT} (config: ${CONFIG_DIR})`);
+    console.log('POST /noti/:merchantId');
+    if (!INTERNAL_NOTI_URL) {
+      console.log('INTERNAL_NOTI_URL 미설정 → 전산 전송 비활성');
+    }
+    startPgTransactionFetchInterval();
+    setInterval(tickPgNotifyDeliveryWorker, PG_NOTIFY_DELIVERY.workerIntervalMs);
+  });
+}
