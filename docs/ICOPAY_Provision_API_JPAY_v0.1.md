@@ -96,6 +96,7 @@ X-Icopay-Request-Id: {uuid}          (선택, 멱등·감사용)
   },
   "icopayMeta": {
     "compId": "M000123",
+    "compName": "サンプル加盟店",
     "orgUnitId": 12345,
     "provisionedBy": "icopay-ops"
   }
@@ -119,7 +120,11 @@ X-Icopay-Request-Id: {uuid}          (선택, 멱등·감사용)
 | `options.enableDevInternal` | N | 기본 `false` |
 | `options.relayFormat` | N | `raw` \| `json` \| `form` |
 | `options.resultDeliveryMode` | N | `auto` \| `autot` \| `no_browser_redirect` \| `post_force_redirect` |
-| `icopayMeta` | N | 감사·추적용(저장만, 라우팅 로직에 미사용) |
+| `icopayMeta` | N | 감사·표시용. **목록에 업체명 표시하려면 `compName` 권장** |
+| `icopayMeta.compId` | N | ICOPAY 업체코드 (없으면 `merchantId` 사용) |
+| `icopayMeta.compName` | N | ICOPAY 업체명 → NOTI 가맹점 목록에 2줄 표시 (코드 / 업체명). 별칭: `compNm`, 또는 최상위 `name`/`compName` |
+| `icopayMeta.orgUnitId` | N | ICOPAY 조직 단위 ID |
+| `icopayMeta.provisionedBy` | N | 호출 주체 식별 |
 
 #### NOTI 내부 저장 매핑 (기존 admin POST 와 동일)
 
@@ -131,6 +136,8 @@ X-Icopay-Request-Id: {uuid}          (선택, 멱등·감사용)
 | `routeNo` | `j{N}` (또는 요청 `routeNo`) |
 | `callbackUrl` / `resultUrl` | 요청 값 |
 | `internalTargetId` | 요청 값 |
+| `icopayProvisionMeta` | 요청 `icopayMeta` (정규화) |
+| `name` / `label` | `icopayMeta.compName` (목록 2줄 표시용) |
 
 #### 성공 응답 `201 Created`
 
@@ -247,6 +254,7 @@ curl -sS -X POST "https://noti.icopay.net/api/v1/icopay/merchants/provision" \
     "resultUrl": "https://merchant.example.com/icopay/pay-result",
     "icopayMeta": {
       "compId": "M000123",
+      "compName": "サンプル加盟店",
       "orgUnitId": 12345,
       "provisionedBy": "icopay-ops"
     }

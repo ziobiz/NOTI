@@ -2909,7 +2909,42 @@ function normalizeJpayProvisionOptions(options) {
       : rdmRaw === 'autot'
       ? 'autot'
       : 'auto';
-  return { enableRelay, enableInternal, enableDevInternal, relayFormat, resultDeliveryMode };
+  let relayOffForwardTarget = normalizeMerchantRelayOffForwardTarget(o.relayOffForwardTarget);
+  if (enableRelay) {
+    relayOffForwardTarget = '';
+  }
+  const relayOffDevCallbackUrl = String(o.relayOffDevCallbackUrl || '').trim();
+  const relayOffDevResultUrl = String(o.relayOffDevResultUrl || '').trim();
+  const relayOffInternalCallbackUrl = String(o.relayOffInternalCallbackUrl || '').trim();
+  const relayOffInternalResultUrl = String(o.relayOffInternalResultUrl || '').trim();
+  const relayOffDevDedicatedUse =
+    !enableRelay &&
+    relayOffForwardTarget === 'dev_internal' &&
+    (o.relayOffDevDedicatedUse === true ||
+      o.relayOffDevDedicatedUse === 'Y' ||
+      o.relayOffDevDedicatedUse === 'on' ||
+      o.relayOffDevDedicatedUse === 1);
+  const enableDealmaiWebhook =
+    o.enableDealmaiWebhook === true ||
+    o.enableDealmaiWebhook === 'Y' ||
+    o.enableDealmaiWebhook === 'on' ||
+    o.enableDealmaiWebhook === 1;
+  const dealmaiPartnerCode = String(o.dealmaiPartnerCode || '').trim();
+  return {
+    enableRelay,
+    enableInternal,
+    enableDevInternal: enableDevInternal || relayOffDevDedicatedUse,
+    relayFormat,
+    resultDeliveryMode,
+    relayOffForwardTarget,
+    relayOffDevCallbackUrl,
+    relayOffDevResultUrl,
+    relayOffInternalCallbackUrl,
+    relayOffInternalResultUrl,
+    relayOffDevDedicatedUse,
+    enableDealmaiWebhook,
+    dealmaiPartnerCode,
+  };
 }
 
 function jpayMerchantProvisionSnapshot(rec) {
@@ -2928,6 +2963,18 @@ function jpayMerchantProvisionSnapshot(rec) {
     enableDevInternal: !!rec.enableDevInternal,
     relayFormat: String(rec.relayFormat || 'raw').trim(),
     resultDeliveryMode: String(rec.resultDeliveryMode || 'auto').trim(),
+    enableDealmaiWebhook: !!rec.enableDealmaiWebhook,
+    dealmaiPartnerCode: String(rec.dealmaiPartnerCode || '').trim(),
+    relayOffForwardTarget: normalizeMerchantRelayOffForwardTarget(rec.relayOffForwardTarget),
+    relayOffDevCallbackUrl: String(rec.relayOffDevCallbackUrl || '').trim(),
+    relayOffDevResultUrl: String(rec.relayOffDevResultUrl || '').trim(),
+    relayOffDevDedicatedUse: !!rec.relayOffDevDedicatedUse,
+    name: String(rec.name || rec.label || (rec.icopayProvisionMeta && rec.icopayProvisionMeta.compName) || '').trim(),
+    compName: String(
+      (rec.icopayProvisionMeta && (rec.icopayProvisionMeta.compName || rec.icopayProvisionMeta.compNm)) ||
+        rec.name ||
+        '',
+    ).trim(),
   };
 }
 
@@ -2963,14 +3010,14 @@ function buildJpayMerchantObject(input) {
     enableRelay: opts.enableRelay,
     enableInternal: opts.enableInternal,
     enableDevInternal: opts.enableDevInternal,
-    enableDealmaiWebhook: false,
-    dealmaiPartnerCode: '',
-    relayOffForwardTarget: '',
-    relayOffInternalCallbackUrl: '',
-    relayOffInternalResultUrl: '',
-    relayOffDevCallbackUrl: '',
-    relayOffDevResultUrl: '',
-    relayOffDevDedicatedUse: false,
+    enableDealmaiWebhook: opts.enableDealmaiWebhook,
+    dealmaiPartnerCode: opts.dealmaiPartnerCode,
+    relayOffForwardTarget: opts.relayOffForwardTarget,
+    relayOffInternalCallbackUrl: opts.relayOffInternalCallbackUrl,
+    relayOffInternalResultUrl: opts.relayOffInternalResultUrl,
+    relayOffDevCallbackUrl: opts.relayOffDevCallbackUrl,
+    relayOffDevResultUrl: opts.relayOffDevResultUrl,
+    relayOffDevDedicatedUse: opts.relayOffDevDedicatedUse,
     relayFormat: opts.relayFormat,
     jpayRouteCallbackKey: jpayCb,
     jpayRouteResultKey: jpayRs,
@@ -2981,18 +3028,84 @@ function buildJpayMerchantObject(input) {
     resultDeliveryMode: opts.resultDeliveryMode,
     relayEnrichmentMode: 'plain',
   };
-  if (icopayMeta && typeof icopayMeta === 'object') {
-    out.icopayProvisionMeta = icopayMeta;
+  const metaNorm = normalizeIcopayProvisionMeta(icopayMeta, merchantId);
+  if (metaNorm) {
+    out.icopayProvisionMeta = metaNorm;
+    if (metaNorm.compName) {
+      out.name = metaNorm.compName;
+      out.label = metaNorm.compName;
+    }
   }
   return out;
+}
+
+/** Provision/Update 요청에서 ICOPAY 업체코드·업체명 정규화 */
+function normalizeIcopayProvisionMeta(rawMeta, merchantId) {
+  const base = rawMeta && typeof rawMeta === 'object' ? { ...rawMeta } : {};
+  const compId = String(base.compId || merchantId || '').trim();
+  const compName = String(
+    base.compName || base.compNm || base.merchantName || base.companyName || '',
+  ).trim();
+  if (!compId && !compName && Object.keys(base).length === 0) return null;
+  if (compId) base.compId = compId;
+  if (compName) {
+    base.compName = compName;
+    delete base.compNm;
+  }
+  return base;
+}
+
+/** body.icopayMeta + 최상위 name/compName 폴백 */
+function resolveIcopayMetaFromProvisionBody(body, merchantId) {
+  const meta =
+    body && body.icopayMeta && typeof body.icopayMeta === 'object' ? { ...body.icopayMeta } : {};
+  const topName = String(
+    (body && (body.compName || body.name || body.merchantName || body.companyName)) || '',
+  ).trim();
+  if (topName && !String(meta.compName || meta.compNm || '').trim()) {
+    meta.compName = topName;
+  }
+  return normalizeIcopayProvisionMeta(meta, merchantId);
+}
+
+function merchantListIdCellHtml(id, m) {
+  const mid = String(id || '').trim();
+  const meta =
+    m && m.icopayProvisionMeta && typeof m.icopayProvisionMeta === 'object' ? m.icopayProvisionMeta : {};
+  const name = String((m && (m.name || m.label)) || meta.compName || meta.compNm || '')
+    .trim()
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  const midEsc = mid.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (!name) return midEsc;
+  return (
+    `<div style="line-height:1.35;"><div style="font-weight:600;">${midEsc}</div>` +
+    `<div style="font-size:12px;color:#64748b;margin-top:2px;">${name}</div></div>`
+  );
 }
 
 function merchantToProvisionApiData(merchant, extras) {
   const m = merchant || {};
   const slot = parseJpayNotiSlotFromToken(extractJpayPathToken(m.jpayRouteCallbackKey));
   const urls = jpayPgPublicUrlsFromKeys(m.jpayRouteCallbackKey, m.jpayRouteResultKey);
+  const meta =
+    m.icopayProvisionMeta && typeof m.icopayProvisionMeta === 'object' ? m.icopayProvisionMeta : null;
+  const compName = String(m.name || m.label || (meta && (meta.compName || meta.compNm)) || '').trim();
   return {
     merchantId: m.merchantId || '',
+    name: compName || undefined,
+    icopayMeta: meta
+      ? {
+          compId: String(meta.compId || m.merchantId || '').trim() || undefined,
+          compName: String(meta.compName || meta.compNm || compName || '').trim() || undefined,
+          orgUnitId: meta.orgUnitId,
+          provisionedBy: meta.provisionedBy,
+          integrationMode: meta.integrationMode,
+        }
+      : compName
+        ? { compId: String(m.merchantId || '').trim() || undefined, compName }
+        : undefined,
     pgKind: 'jpay',
     slot: slot || null,
     routeNo: String(m.routeNo || '').trim() || (slot ? jpayRouteTokenForSlot(slot) : ''),
@@ -3002,6 +3115,16 @@ function merchantToProvisionApiData(merchant, extras) {
     internalTargetId: String(m.internalTargetId || '').trim(),
     callbackUrl: String(m.callbackUrl || '').trim(),
     resultUrl: String(m.resultUrl || '').trim(),
+    enableRelay: m.enableRelay !== false,
+    enableInternal: !!m.enableInternal,
+    enableDevInternal: !!m.enableDevInternal,
+    enableDealmaiWebhook: !!m.enableDealmaiWebhook,
+    dealmaiPartnerCode: String(m.dealmaiPartnerCode || '').trim(),
+    relayOffForwardTarget: normalizeMerchantRelayOffForwardTarget(m.relayOffForwardTarget),
+    relayOffDevCallbackUrl: String(m.relayOffDevCallbackUrl || '').trim(),
+    relayOffDevResultUrl: String(m.relayOffDevResultUrl || '').trim(),
+    relayOffDevDedicatedUse: !!m.relayOffDevDedicatedUse,
+    resultDeliveryMode: String(m.resultDeliveryMode || 'auto').trim(),
     created: extras && extras.created === false ? false : true,
     provisionRequestId: extras && extras.provisionRequestId ? String(extras.provisionRequestId) : undefined,
   };
@@ -3112,7 +3235,26 @@ function provisionJpayMerchant(body, meta) {
     return { ok: false, status: 400, errorCode: 'INVALID_INTERNAL_TARGET' };
   }
 
-  const options = normalizeJpayProvisionOptions(body.options);
+  const optionsIn = body.options && typeof body.options === 'object' ? { ...body.options } : {};
+  if (body.enableDealmaiWebhook != null && optionsIn.enableDealmaiWebhook == null) {
+    optionsIn.enableDealmaiWebhook = body.enableDealmaiWebhook;
+  }
+  if (body.dealmaiPartnerCode != null && !optionsIn.dealmaiPartnerCode) {
+    optionsIn.dealmaiPartnerCode = body.dealmaiPartnerCode;
+  }
+  if (body.relayOffForwardTarget != null && optionsIn.relayOffForwardTarget == null) {
+    optionsIn.relayOffForwardTarget = body.relayOffForwardTarget;
+  }
+  if (body.relayOffDevCallbackUrl != null && optionsIn.relayOffDevCallbackUrl == null) {
+    optionsIn.relayOffDevCallbackUrl = body.relayOffDevCallbackUrl;
+  }
+  if (body.relayOffDevResultUrl != null && optionsIn.relayOffDevResultUrl == null) {
+    optionsIn.relayOffDevResultUrl = body.relayOffDevResultUrl;
+  }
+  if (body.relayOffDevDedicatedUse != null && optionsIn.relayOffDevDedicatedUse == null) {
+    optionsIn.relayOffDevDedicatedUse = body.relayOffDevDedicatedUse;
+  }
+  const options = normalizeJpayProvisionOptions(optionsIn);
   const callbackUrl = String(body.callbackUrl || '').trim();
   const resultUrl = String(body.resultUrl || '').trim();
   if (options.enableRelay && (!callbackUrl || !resultUrl)) {
@@ -3144,7 +3286,7 @@ function provisionJpayMerchant(body, meta) {
     internalTargetId,
     options,
     prev: existing || {},
-    icopayMeta: body.icopayMeta,
+    icopayMeta: resolveIcopayMetaFromProvisionBody(body, merchantId),
   });
 
   const desiredSnap = jpayMerchantProvisionSnapshot(desiredRecord);
@@ -3177,7 +3319,7 @@ function provisionJpayMerchant(body, meta) {
     before: existing,
     after: MERCHANTS.get(merchantId),
     provisionRequestId: requestId || undefined,
-    icopayMeta: body.icopayMeta,
+    icopayMeta: MERCHANTS.get(merchantId) && MERCHANTS.get(merchantId).icopayProvisionMeta,
   });
 
   const data = merchantToProvisionApiData(MERCHANTS.get(merchantId), {
@@ -3195,6 +3337,152 @@ function getJpayMerchantProvision(merchantId) {
     return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
   }
   return { ok: true, status: 200, body: { success: true, data: merchantToProvisionApiData(m, { created: false }) } };
+}
+
+/** ICOPAY PUT — 슬롯·PG URL 유지, 옵션·가맹 URL·대체송부 갱신 */
+function updateJpayMerchantProvision(merchantId, body, meta) {
+  const locale = (meta && meta.locale) || 'ko';
+  const requestId = meta && meta.requestId ? String(meta.requestId).trim() : '';
+  const clientIp = (meta && meta.clientIp) || '';
+  const actor = (meta && meta.actor) || 'icopay-provision';
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  if (!body || typeof body !== 'object') {
+    return { ok: false, status: 400, errorCode: 'INVALID_REQUEST' };
+  }
+  const existing = MERCHANTS.get(id);
+  if (!existing || inferMerchantPgKind(existing) !== 'jpay') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  const pgKind = String(body.pgKind || 'jpay').toLowerCase().trim();
+  if (pgKind && pgKind !== 'jpay') {
+    return { ok: false, status: 400, errorCode: 'INVALID_PG_KIND' };
+  }
+  let internalTargetId = String(body.internalTargetId != null ? body.internalTargetId : existing.internalTargetId || '').trim();
+  if (internalTargetId && !INTERNAL_TARGETS.has(internalTargetId)) {
+    return { ok: false, status: 400, errorCode: 'INVALID_INTERNAL_TARGET' };
+  }
+  if (!internalTargetId) {
+    internalTargetId = String(existing.internalTargetId || '').trim();
+  }
+  const optionsIn = body.options && typeof body.options === 'object' ? { ...body.options } : {};
+  if (body.enableDealmaiWebhook != null && optionsIn.enableDealmaiWebhook == null) {
+    optionsIn.enableDealmaiWebhook = body.enableDealmaiWebhook;
+  }
+  if (body.dealmaiPartnerCode != null && !optionsIn.dealmaiPartnerCode) {
+    optionsIn.dealmaiPartnerCode = body.dealmaiPartnerCode;
+  }
+  if (body.relayOffForwardTarget != null && optionsIn.relayOffForwardTarget == null) {
+    optionsIn.relayOffForwardTarget = body.relayOffForwardTarget;
+  }
+  if (body.relayOffDevCallbackUrl != null && optionsIn.relayOffDevCallbackUrl == null) {
+    optionsIn.relayOffDevCallbackUrl = body.relayOffDevCallbackUrl;
+  }
+  if (body.relayOffDevResultUrl != null && optionsIn.relayOffDevResultUrl == null) {
+    optionsIn.relayOffDevResultUrl = body.relayOffDevResultUrl;
+  }
+  if (body.relayOffDevDedicatedUse != null && optionsIn.relayOffDevDedicatedUse == null) {
+    optionsIn.relayOffDevDedicatedUse = body.relayOffDevDedicatedUse;
+  }
+  // options 미전달 시 기존 값 유지 힌트
+  if (optionsIn.enableRelay == null) optionsIn.enableRelay = existing.enableRelay !== false;
+  if (optionsIn.enableInternal == null) optionsIn.enableInternal = !!existing.enableInternal;
+  if (optionsIn.enableDevInternal == null) optionsIn.enableDevInternal = !!existing.enableDevInternal;
+  if (optionsIn.relayOffForwardTarget == null) optionsIn.relayOffForwardTarget = existing.relayOffForwardTarget || '';
+  if (optionsIn.relayOffDevCallbackUrl == null) optionsIn.relayOffDevCallbackUrl = existing.relayOffDevCallbackUrl || '';
+  if (optionsIn.relayOffDevResultUrl == null) optionsIn.relayOffDevResultUrl = existing.relayOffDevResultUrl || '';
+  if (optionsIn.relayOffDevDedicatedUse == null) optionsIn.relayOffDevDedicatedUse = !!existing.relayOffDevDedicatedUse;
+  if (optionsIn.enableDealmaiWebhook == null) optionsIn.enableDealmaiWebhook = !!existing.enableDealmaiWebhook;
+  if (!optionsIn.dealmaiPartnerCode) optionsIn.dealmaiPartnerCode = existing.dealmaiPartnerCode || '';
+  if (!optionsIn.resultDeliveryMode) optionsIn.resultDeliveryMode = existing.resultDeliveryMode || 'auto';
+  const options = normalizeJpayProvisionOptions(optionsIn);
+  const callbackUrl =
+    body.callbackUrl != null ? String(body.callbackUrl || '').trim() : String(existing.callbackUrl || '').trim();
+  const resultUrl =
+    body.resultUrl != null ? String(body.resultUrl || '').trim() : String(existing.resultUrl || '').trim();
+  if (options.enableRelay && (!callbackUrl || !resultUrl)) {
+    return { ok: false, status: 400, errorCode: 'MERCHANT_URL_REQUIRED' };
+  }
+  const slot =
+    parseJpayNotiSlotFromToken(extractJpayPathToken(existing.jpayRouteCallbackKey)) ||
+    parseJpayNotiSlotFromToken(String(existing.routeNo || '').replace(/^j/i, ''));
+  if (!slot) {
+    return { ok: false, status: 400, errorCode: 'JPAY_SLOT_INVALID' };
+  }
+  const desiredRecord = buildJpayMerchantObject({
+    merchantId: id,
+    slot,
+    callbackUrl,
+    resultUrl,
+    routeNo: existing.routeNo,
+    internalTargetId,
+    options,
+    prev: existing,
+    icopayMeta: (() => {
+      const fromBody = resolveIcopayMetaFromProvisionBody(body, id);
+      const prevMeta =
+        existing.icopayProvisionMeta && typeof existing.icopayProvisionMeta === 'object'
+          ? existing.icopayProvisionMeta
+          : null;
+      if (fromBody) return { ...(prevMeta || {}), ...fromBody };
+      return prevMeta;
+    })(),
+  });
+  // 슬롯·Route 키는 변경 불가
+  desiredRecord.jpayRouteCallbackKey = existing.jpayRouteCallbackKey;
+  desiredRecord.jpayRouteResultKey = existing.jpayRouteResultKey;
+  desiredRecord.routeNo = existing.routeNo;
+
+  MERCHANTS.set(id, desiredRecord);
+  try {
+    saveMerchants();
+  } catch (e) {
+    MERCHANTS.set(id, existing);
+    return { ok: false, status: 503, errorCode: 'NOTI_CONFIG_LOCKED', details: { message: (e && e.message) || String(e) } };
+  }
+  appendConfigChangeLog({
+    type: 'merchant_update',
+    source: 'icopay-provision',
+    actor,
+    clientIp,
+    merchantId: id,
+    before: existing,
+    after: MERCHANTS.get(id),
+    provisionRequestId: requestId || undefined,
+    icopayMeta: MERCHANTS.get(id) && MERCHANTS.get(id).icopayProvisionMeta,
+  });
+  const data = merchantToProvisionApiData(MERCHANTS.get(id), {
+    created: false,
+    provisionRequestId: requestId || undefined,
+  });
+  return { ok: true, status: 200, body: { success: true, data } };
+}
+
+function deleteJpayMerchantProvision(merchantId, force, meta) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const existing = MERCHANTS.get(id);
+  if (!existing || inferMerchantPgKind(existing) !== 'jpay') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  MERCHANTS.delete(id);
+  try {
+    saveMerchants();
+  } catch (e) {
+    MERCHANTS.set(id, existing);
+    return { ok: false, status: 503, errorCode: 'NOTI_CONFIG_LOCKED', details: { message: (e && e.message) || String(e) } };
+  }
+  appendConfigChangeLog({
+    type: 'merchant_delete',
+    source: 'icopay-provision',
+    actor: (meta && meta.actor) || 'icopay-provision',
+    clientIp: (meta && meta.clientIp) || '',
+    merchantId: id,
+    before: existing,
+    after: null,
+    force: !!force,
+  });
+  return { ok: true, status: 200, body: { success: true, data: { deleted: true, merchantId: id, pgKind: 'jpay' } } };
 }
 
 /** 저장값이 없을 때만 사용: 환경변수 SYSTEM_MONITOR_MONTHLY_QUOTA_GB (기본 300GB) */
@@ -12663,7 +12951,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   const merchantsListQueryBase = `kind=${registerKind}`;
   const merchantsSortHref = (sort) => `/admin/merchants?${merchantsListQueryBase}&sort=${sort}`;
   const merchantsColResizeTitle = escAttr(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절');
-  const merchantsColWidths = [90, 150, 150, 150, 150, 70, 90, 100, 88, 96, 56, 50, 50, 50, 50, 88, 80];
+  const merchantsColWidths = [140, 150, 150, 150, 150, 70, 90, 100, 88, 96, 56, 50, 50, 50, 50, 88, 80];
   const merchantsColLabels = [
     t(locale, 'cr_th_merchant'),
     t(locale, 'merchants_th_pg_callurl'),
@@ -12740,7 +13028,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       const confirmDel = (t(locale, 'merchants_confirm_delete') || '').replace(/'/g, "\\'");
       const confirmDel2 = (t(locale, 'merchants_confirm_delete_second') || '').replace(/'/g, "\\'");
       return `<tr>
-        <td>${id}</td>
+        <td>${merchantListIdCellHtml(id, m)}</td>
         <td class="cell-url">${pgCbDisplay || '-'}</td>
         <td class="cell-url">${pgRsDisplay || '-'}</td>
         <td class="cell-url">${cbUrl}</td>
@@ -14146,6 +14434,53 @@ app.get('/api/v1/icopay/merchants/:merchantId', (req, res) => {
     return sendProvisionJson(res, 400, { success: false, errorCode: pgKind ? 'INVALID_PG_KIND' : 'INVALID_REQUEST' }, locale);
   }
   const result = getJpayMerchantProvision(req.params.merchantId);
+  if (!result.ok) {
+    return sendProvisionJson(res, result.status, { success: false, errorCode: result.errorCode }, locale);
+  }
+  return res.status(result.status).json(result.body);
+});
+
+app.put('/api/v1/icopay/merchants/:merchantId', (req, res) => {
+  const locale = provisionApiLocale(req);
+  const auth = authenticateIcopayProvisionRequest(req, locale);
+  if (!auth.ok) {
+    return sendProvisionJson(res, auth.status, { success: false, errorCode: auth.errorCode }, locale);
+  }
+  const result = updateJpayMerchantProvision(req.params.merchantId, req.body, {
+    locale,
+    requestId: String(req.headers['x-icopay-request-id'] || '').trim(),
+    clientIp: provisionClientIp(req),
+    actor: 'icopay-provision',
+  });
+  if (!result.ok) {
+    return sendProvisionJson(
+      res,
+      result.status,
+      { success: false, errorCode: result.errorCode, details: result.details || {} },
+      locale,
+    );
+  }
+  return res.status(result.status).json(result.body);
+});
+
+app.delete('/api/v1/icopay/merchants/:merchantId', (req, res) => {
+  const locale = provisionApiLocale(req);
+  const auth = authenticateIcopayProvisionRequest(req, locale);
+  if (!auth.ok) {
+    return sendProvisionJson(res, auth.status, { success: false, errorCode: auth.errorCode }, locale);
+  }
+  const pgKind = String(req.query.pgKind || 'jpay').toLowerCase().trim();
+  if (pgKind && pgKind !== 'jpay') {
+    return sendProvisionJson(res, 400, { success: false, errorCode: 'INVALID_PG_KIND' }, locale);
+  }
+  const force =
+    String(req.query.force || '').toLowerCase() === 'true' ||
+    String(req.query.force || '') === '1';
+  const result = deleteJpayMerchantProvision(req.params.merchantId, force, {
+    locale,
+    clientIp: provisionClientIp(req),
+    actor: 'icopay-provision',
+  });
   if (!result.ok) {
     return sendProvisionJson(res, result.status, { success: false, errorCode: result.errorCode }, locale);
   }
