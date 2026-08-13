@@ -5864,31 +5864,57 @@ function appendPgNotiLog(entry) {
   });
 }
 
-/** 노티 로그 행의 PG(대행사): 명시 필드 또는 routeKey(jpay/…) */
+/** 노티 로그 행의 PG(대행사): 명시 필드 또는 routeKey(jpay/… · elementpay/…) */
 function getNotiLogPgAcquirer(log) {
-  if (log && log.pgProvider === 'jpay') return 'jpay';
+  const explicit = log && log.pgProvider != null ? String(log.pgProvider).toLowerCase().trim() : '';
+  if (explicit === 'elementpay' || explicit === 'ep') return 'elementpay';
+  if (explicit === 'jpay') return 'jpay';
+  if (explicit === 'chillpay' || explicit === 'chill') return 'chillpay';
   const rk = log && log.routeKey != null ? String(log.routeKey) : '';
+  if (rk.startsWith('elementpay/') || rk === 'elementpay') return 'elementpay';
   if (rk.startsWith('jpay/')) return 'jpay';
   return 'chillpay';
 }
 
+/** ICOPAY 금액 규칙 키: ElementPay는 JPAY 호환 스키마 → jpay 규칙 사용 */
+function icopayAmountPgKeyFromLog(log) {
+  const p = getNotiLogPgAcquirer(log);
+  return p === 'jpay' || p === 'elementpay' ? 'jpay' : 'chillpay';
+}
+
+function normalizeAdminPgSource(raw) {
+  const p = String(raw || '')
+    .toLowerCase()
+    .trim();
+  if (p === 'elementpay' || p === 'ep' || p === 'element') return 'elementpay';
+  if (p === 'jpay') return 'jpay';
+  if (p === 'chillpay' || p === 'chill') return 'chillpay';
+  return '';
+}
+
 function acquirerLabelFromLog(locale, log) {
-  return getNotiLogPgAcquirer(log) === 'jpay'
-    ? (t(locale, 'pg_provider_jpay') || 'JPAY')
-    : (t(locale, 'pg_provider_chillpay') || 'ChillPay');
+  const pg = getNotiLogPgAcquirer(log);
+  if (pg === 'elementpay') return t(locale, 'pg_provider_elementpay') || 'ElementPay';
+  if (pg === 'jpay') return t(locale, 'pg_provider_jpay') || 'JPAY';
+  return t(locale, 'pg_provider_chillpay') || 'ChillPay';
 }
 
 /** 전산/개발 노티 로그 행의 PG: 저장된 pgProvider 또는 전산 대상 설정 */
 function getInternalLogPgAcquirer(log) {
-  if (log && String(log.pgProvider || '').toLowerCase() === 'jpay') return 'jpay';
+  const explicit = log && log.pgProvider != null ? String(log.pgProvider).toLowerCase().trim() : '';
+  if (explicit === 'elementpay' || explicit === 'ep') return 'elementpay';
+  if (explicit === 'jpay') return 'jpay';
   // JPAY 노티 경로로 쌓인 로그( Soonpay 미러·가맹점 전산 POST ): 예전 행은 pgProvider 없이 저장됨 → JPAY 탭에서 안 보이던 문제 방지
   const rk = log && log.routeKey != null ? String(log.routeKey) : '';
+  if (rk.startsWith('elementpay/') || rk === 'elementpay') return 'elementpay';
   if (rk.startsWith('jpay/')) return 'jpay';
   if (log && (log.jpayRawRelay || log.jpaySoonpayMirror)) return 'jpay';
   const tid = log && log.internalTargetId ? String(log.internalTargetId).trim() : '';
   if (tid && INTERNAL_TARGETS.has(tid)) {
     const it = INTERNAL_TARGETS.get(tid);
-    if (it && String(it.pgProvider || '').toLowerCase() === 'jpay') return 'jpay';
+    const ip = it && String(it.pgProvider || '').toLowerCase();
+    if (ip === 'elementpay' || ip === 'ep') return 'elementpay';
+    if (ip === 'jpay') return 'jpay';
   }
   return 'chillpay';
 }
@@ -5898,18 +5924,20 @@ const DEFAULT_PG_SOURCE = 'jpay';
 
 function getSessionPgSource(req) {
   const s = req && req.session && req.session.lastPgSource;
-  if (s === 'jpay' || s === 'chillpay') return s;
+  const n = normalizeAdminPgSource(s);
+  if (n) return n;
   return DEFAULT_PG_SOURCE;
 }
 
 function setSessionPgSource(req, pg) {
   if (!req || !req.session) return;
-  if (pg === 'jpay' || pg === 'chillpay') req.session.lastPgSource = pg;
+  const n = normalizeAdminPgSource(pg);
+  if (n) req.session.lastPgSource = n;
 }
 
-/** path?a=1 에 source=jpay|chillpay 를 넣거나 갱신 */
+/** path?a=1 에 source=jpay|chillpay|elementpay 를 넣거나 갱신 */
 function withPgSourceInUrl(pathOrUrl, pg) {
-  const s = pg === 'jpay' ? 'jpay' : 'chillpay';
+  const s = normalizeAdminPgSource(pg) || 'chillpay';
   const str = String(pathOrUrl || '');
   const hashIdx = str.indexOf('#');
   const hash = hashIdx >= 0 ? str.slice(hashIdx) : '';
@@ -5934,23 +5962,27 @@ function ensurePgSourceInQuery(req, res) {
   return true;
 }
 
-/** 로그분석·허브 URL: ChillPay/JPAY 모두 source 쿼리 명시 */
+/** 로그분석·허브 URL: ChillPay/JPAY/ElementPay source 쿼리 명시 */
 function logPgQueryWithBase(q, pg, extra) {
   const o = { ...(q || {}), ...(extra || {}) };
-  o.source = pg === 'jpay' ? 'jpay' : 'chillpay';
+  o.source = normalizeAdminPgSource(pg) || 'chillpay';
   return o;
 }
 
-/** 노티 본문 거래 ID (ChillPay TransactionId / JPAY transaction_id) */
+/** 노티 본문 거래 ID (ChillPay TransactionId / JPAY transaction_id / ElementPay id) */
 function notifBodyTxId(body) {
   if (!body || typeof body !== 'object') return '';
-  const v = body.TransactionId ?? body.transactionId ?? body.transaction_id;
+  const v =
+    body.TransactionId ??
+    body.transactionId ??
+    body.transaction_id ??
+    body.id;
   return v != null && String(v).trim() !== '' ? String(v).trim() : '';
 }
 /** 노티 본문 주문번호 */
 function notifBodyOrderNo(body) {
   if (!body || typeof body !== 'object') return '';
-  const v = body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID;
+  const v = body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID ?? body.order;
   return v != null && String(v).trim() !== '' ? String(v).trim() : '';
 }
 /** 무효/환불 시간 구간 판정용 결제 시각 후보 */
@@ -7232,7 +7264,7 @@ function notiHaystackPgResultLog(log, locale, logPg) {
   const amtRaw = body.Amount != null ? body.Amount : (body.amount != null ? body.amount : '');
   const amtDisplay = amtRaw !== '' && amtRaw != null ? String(formatAmountWithSeparator(amtRaw)) : '';
   const currency = String(formatCurrencyForDisplay(body.Currency || body.currency) || body.Currency || body.currency || '');
-  const pgK = logPg === 'jpay' ? 'jpay' : 'chillpay';
+  const pgK = logPg === 'jpay' || logPg === 'elementpay' ? 'jpay' : 'chillpay';
   const amtRawIcopay = getNotiBodyAmountRawForIcopay(body, pgK);
   let icopayStr = '';
   if (amtRawIcopay !== '' && amtRawIcopay != null) {
@@ -8988,7 +9020,7 @@ async function sendVoidOrRefundNoti(log, type, mode) {
   const bodyForId = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body || '{}'); } catch { return {}; } })() : {});
   const txIdForLog = notifBodyTxId(bodyForId);
   const orderNoForLog = notifBodyOrderNo(bodyForId);
-  const pgProv = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+  const pgProv = icopayAmountPgKeyFromLog(log);
   if (!merchant || !log.body) {
     const skipReason = !merchant ? 'no_merchant' : 'no_body';
     appendVoidRefundNotiLog({
@@ -11989,7 +12021,7 @@ function parseListColViewSaveBody(body) {
   const pageId = String((body && body.pageId) || '').trim();
   const pg = String((body && body.pg) || '').trim();
   if (!pageId) return null;
-  if (pg !== 'jpay' && pg !== 'chillpay' && pg !== 'none') return null;
+  if (pg !== 'jpay' && pg !== 'chillpay' && pg !== 'elementpay' && pg !== 'none') return null;
   let enabledKeys = null;
   if (body && body.enabledKeys != null) {
     if (Array.isArray(body.enabledKeys)) enabledKeys = body.enabledKeys.map((k) => String(k).trim()).filter(Boolean);
@@ -16071,7 +16103,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       <p class="admin-page-desc">${t(locale, 'pg_logs_desc_full')}</p>
       ${(() => {
         const fh =
-          (logPg === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          (logPg === 'jpay' || logPg === 'elementpay' ? '<input type="hidden" name="source" value="' + logPg + '" />' : '') +
           (logEnvCurrent === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : '') +
           '<input type="hidden" name="resendKind" value="' +
           esc(resendKind) +
@@ -16427,7 +16459,8 @@ function saveListColViewSettingsFile(data) {
 }
 
 function getListColViewScopeKey(pageId, pg) {
-  const p = pg === 'jpay' ? 'jpay' : pg === 'none' ? 'none' : 'chillpay';
+  const n = normalizeAdminPgSource(pg);
+  const p = n || (pg === 'none' ? 'none' : 'chillpay');
   return String(pageId || 'page').trim() + ':' + p;
 }
 
@@ -16620,6 +16653,8 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#1d4ed8;color:#fff;border:1px solid #1e40af;';
   const jpayOn =
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#15803d;color:#fff;border:1px solid #166534;';
+  const epOn =
+    'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#0f766e;color:#fff;border:1px solid #115e59;';
   const pillInactive =
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:600;font-size:13px;background:#f3f4f6;color:#6b7280;border:1px solid #d1d5db;';
   const withNavEnv = (path) => {
@@ -16627,9 +16662,10 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
     return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'env=sandbox';
   };
   const pgCfg = c.pgSource || {};
-  /** ChillPay (or unset): blue env active; JPAY: green env active */
-  const envTone = pgCfg.active === 'jpay' ? 'jpay' : 'chillpay';
-  const envOn = envTone === 'jpay' ? jpayOn : chillOn;
+  /** ChillPay (or unset): blue env active; JPAY: green; ElementPay: teal */
+  const envTone =
+    pgCfg.active === 'jpay' ? 'jpay' : pgCfg.active === 'elementpay' ? 'elementpay' : 'chillpay';
+  const envOn = envTone === 'jpay' ? jpayOn : envTone === 'elementpay' ? epOn : chillOn;
   const envOff = pillInactive;
   const envCfg = c.env || {};
   let envSeg = '';
@@ -16654,10 +16690,14 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
   let pgSeg = '';
   if (pgCfg.show) {
     const hideJpay = !!pgCfg.hideJpay;
+    const hideEp = !!pgCfg.hideElementpay;
     const chillActive = pgCfg.active === 'chillpay';
     const jpayActive = pgCfg.active === 'jpay';
+    const epActive = pgCfg.active === 'elementpay';
     const chillHref = withNavEnv(pgCfg.chillpayUrl || '#');
     const jpayHref = withNavEnv(pgCfg.jpayUrl || '#');
+    const epHref = withNavEnv(pgCfg.elementpayUrl || pgCfg.epUrl || '#');
+    const epLabel = esc(t(locale, 'pg_provider_elementpay') || 'ElementPay');
     if (hideJpay) {
       pgSeg =
         '<span style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
@@ -16679,7 +16719,19 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
         esc(jpayHref) +
         '" style="' +
         (jpayActive ? jpayOn : pillInactive) +
-        '">JPAY</a></span>';
+        '">JPAY</a>';
+      if (!hideEp) {
+        pgSeg +=
+          '<span style="color:#94a3b8;font-weight:500;">|</span>' +
+          '<a href="' +
+          esc(epHref) +
+          '" style="' +
+          (epActive ? epOn : pillInactive) +
+          '">' +
+          epLabel +
+          '</a>';
+      }
+      pgSeg += '</span>';
     }
   }
   const parts = [];
@@ -16709,9 +16761,11 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
   const showEnv = o.showEnv === true;
   const qChill = logPgQueryWithBase(q, 'chillpay', { page: 1 });
   const qJpay = logPgQueryWithBase(q, 'jpay', { page: 1 });
+  const qEp = logPgQueryWithBase(q, 'elementpay', { page: 1 });
   const envLive = logPgQueryWithBase(q, logPg, { env: 'live', page: 1 });
   const envSand = logPgQueryWithBase(q, logPg, { env: 'sandbox', page: 1 });
   const currentEnv = (o.getEnv && o.getEnv()) || 'live';
+  const active = normalizeAdminPgSource(logPg) || 'chillpay';
   return buildCrHubToolbarHtml(locale, esc, member, {
     navEnv: undefined,
     env: showEnv
@@ -16725,9 +16779,10 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
       : { show: false },
     pgSource: {
       show: true,
-      active: logPg === 'jpay' ? 'jpay' : 'chillpay',
+      active,
       chillpayUrl: pathname + '?' + buildQueryString(qChill),
       jpayUrl: pathname + '?' + buildQueryString(qJpay),
+      elementpayUrl: pathname + '?' + buildQueryString(qEp),
     },
   });
 }
@@ -17681,7 +17736,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   };
   for (const log of list) {
     const body = parseNotiBody(log);
-    const pgK = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+    const pgK = icopayAmountPgKeyFromLog(log);
     const rawIco = getNotiBodyAmountRawForIcopay(body, pgK);
     let amt = 0;
     if (rawIco !== '' && rawIco != null) {
@@ -17799,6 +17854,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     if (o.notiKind && o.notiKind !== 'call') parts.push('notiKind=' + encodeURIComponent(o.notiKind));
     if (o.source === 'chillpay') parts.push('source=' + encodeURIComponent('chillpay'));
     else if (o.source === 'jpay') parts.push('source=' + encodeURIComponent('jpay'));
+    else if (o.source === 'elementpay') parts.push('source=' + encodeURIComponent('elementpay'));
     if (o.env === 'sandbox') parts.push('env=' + encodeURIComponent('sandbox'));
     return parts.length ? '?' + parts.join('&') : '';
   };
@@ -17874,7 +17930,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     { key: 'exclude_paid', label: notiFilterLabel('exclude_paid') },
   ].map((o) => '<option value="' + esc(o.key) + '"' + (statusFilter === o.key ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('');
   const txSourceHidden =
-    '<input type="hidden" name="source" value="' + esc(txSource === 'jpay' ? 'jpay' : 'chillpay') + '" />';
+    '<input type="hidden" name="source" value="' + esc(txSource) + '" />';
   const searchForm =
     '<form method="get" action="' +
     baseUrl +
@@ -17969,6 +18025,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       active: txSource,
       chillpayUrl: baseUrl + qs({ source: 'chillpay', page: 1 }),
       jpayUrl: baseUrl + qs({ source: 'jpay', page: 1 }),
+      elementpayUrl: baseUrl + qs({ source: 'elementpay', page: 1 }),
     },
   });
   const LEGEND_MAX_DESC = 80;
@@ -18093,7 +18150,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
         else if (col.id === 'pg_acquirer') cells.push('<td class="col-acquirer">' + esc(acquirerLabelFromLog(locale, log)) + '</td>');
         else if (col.id === 'merchant') cells.push('<td class="col-merchant">' + esc(log.merchantId || '') + '</td>');
         else if (col.id === 'internal_amount') {
-          const pgK = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+          const pgK = icopayAmountPgKeyFromLog(log);
           const amt = getNotiBodyAmountRawForIcopay(body, pgK);
           let internalAmt = null;
           if (amt != null && amt !== '' && !isVoidedOrRefunded) {
@@ -18443,7 +18500,7 @@ function aggregateNotiLogsByDay(list, chillTz, dateSort) {
     const bucket = byDay[ymd];
     bucket.count++;
     const body = parseNotiBody(log);
-    const pgK = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+    const pgK = icopayAmountPgKeyFromLog(log);
     const rawIco = getNotiBodyAmountRawForIcopay(body, pgK);
     let amt = 0;
     if (rawIco !== '' && rawIco != null) {
@@ -18677,6 +18734,7 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     if (o.env === 'sandbox') parts.push('env=' + encodeURIComponent('sandbox'));
     if (o.source === 'chillpay') parts.push('source=' + encodeURIComponent('chillpay'));
     else if (o.source === 'jpay') parts.push('source=' + encodeURIComponent('jpay'));
+    else if (o.source === 'elementpay') parts.push('source=' + encodeURIComponent('elementpay'));
     return parts.length ? '?' + parts.join('&') : '';
   };
   const exportUrl = baseUrl + '/export' + qs();
@@ -18729,7 +18787,7 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     '" style="display:inline-flex;align-items:center;gap:6px;margin-left:8px;flex-wrap:wrap;">' +
     '<input type="hidden" name="period" value="all" />' +
     '<input type="hidden" name="source" value="' +
-    esc(txSource === 'jpay' ? 'jpay' : 'chillpay') +
+    esc(txSource) +
     '" />' +
     (env === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : '') +
     '<input type="hidden" name="notiKind" value="' +
@@ -18799,6 +18857,7 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
       active: txSource,
       chillpayUrl: baseUrl + qs({ source: 'chillpay' }),
       jpayUrl: baseUrl + qs({ source: 'jpay' }),
+      elementpayUrl: baseUrl + qs({ source: 'elementpay' }),
     },
   });
   const thead =
@@ -18987,7 +19046,7 @@ app.get('/admin/api/daily-noti-detail', requireAuth, requirePage('cr_transaction
     n++;
     if (rows.length >= DAILY_DETAIL_ROW_CAP) break;
     const body = parseNotiBodyForDisplay(log);
-    const pgK = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+    const pgK = icopayAmountPgKeyFromLog(log);
     const rawAmt = getNotiBodyAmountRawForIcopay(body, pgK);
     const ico =
       rawAmt !== '' && rawAmt != null ? formatAmountWithSeparator(computeIcopayAmount(rawAmt, body.Currency ?? body.currency, pgK)) : '-';
@@ -20591,13 +20650,10 @@ function getEnvFromReq(req) {
 /** 노티거래내역·로그분석 PG: URL source 우선, 없으면 세션 마지막 PG, 최초는 JPAY */
 function parseTxSourceFromReq(req) {
   const raw = req && req.query && req.query.source != null ? String(req.query.source).toLowerCase().trim() : '';
-  if (raw === 'jpay') {
-    setSessionPgSource(req, 'jpay');
-    return 'jpay';
-  }
-  if (raw === 'chillpay') {
-    setSessionPgSource(req, 'chillpay');
-    return 'chillpay';
+  const n = normalizeAdminPgSource(raw);
+  if (n) {
+    setSessionPgSource(req, n);
+    return n;
   }
   return getSessionPgSource(req);
 }
@@ -20620,11 +20676,12 @@ function getEnvFilteredLogs(req) {
   const showSandbox = getEnvFromReq(req) === 'sandbox';
   const logs = Array.isArray(NOTI_LOGS) ? NOTI_LOGS : [];
   let result = logs.filter((log) => {
-    const isJp = getNotiLogPgAcquirer(log) === 'jpay';
-    if (isJp) {
+    const pg = getNotiLogPgAcquirer(log);
+    if (pg === 'jpay') {
       if (showSandbox) return isJpayLogSandboxTier(log);
       return !isJpayLogSandboxTier(log);
     }
+    // ChillPay · ElementPay: log.env 기준
     return showSandbox ? isLogSandbox(log) : isLiveLog(log);
   });
   const member = getMemberForAccessControl(req);
@@ -20647,6 +20704,8 @@ function parseTxNotiKindFilter(req) {
 function inferTransactionNotiCallbackResultFromRouteKey(routeKey) {
   const rk = String(routeKey || '').trim();
   if (!rk) return '';
+  if (rk === 'elementpay/result' || rk.startsWith('elementpay/result')) return 'result';
+  if (rk === 'elementpay/webhook' || rk.startsWith('elementpay/webhook')) return 'callback';
   if (rk.startsWith('jpay/result/')) return 'result';
   if (rk.startsWith('jpay/callback/')) return 'callback';
   if (rk.startsWith('result/') || rk.includes('/result/')) return 'result';
@@ -20682,7 +20741,7 @@ function filterTransactionLogsByNotiKind(logs, mode) {
   });
 }
 
-/** 종합거래: ChillPay(프로덕션/샌드박스) vs JPAY 를 분리 */
+/** 종합거래: ChillPay / JPAY / ElementPay 를 분리 */
 function getTransactionListLogs(req) {
   const src = parseTxSourceFromReq(req);
   let logs = Array.isArray(NOTI_LOGS) ? NOTI_LOGS : [];
@@ -20690,17 +20749,22 @@ function getTransactionListLogs(req) {
   if (member && getMemberInternalTargetIds(member) !== null) {
     logs = logs.filter((log) => filterLogByMemberInternalTarget(log, member));
   }
+  const showSandbox = getEnvFromReq(req) === 'sandbox';
   if (src === 'jpay') {
-    const showSandbox = getEnvFromReq(req) === 'sandbox';
     return logs.filter((log) => {
       if (getNotiLogPgAcquirer(log) !== 'jpay') return false;
       if (showSandbox) return isJpayLogSandboxTier(log);
       return !isJpayLogSandboxTier(log);
     });
   }
-  const showSandbox = getEnvFromReq(req) === 'sandbox';
+  if (src === 'elementpay') {
+    return logs.filter((log) => {
+      if (getNotiLogPgAcquirer(log) !== 'elementpay') return false;
+      return showSandbox ? isLogSandbox(log) : isLiveLog(log);
+    });
+  }
   logs = logs.filter((log) => (showSandbox ? isLogSandbox(log) : isLiveLog(log)));
-  return logs.filter((log) => getNotiLogPgAcquirer(log) !== 'jpay');
+  return logs.filter((log) => getNotiLogPgAcquirer(log) === 'chillpay');
 }
 // PaymentStatus 구분값 (두 메뉴얼 모두 반영)
 // ----- 취소 vs 무효 vs 환불 (ChillPay 기준) -----
@@ -21072,6 +21136,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       active: getSessionPgSource(req),
       chillpayUrl: withPgSourceInUrl('/admin/transactions', 'chillpay'),
       jpayUrl: withPgSourceInUrl('/admin/transactions', 'jpay'),
+      elementpayUrl: withPgSourceInUrl('/admin/transactions', 'elementpay'),
     },
   });
   const cancelPg = getSessionPgSource(req);
@@ -21101,7 +21166,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
                 : esc(String(ps));
     const txId = notifBodyTxId(body) || '-';
     const orderNo = notifBodyOrderNo(body) || '-';
-    const pgCancel = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+    const pgCancel = icopayAmountPgKeyFromLog(log);
     const amtRaw = getNotiBodyAmountRawForIcopay(body, pgCancel);
     const amtDisplay = amtRaw !== '' && amtRaw != null ? formatAmountWithSeparator(amtRaw) : '-';
     let amtHuman = '-';
@@ -21443,8 +21508,16 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
   let filtered = typeFilter === 'void' ? entries.filter((e) => e.type === 'void') : typeFilter === 'refund' ? entries.filter((e) => e.type === 'refund') : entries;
   if (pgFilter === 'jpay') {
     filtered = filtered.filter((e) => (e.pgProvider || 'chillpay') === 'jpay');
+  } else if (pgFilter === 'elementpay' || pgFilter === 'ep') {
+    filtered = filtered.filter((e) => {
+      const p = String(e.pgProvider || '').toLowerCase();
+      return p === 'elementpay' || p === 'ep';
+    });
   } else if (pgFilter === 'chillpay') {
-    filtered = filtered.filter((e) => (e.pgProvider || 'chillpay') !== 'jpay');
+    filtered = filtered.filter((e) => {
+      const p = String(e.pgProvider || 'chillpay').toLowerCase();
+      return p !== 'jpay' && p !== 'elementpay' && p !== 'ep';
+    });
   }
   const perPageNoti = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
   const pageNoti = Math.max(1, parseInt(q.page, 10) || 1);
@@ -21528,6 +21601,7 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
   const pgFilterAllLabel = t(locale, 'cr_filter_pg_all') || 'All PGs';
   const pgFilterChillLabel = t(locale, 'cr_filter_pg_chillpay') || 'CHILLPAY';
   const pgFilterJpayLabel = t(locale, 'cr_filter_pg_jpay') || 'JPAY';
+  const pgFilterEpLabel = t(locale, 'cr_filter_pg_elementpay') || t(locale, 'pg_provider_elementpay') || 'ElementPay';
   const filterLinks = `<div style="margin-bottom:12px;font-size:12px;color:#374151;">
     <a href="/admin/cancel-refund/noti?type=all&days=${days}${envParam}${pgParam}" style="padding:6px 12px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${typeFilter === 'all' ? '#2563eb' : '#e5e7eb'};color:${typeFilter === 'all' ? '#fff' : '#374151'};">${t(locale, 'cr_filter_all')}</a>
     <a href="/admin/cancel-refund/noti?type=void&days=${days}${envParam}${pgParam}" style="padding:6px 12px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${typeFilter === 'void' ? '#2563eb' : '#e5e7eb'};color:${typeFilter === 'void' ? '#fff' : '#374151'};">${t(locale, 'cr_type_void')}</a>
@@ -21535,7 +21609,8 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
     <span style="margin:0 8px;color:#9ca3af;">|</span>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}" style="padding:6px 10px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'all' ? '#1d4ed8' : '#e5e7eb'};color:${pgFilter === 'all' ? '#fff' : '#374151'};">${pgFilterAllLabel}</a>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=chillpay" style="padding:6px 10px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'chillpay' ? '#1d4ed8' : '#e5e7eb'};color:${pgFilter === 'chillpay' ? '#fff' : '#374151'};">${pgFilterChillLabel}</a>
-    <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=jpay" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'jpay' ? '#15803d' : '#e5e7eb'};color:${pgFilter === 'jpay' ? '#fff' : '#374151'};">${pgFilterJpayLabel}</a>
+    <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=jpay" style="padding:6px 10px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'jpay' ? '#15803d' : '#e5e7eb'};color:${pgFilter === 'jpay' ? '#fff' : '#374151'};">${pgFilterJpayLabel}</a>
+    <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=elementpay" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'elementpay' || pgFilter === 'ep' ? '#0f766e' : '#e5e7eb'};color:${pgFilter === 'elementpay' || pgFilter === 'ep' ? '#fff' : '#374151'};">${pgFilterEpLabel}</a>
     <span style="margin:0 8px;color:#9ca3af;">|</span>
     <span>${t(locale, 'cr_period_recent_label')}</span>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=7${envParam}${pgParam}" style="margin-left:6px;font-size:12px;">7${t(locale, 'cr_days')}</a>
@@ -22058,7 +22133,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
     const txId = notifBodyTxId(body) || '-';
     const orderNo = notifBodyOrderNo(body) || '-';
     const amount = body.Amount ?? body.amount ?? body.total_fee ?? '-';
-    const pgVoid = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+    const pgVoid = icopayAmountPgKeyFromLog(log);
     const rawIcoVoid = getNotiBodyAmountRawForIcopay(body, pgVoid);
     let amountHuman = '-';
     if (rawIcoVoid !== '' && rawIcoVoid != null) {
@@ -22942,7 +23017,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
     const txId = notifBodyTxId(body) || '-';
     const orderNo = notifBodyOrderNo(body) || '-';
     const amount = body.Amount ?? body.amount ?? body.total_fee ?? '-';
-    const pgFr = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+    const pgFr = icopayAmountPgKeyFromLog(log);
     const rawIcoFr = getNotiBodyAmountRawForIcopay(body, pgFr);
     let amountHuman = '-';
     if (rawIcoFr !== '' && rawIcoFr != null) {
@@ -23890,7 +23965,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
     const txId = notifBodyTxId(body) || '-';
     const orderNo = notifBodyOrderNo(body) || '-';
     const amount = body.Amount ?? body.amount ?? body.total_fee ?? '-';
-    const pgRf = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+    const pgRf = icopayAmountPgKeyFromLog(log);
     const rawIcoRf = getNotiBodyAmountRawForIcopay(body, pgRf);
     let amountHuman = '-';
     if (rawIcoRf !== '' && rawIcoRf != null) {
@@ -24857,7 +24932,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       const amtDisplay = amtRaw !== '' && amtRaw != null ? formatAmountWithSeparator(amtRaw) : '-';
       const currency = formatCurrencyForDisplay(body.Currency || body.currency) || '';
       // ICOPAY 열: 시스템 환경설정 ICOPAY 금액 규칙(icopay-amount-settings.json, PG별)
-      const pgK = logPgResult === 'jpay' ? 'jpay' : 'chillpay';
+      const pgK = logPgResult === 'jpay' || logPgResult === 'elementpay' ? 'jpay' : 'chillpay';
       const amtRawIcopay = getNotiBodyAmountRawForIcopay(body, pgK);
       let icopayCell = '-';
       if (amtRawIcopay !== '' && amtRawIcopay != null) {
@@ -24975,7 +25050,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       <p class="admin-page-desc">${t(locale, 'noti_log_result_action_hint')}</p>
       ${(() => {
         const fh =
-          (logPgResult === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          (logPgResult === 'jpay' || logPgResult === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgResult + '" />' : '') +
           (logEnvResult === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : '') +
           '<input type="hidden" name="resendKind" value="' +
           esc(resendKind) +
@@ -28265,7 +28340,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       const internalResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
       const internalResendLabel = internalResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${internalResendKind}" />${logPgInternal === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend">${internalResendLabel}</button></form>`
+        ? `<form method="post" action="/admin/internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${internalResendKind}" />${logPgInternal === 'jpay' || logPgInternal === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgInternal + '" />' : ''}<button type="submit" class="btn-resend">${internalResendLabel}</button></form>`
         : '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawInternal, esc) + '</span>';
       const internalTargetName = getInternalTargetName(log.internalTargetId);
       const rowCellsInternal = {
@@ -28352,7 +28427,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       <p class="admin-page-desc">${t(locale, 'internal_logs_desc')}</p>
       ${(() => {
         const fh =
-          (logPgInternal === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          (logPgInternal === 'jpay' || logPgInternal === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgInternal + '" />' : '') +
           '<input type="hidden" name="perPage" value="' +
           perPage +
           '" />' +
@@ -28525,7 +28600,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       const internalResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
       const internalResendLabel = internalResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="internal-result" /><input type="hidden" name="resendKind" value="${internalResendKind}" />${logPgIntRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${internalResendLabel}</button></form>`
+        ? `<form method="post" action="/admin/internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="internal-result" /><input type="hidden" name="resendKind" value="${internalResendKind}" />${logPgIntRes === 'jpay' || logPgIntRes === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgIntRes + '" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${internalResendLabel}</button></form>`
         : '-';
       const txId = payload.TransactionId != null ? payload.TransactionId : (payload.transactionId != null ? payload.transactionId : '-');
       const payStatus = payload.PaymentStatus != null ? payload.PaymentStatus : '-';
@@ -28620,7 +28695,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       <p class="admin-page-desc">${t(locale, 'noti_log_result_action_hint')}</p>
       ${(() => {
         const fh =
-          (logPgIntRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          (logPgIntRes === 'jpay' || logPgIntRes === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgIntRes + '" />' : '') +
           '<input type="hidden" name="resendKind" value="' +
           esc(resendKind) +
           '" />' +
@@ -28809,7 +28884,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       const devResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
       const devResendLabel = devResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDev === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend">${devResendLabel}</button></form>`
+        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDev === 'jpay' || logPgDev === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgDev + '" />' : ''}<button type="submit" class="btn-resend">${devResendLabel}</button></form>`
         : '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawDev, esc) + '</span>';
       const upStr = devInternalUpstreamCellText(log);
       const rowCellsDevInt = {
@@ -28903,7 +28978,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       <p class="admin-page-desc">${t(locale, 'dev_internal_dedup_hint')}</p>
       ${(() => {
         const fh =
-          (logPgDev === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          (logPgDev === 'jpay' || logPgDev === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgDev + '" />' : '') +
           '<input type="hidden" name="perPage" value="' +
           perPageDev +
           '" />' +
@@ -29601,7 +29676,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       const devResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
       const devResendLabel = devResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="dev-internal-result" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDevRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${devResendLabel}</button></form>`
+        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="dev-internal-result" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDevRes === 'jpay' || logPgDevRes === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgDevRes + '" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${devResendLabel}</button></form>`
         : '-';
       const upStrRes = devInternalUpstreamCellText(log);
       const rowCellsDevRes = {
@@ -29694,7 +29769,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       <p class="admin-page-desc">${t(locale, 'dev_internal_logs_retry_hint')}</p>
       ${(() => {
         const fh =
-          (logPgDevRes === 'jpay' ? '<input type="hidden" name="source" value="jpay" />' : '') +
+          (logPgDevRes === 'jpay' || logPgDevRes === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgDevRes + '" />' : '') +
           '<input type="hidden" name="resendKind" value="' +
           esc(resendKind) +
           '" />' +
@@ -29826,7 +29901,7 @@ function aggregatePaymentStatsFromNotiLogs() {
     const log = logs[i];
     const body = parseNotiBody(log);
     if (!isSuccessPaymentForTrafficStats(body)) continue;
-    const pg = getNotiLogPgAcquirer(log) === 'jpay' ? 'jpay' : 'chillpay';
+    const pg = icopayAmountPgKeyFromLog(log);
     const icopay = notiBodyAmountToIcopay(body, pg);
     if (icopay == null) continue;
     const ymd = getBangkokYmdFromIso(log.receivedAtIso || log.receivedAt);
