@@ -10676,6 +10676,25 @@ async function handleJpayNotiRequest(routeKey, req, res) {
   return res.status(200).send('OK');
 }
 
+// ========== ElementPay 고정 Webhook (본사 Cabinet 1 URL) — /noti/:routeKey 보다 먼저 등록 ==========
+// EP → NOTI → ICOPAY …/ELEMENTPAY (원문 패스스루) → (pay/payment.*) 가맹 Callback
+app.post('/noti/elementpay', async (req, res) => {
+  try {
+    await handleElementPayWebhook(req, res);
+  } catch (e) {
+    console.error('[ElementPay] webhook handler error', e.message || e);
+    if (!res.headersSent) return res.status(500).send('ElementPay handler error');
+  }
+});
+app.post('/noti/webhook/elementpay', async (req, res) => {
+  try {
+    await handleElementPayWebhook(req, res);
+  } catch (e) {
+    console.error('[ElementPay] webhook handler error', e.message || e);
+    if (!res.headersSent) return res.status(500).send('ElementPay handler error');
+  }
+});
+
 // ========== POST /noti/:routeKey (기존 형태 유지) ==========
 // 예: /noti/rount_c1
 app.post('/noti/:routeKey', async (req, res) => {
@@ -10809,25 +10828,6 @@ function sendJpayBrowserResultRedirect(req, res, jpayRouteKey) {
     return res.redirect(302, targetUrl.trim());
   }
 }
-
-// ========== ElementPay 고정 Webhook (본사 Cabinet 1 URL) ==========
-// EP → NOTI → ICOPAY …/ELEMENTPAY (원문 패스스루) → (pay/payment.*) 가맹 Callback
-app.post('/noti/elementpay', async (req, res) => {
-  try {
-    await handleElementPayWebhook(req, res);
-  } catch (e) {
-    console.error('[ElementPay] webhook handler error', e.message || e);
-    if (!res.headersSent) return res.status(500).send('ElementPay handler error');
-  }
-});
-app.post('/noti/webhook/elementpay', async (req, res) => {
-  try {
-    await handleElementPayWebhook(req, res);
-  } catch (e) {
-    console.error('[ElementPay] webhook handler error', e.message || e);
-    if (!res.headersSent) return res.status(500).send('ElementPay handler error');
-  }
-});
 
 // ========== POST /noti/:kind/:no (신규: /noti/callback/1, /noti/result/1) — JPAY는 /noti/callback/j1 … /noti/result/j20 ==========
 app.post('/noti/:kind/:no', async (req, res) => {
