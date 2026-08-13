@@ -196,3 +196,12 @@ X-Noti-Attempt: 2
 | URL 로그 | DEAD_LETTER 콘솔·알림에서 pg-notify 토큰 마스킹 |
 
 코드: `lib/pgNotifyDelivery.js`, `server.js`의 `sendToInternal` / `sendDevInternalHttpNotify` / pg-notify 배송 작업·워커.
+
+## ElementPay 가맹 통보
+
+상세 스펙·구현: **`docs/NOTI_ElementPay_가맹통보_추가개발요청.md`**, provision: **`docs/ICOPAY_Provision_API_ElementPay.md`**.
+
+- Ingress: `POST /noti/elementpay` → ICOPAY `…/ELEMENTPAY` 원문 패스스루
+- 가맹 Callback: `pay` / `payment.*` 시 `X-Icopay-Comp-Id`로 매칭, `relayFormat` raw/json/form (JPAY 동일 스키마)
+- 설정: `config/elementpay-ingress.json` (예: `elementpay-ingress.example.json`)
+

@@ -17,6 +17,7 @@ const os = require('os');
 const nodemailer = require('nodemailer');
 const { t } = require('./locales');
 const pgNotifyDelivery = require('./lib/pgNotifyDelivery');
+const elementPayNoti = require('./lib/elementpayNoti');
 
 const app = express();
 /** Nginx 등 리버스 프록시 뒤에서 X-Forwarded-*·req.ip 반영. 끄려면 TRUST_PROXY=0 */
@@ -526,6 +527,7 @@ const JPAY_PROFILES_CONFIG_PATH = path.join(CONFIG_DIR, 'jpay-profiles.json');
 /** 종합거래·트래픽 ICOPAY 전용 통화별 금액 규칙 (노티 환경설정 파일과 분리) */
 const ICOPAY_AMOUNT_SETTINGS_PATH = path.join(CONFIG_DIR, 'icopay-amount-settings.json');
 const NOTI_PROVISION_CONFIG_PATH = path.join(CONFIG_DIR, 'noti-provision.json');
+const ELEMENTPAY_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'elementpay-ingress.json');
 const DEFAULT_SIDEBAR_TITLE = 'PG 노티 관리자';
 const DEFAULT_SIDEBAR_SUB = 'Webhooks & Internal Notices';
 
@@ -3483,6 +3485,557 @@ function deleteJpayMerchantProvision(merchantId, force, meta) {
     force: !!force,
   });
   return { ok: true, status: 200, body: { success: true, data: { deleted: true, merchantId: id, pgKind: 'jpay' } } };
+}
+
+// ========== ElementPay (EP) — 고정 Webhook 1개 + 가맹 통보 + provision ==========
+function loadElementPayIngressConfig() {
+  const file = loadJsonConfig(ELEMENTPAY_INGRESS_CONFIG_PATH, {});
+  const fromFile = file && typeof file === 'object' ? file : {};
+  const envUrl = String(process.env.ELEMENTPAY_ICOPAY_NOTIFY_URL || '').trim();
+  return {
+    enabled: fromFile.enabled !== false,
+    icopayNotifyUrl: envUrl || String(fromFile.icopayNotifyUrl || '').trim(),
+    timeoutMs: Math.max(
+      3000,
+      Math.min(120000, Number(fromFile.timeoutMs) || Number(process.env.ELEMENTPAY_ICOPAY_TIMEOUT_MS) || 25000),
+    ),
+  };
+}
+
+function buildElementPayMerchantObject(input) {
+  const {
+    merchantId,
+    callbackUrl,
+    resultUrl,
+    routeNo,
+    internalTargetId,
+    options,
+    prev,
+    icopayMeta,
+  } = input;
+  const opts = normalizeJpayProvisionOptions(options);
+  const out = {
+    ...(prev || {}),
+    merchantId,
+    routeCallbackKey: '',
+    routeResultKey: '',
+    callbackUrl: String(callbackUrl || '').trim(),
+    resultUrl: String(resultUrl || '').trim(),
+    routeNo: String(routeNo || '').trim(),
+    internalCustomerId: '',
+    internalTargetId: String(internalTargetId || '').trim(),
+    enableRelay: opts.enableRelay,
+    enableInternal: opts.enableInternal,
+    enableDevInternal: opts.enableDevInternal,
+    enableDealmaiWebhook: opts.enableDealmaiWebhook,
+    dealmaiPartnerCode: opts.dealmaiPartnerCode,
+    relayOffForwardTarget: opts.relayOffForwardTarget,
+    relayOffInternalCallbackUrl: opts.relayOffInternalCallbackUrl,
+    relayOffInternalResultUrl: opts.relayOffInternalResultUrl,
+    relayOffDevCallbackUrl: opts.relayOffDevCallbackUrl,
+    relayOffDevResultUrl: opts.relayOffDevResultUrl,
+    relayOffDevDedicatedUse: opts.relayOffDevDedicatedUse,
+    relayFormat: opts.relayFormat,
+    jpayRouteCallbackKey: '',
+    jpayRouteResultKey: '',
+    jpayCallbackUrl: '',
+    jpayResultUrl: '',
+    merchantPgKind: 'elementpay',
+    chillpayRecurring: 'N',
+    resultDeliveryMode: opts.resultDeliveryMode,
+    relayEnrichmentMode: 'plain',
+  };
+  const metaNorm = normalizeIcopayProvisionMeta(icopayMeta, merchantId);
+  if (metaNorm) {
+    out.icopayProvisionMeta = metaNorm;
+    if (metaNorm.compName) {
+      out.name = metaNorm.compName;
+      out.label = metaNorm.compName;
+    }
+  }
+  return out;
+}
+
+function merchantToElementPayProvisionApiData(merchant, extras) {
+  const m = merchant || {};
+  const meta =
+    m.icopayProvisionMeta && typeof m.icopayProvisionMeta === 'object' ? m.icopayProvisionMeta : null;
+  const compName = String(m.name || m.label || (meta && (meta.compName || meta.compNm)) || '').trim();
+  return {
+    merchantId: m.merchantId || '',
+    name: compName || undefined,
+    icopayMeta: meta
+      ? {
+          compId: String(meta.compId || m.merchantId || '').trim() || undefined,
+          compName: String(meta.compName || meta.compNm || compName || '').trim() || undefined,
+          orgUnitId: meta.orgUnitId,
+          provisionedBy: meta.provisionedBy,
+          integrationMode: meta.integrationMode,
+        }
+      : compName
+        ? { compId: String(m.merchantId || '').trim() || undefined, compName }
+        : undefined,
+    pgKind: 'elementpay',
+    slot: null,
+    routeNo: String(m.routeNo || '').trim(),
+    jpayRouteCallbackKey: '',
+    jpayRouteResultKey: '',
+    pgCallbackUrl: '',
+    pgResultUrl: '',
+    icopayJpayNotifyUrl: '',
+    icopayJpayCallbackUrl: '',
+    internalTargetId: String(m.internalTargetId || '').trim(),
+    callbackUrl: String(m.callbackUrl || '').trim(),
+    resultUrl: String(m.resultUrl || '').trim(),
+    enableRelay: m.enableRelay !== false,
+    enableInternal: !!m.enableInternal,
+    enableDevInternal: !!m.enableDevInternal,
+    enableDealmaiWebhook: !!m.enableDealmaiWebhook,
+    dealmaiPartnerCode: String(m.dealmaiPartnerCode || '').trim(),
+    relayOffForwardTarget: normalizeMerchantRelayOffForwardTarget(m.relayOffForwardTarget),
+    relayOffDevCallbackUrl: String(m.relayOffDevCallbackUrl || '').trim(),
+    relayOffDevResultUrl: String(m.relayOffDevResultUrl || '').trim(),
+    relayOffDevDedicatedUse: !!m.relayOffDevDedicatedUse,
+    resultDeliveryMode: String(m.resultDeliveryMode || 'auto').trim(),
+    relayFormat: String(m.relayFormat || 'raw').trim(),
+    created: extras && extras.created === false ? false : true,
+    provisionRequestId: extras && extras.provisionRequestId ? String(extras.provisionRequestId) : undefined,
+  };
+}
+
+function elementPayMerchantProvisionSnapshot(rec) {
+  if (!rec || inferMerchantPgKind(rec) !== 'elementpay') return null;
+  return {
+    routeNo: String(rec.routeNo || '').trim(),
+    callbackUrl: String(rec.callbackUrl || '').trim(),
+    resultUrl: String(rec.resultUrl || '').trim(),
+    internalTargetId: String(rec.internalTargetId || '').trim(),
+    enableRelay: !!rec.enableRelay,
+    enableInternal: !!rec.enableInternal,
+    enableDevInternal: !!rec.enableDevInternal,
+    relayFormat: String(rec.relayFormat || 'raw').trim(),
+    resultDeliveryMode: String(rec.resultDeliveryMode || 'auto').trim(),
+    enableDealmaiWebhook: !!rec.enableDealmaiWebhook,
+    dealmaiPartnerCode: String(rec.dealmaiPartnerCode || '').trim(),
+    name: String(rec.name || rec.label || '').trim(),
+  };
+}
+
+function provisionElementPayMerchant(body, meta) {
+  const requestId = meta && meta.requestId ? String(meta.requestId).trim() : '';
+  const clientIp = (meta && meta.clientIp) || '';
+  const actor = (meta && meta.actor) || 'icopay-provision';
+  if (!body || typeof body !== 'object') {
+    return { ok: false, status: 400, errorCode: 'INVALID_REQUEST' };
+  }
+  const merchantId = normalizeProvisionMerchantId(body.merchantId);
+  if (!merchantId) {
+    return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  }
+  const pgKind = String(body.pgKind || '').toLowerCase().trim();
+  if (pgKind !== 'elementpay') {
+    return { ok: false, status: 400, errorCode: pgKind ? 'INVALID_PG_KIND' : 'INVALID_REQUEST' };
+  }
+  const internalTargetId = String(body.internalTargetId || '').trim();
+  if (!internalTargetId || !INTERNAL_TARGETS.has(internalTargetId)) {
+    return { ok: false, status: 400, errorCode: 'INVALID_INTERNAL_TARGET' };
+  }
+  const optionsIn = body.options && typeof body.options === 'object' ? { ...body.options } : {};
+  if (body.enableDealmaiWebhook != null && optionsIn.enableDealmaiWebhook == null) {
+    optionsIn.enableDealmaiWebhook = body.enableDealmaiWebhook;
+  }
+  if (body.dealmaiPartnerCode != null && !optionsIn.dealmaiPartnerCode) {
+    optionsIn.dealmaiPartnerCode = body.dealmaiPartnerCode;
+  }
+  const options = normalizeJpayProvisionOptions(optionsIn);
+  const callbackUrl = String(body.callbackUrl || '').trim();
+  const resultUrl = String(body.resultUrl || '').trim();
+  if (options.enableRelay && (!callbackUrl || !resultUrl)) {
+    return { ok: false, status: 400, errorCode: 'MERCHANT_URL_REQUIRED' };
+  }
+  const existing = MERCHANTS.get(merchantId) || null;
+  if (existing && inferMerchantPgKind(existing) !== 'elementpay') {
+    return { ok: false, status: 409, errorCode: 'MERCHANT_ALREADY_EXISTS' };
+  }
+  const desiredRecord = buildElementPayMerchantObject({
+    merchantId,
+    callbackUrl,
+    resultUrl,
+    routeNo: body.routeNo,
+    internalTargetId,
+    options,
+    prev: existing || {},
+    icopayMeta: resolveIcopayMetaFromProvisionBody(body, merchantId),
+  });
+  const desiredSnap = elementPayMerchantProvisionSnapshot(desiredRecord);
+  const existingSnap = elementPayMerchantProvisionSnapshot(existing);
+  if (existingSnap && JSON.stringify(existingSnap) === JSON.stringify(desiredSnap)) {
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        success: true,
+        data: merchantToElementPayProvisionApiData(existing, {
+          created: false,
+          provisionRequestId: requestId || undefined,
+        }),
+      },
+      idempotent: true,
+    };
+  }
+  MERCHANTS.set(merchantId, desiredRecord);
+  try {
+    saveMerchants();
+  } catch (e) {
+    MERCHANTS.delete(merchantId);
+    if (existing) MERCHANTS.set(merchantId, existing);
+    return {
+      ok: false,
+      status: 503,
+      errorCode: 'NOTI_CONFIG_LOCKED',
+      details: { message: (e && e.message) || String(e) },
+    };
+  }
+  appendConfigChangeLog({
+    type: existing ? 'merchant_update' : 'merchant_create',
+    source: 'icopay-provision',
+    actor,
+    clientIp,
+    merchantId,
+    before: existing,
+    after: MERCHANTS.get(merchantId),
+    provisionRequestId: requestId || undefined,
+    icopayMeta: MERCHANTS.get(merchantId) && MERCHANTS.get(merchantId).icopayProvisionMeta,
+  });
+  return {
+    ok: true,
+    status: existing ? 200 : 201,
+    body: {
+      success: true,
+      data: merchantToElementPayProvisionApiData(MERCHANTS.get(merchantId), {
+        created: !existing,
+        provisionRequestId: requestId || undefined,
+      }),
+    },
+  };
+}
+
+function getElementPayMerchantProvision(merchantId) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const m = MERCHANTS.get(id);
+  if (!m || inferMerchantPgKind(m) !== 'elementpay') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  return {
+    ok: true,
+    status: 200,
+    body: { success: true, data: merchantToElementPayProvisionApiData(m, { created: false }) },
+  };
+}
+
+function updateElementPayMerchantProvision(merchantId, body, meta) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const existing = MERCHANTS.get(id);
+  if (!existing || inferMerchantPgKind(existing) !== 'elementpay') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  const merged = { ...(body || {}), merchantId: id, pgKind: 'elementpay' };
+  if (merged.internalTargetId == null) merged.internalTargetId = existing.internalTargetId;
+  if (merged.callbackUrl == null) merged.callbackUrl = existing.callbackUrl;
+  if (merged.resultUrl == null) merged.resultUrl = existing.resultUrl;
+  if (!merged.options || typeof merged.options !== 'object') {
+    merged.options = {
+      enableRelay: existing.enableRelay !== false,
+      enableInternal: !!existing.enableInternal,
+      enableDevInternal: !!existing.enableDevInternal,
+      relayFormat: existing.relayFormat || 'raw',
+      resultDeliveryMode: existing.resultDeliveryMode || 'auto',
+      enableDealmaiWebhook: !!existing.enableDealmaiWebhook,
+      dealmaiPartnerCode: existing.dealmaiPartnerCode || '',
+    };
+  }
+  if (!merged.icopayMeta && existing.icopayProvisionMeta) {
+    merged.icopayMeta = existing.icopayProvisionMeta;
+  }
+  return provisionElementPayMerchant(merged, meta);
+}
+
+function deleteElementPayMerchantProvision(merchantId, force, meta) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const existing = MERCHANTS.get(id);
+  if (!existing || inferMerchantPgKind(existing) !== 'elementpay') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  MERCHANTS.delete(id);
+  try {
+    saveMerchants();
+  } catch (e) {
+    MERCHANTS.set(id, existing);
+    return {
+      ok: false,
+      status: 503,
+      errorCode: 'NOTI_CONFIG_LOCKED',
+      details: { message: (e && e.message) || String(e) },
+    };
+  }
+  appendConfigChangeLog({
+    type: 'merchant_delete',
+    source: 'icopay-provision',
+    actor: (meta && meta.actor) || 'icopay-provision',
+    clientIp: (meta && meta.clientIp) || '',
+    merchantId: id,
+    before: existing,
+    after: null,
+    force: !!force,
+  });
+  return {
+    ok: true,
+    status: 200,
+    body: { success: true, data: { deleted: true, merchantId: id, pgKind: 'elementpay' } },
+  };
+}
+
+function findElementPayMerchantByCompId(compId) {
+  const id = String(compId || '').trim();
+  if (!id) return null;
+  const direct = MERCHANTS.get(id);
+  if (direct && inferMerchantPgKind(direct) === 'elementpay') {
+    return { merchantId: id, merchant: direct };
+  }
+  for (const [mid, m] of MERCHANTS.entries()) {
+    if (inferMerchantPgKind(m) !== 'elementpay') continue;
+    const meta = m.icopayProvisionMeta && typeof m.icopayProvisionMeta === 'object' ? m.icopayProvisionMeta : {};
+    if (String(meta.compId || '').trim() === id) {
+      return { merchantId: mid, merchant: m };
+    }
+  }
+  return null;
+}
+
+async function forwardElementPayToIcopay(rawBodyStr, contentType, attempt) {
+  const cfg = loadElementPayIngressConfig();
+  if (!cfg.enabled) {
+    return { ok: false, status: 503, data: 'ElementPay ingress disabled', headers: {} };
+  }
+  if (!cfg.icopayNotifyUrl) {
+    return { ok: false, status: 503, data: 'ElementPay ICOPAY notify URL not configured', headers: {} };
+  }
+  const headers = {
+    'Content-Type':
+      contentType && String(contentType).trim()
+        ? String(contentType).split(';')[0].trim() + '; charset=utf-8'
+        : 'application/x-www-form-urlencoded; charset=utf-8',
+  };
+  applyIcopayPgNotifyIngressHeaders(headers, cfg.icopayNotifyUrl, attempt || 1);
+  if (!headers['X-Icopay-Notify-Delivery']) {
+    headers['X-Icopay-Notify-Delivery'] = (attempt || 1) <= 1 ? 'LIVE' : 'RETRY';
+    headers['X-Noti-Attempt'] = String(Math.max(1, Math.floor(Number(attempt) || 1)));
+  }
+  try {
+    const res = await axios.post(cfg.icopayNotifyUrl, rawBodyStr || '', {
+      headers,
+      timeout: cfg.timeoutMs,
+      validateStatus: () => true,
+      responseType: 'text',
+      transformResponse: [(d) => d],
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+    return {
+      ok: res.status >= 200 && res.status < 300,
+      status: res.status,
+      data: res.data,
+      headers: res.headers || {},
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      status: 502,
+      data: (e && e.message) || String(e),
+      headers: {},
+      error: e,
+    };
+  }
+}
+
+async function relayElementPayMerchantNotify(merchantId, merchant, notifyBody, epRaw, incomingContentType) {
+  const enableRelay = merchant.enableRelay !== false;
+  const targetUrl = String(merchant.callbackUrl || '').trim();
+  const relayFormat =
+    merchant.relayFormat === 'json' || merchant.relayFormat === 'form' ? merchant.relayFormat : 'raw';
+  let relaySuccess = false;
+  let relayFailReason = '';
+  if (enableRelay && targetUrl) {
+    let relayOpts;
+    if (relayFormat === 'json') {
+      relayOpts = { contentType: 'application/json', rawBody: undefined };
+    } else if (relayFormat === 'form') {
+      relayOpts = { contentType: 'application/x-www-form-urlencoded', rawBody: undefined };
+    } else {
+      // raw: JPAY-compatible schema as form (do not dump EP-only original alone)
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v === undefined || v === null) continue;
+        params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      relayOpts = {
+        contentType: 'application/x-www-form-urlencoded',
+        rawBody: params.toString(),
+      };
+    }
+    try {
+      let relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+      relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+      if (!relaySuccess) {
+        relayFailReason =
+          `HTTP ${relayRes.status}` +
+          (relayRes.data && typeof relayRes.data === 'string' ? ': ' + String(relayRes.data).slice(0, 200) : '');
+        await new Promise((r) => setTimeout(r, 2000));
+        relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      }
+    } catch (err) {
+      relayFailReason = err.code || err.message || String(err);
+      try {
+        await new Promise((r) => setTimeout(r, 2000));
+        const retryRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = retryRes.status >= 200 && retryRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      } catch (err2) {
+        if (!relayFailReason) relayFailReason = err2.code || err2.message || String(err2);
+      }
+    }
+  } else if (enableRelay && !targetUrl) {
+    relayFailReason = '가맹점 URL 없음';
+  }
+
+  appendPgNotiLog({
+    routeKey: 'elementpay/webhook',
+    merchantId,
+    kind: 'callback',
+    body: notifyBody,
+    rawBody: epRaw || undefined,
+    targetUrl: enableRelay ? targetUrl || '' : '',
+    contentType: incomingContentType,
+    env: 'live',
+    relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
+    relayFailReason: relaySuccess ? '' : relayFailReason || '',
+    relayFormatUsed: enableRelay && relaySuccess ? relayFormat : undefined,
+    pgProvider: 'elementpay',
+  });
+
+  // Internal / dev (same flags as JPAY)
+  if (merchant.enableInternal !== false) {
+    try {
+      const internalUrl = resolveJpayInternalNotiDeliveryUrl(
+        merchant,
+        enableRelay,
+        'callback',
+        normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget),
+      );
+      if (internalUrl) {
+        const pack = {
+          body: notifyBody,
+          contentType: 'application/x-www-form-urlencoded',
+          rawBody: undefined,
+        };
+        await relayJpayRawWithRetry(internalUrl, pack, merchant);
+      }
+    } catch (e) {
+      console.warn('[ElementPay] internal notify failed', e.message || e);
+    }
+  }
+  return { relaySuccess, relayFailReason };
+}
+
+async function handleElementPayWebhook(req, res) {
+  const cfg = loadElementPayIngressConfig();
+  const rawBodyStr = req.rawBodyBuffer ? req.rawBodyBuffer.toString('utf8') : '';
+  const incomingContentType =
+    (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
+  let body = req.body;
+  if (!body || typeof body !== 'object') body = {};
+  if (Object.keys(body).length === 0 && req.rawBodyBuffer && req.rawBodyBuffer.length) {
+    const parsed = parseNotiRawBodyToObject(req.rawBodyBuffer, incomingContentType);
+    if (Object.keys(parsed).length) body = parsed;
+  }
+  const method = elementPayNoti.normalizeElementPayMethod(body.method);
+  const order = String(body.order || body.orderNo || '').trim();
+  console.log('[ElementPay] webhook', 'method=', method || '-', 'order=', order || '-');
+
+  if (!cfg.enabled) {
+    return res.status(503).send('ElementPay ingress disabled');
+  }
+  if (!cfg.icopayNotifyUrl) {
+    console.error('[ElementPay] icopayNotifyUrl not configured');
+    return res.status(503).send('ElementPay ICOPAY URL not configured');
+  }
+
+  const forwardBody =
+    rawBodyStr && String(rawBodyStr).trim()
+      ? rawBodyStr
+      : new URLSearchParams(
+          Object.entries(body).reduce((acc, [k, v]) => {
+            if (v != null && v !== '') acc[k] = String(v);
+            return acc;
+          }, {}),
+        ).toString();
+
+  const ico = await forwardElementPayToIcopay(forwardBody, incomingContentType, 1);
+  const compId = elementPayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-comp-id');
+  const orderHdr = elementPayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-order-no');
+
+  // Merchant notify after ICOPAY (pay / payment.*) — never block EP response body
+  if (elementPayNoti.elementPayShouldNotifyMerchant(method)) {
+    const match = findElementPayMerchantByCompId(compId);
+    if (!match) {
+      console.warn(
+        '[ElementPay] merchant notify skipped: no Comp-Id match',
+        'compId=',
+        compId || '(none)',
+        'order=',
+        orderHdr || order || '-',
+      );
+      appendPgNotiLog({
+        routeKey: 'elementpay/webhook',
+        merchantId: '',
+        kind: 'callback',
+        body,
+        rawBody: forwardBody || undefined,
+        targetUrl: '',
+        contentType: incomingContentType,
+        env: 'live',
+        relayStatus: 'fail',
+        relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing X-Icopay-Comp-Id',
+        pgProvider: 'elementpay',
+      });
+    } else {
+      const notifyBody = elementPayNoti.mapElementPayToMerchantNotifyBody(body, method);
+      try {
+        await relayElementPayMerchantNotify(
+          match.merchantId,
+          match.merchant,
+          notifyBody,
+          forwardBody,
+          incomingContentType,
+        );
+      } catch (e) {
+        console.error('[ElementPay] merchant relay error', e.message || e);
+      }
+    }
+  }
+
+  const outStatus = ico.status && Number.isFinite(Number(ico.status)) ? Number(ico.status) : 502;
+  const outCt =
+    elementPayNoti.headerGetIgnoreCase(ico.headers, 'content-type') || 'application/json; charset=utf-8';
+  res.status(outStatus);
+  res.set('Content-Type', outCt);
+  // Pass-through body only — do not rewrite ElementPay {response,hash}
+  return res.send(ico.data != null ? ico.data : '');
 }
 
 /** 저장값이 없을 때만 사용: 환경변수 SYSTEM_MONITOR_MONTHLY_QUOTA_GB (기본 300GB) */
@@ -8804,7 +9357,8 @@ function truncateInternalHttpResponsePreview(data, maxLen) {
 
 /** ICOPAY 공개 pg-notify 서버-투-서버 JSON 경로 여부(브라우저 pay-result 제외 가정) */
 function isIcopayOpenPgNotifyUrl(internalUrl) {
-  return String(internalUrl || '').toLowerCase().includes('/api/open/pg-notify/');
+  const u = String(internalUrl || '').toLowerCase();
+  return u.includes('/api/open/pg-notify/') || u.includes('/pg-notify/') || u.includes('/elementpay');
 }
 
 /**
@@ -10256,6 +10810,25 @@ function sendJpayBrowserResultRedirect(req, res, jpayRouteKey) {
   }
 }
 
+// ========== ElementPay 고정 Webhook (본사 Cabinet 1 URL) ==========
+// EP → NOTI → ICOPAY …/ELEMENTPAY (원문 패스스루) → (pay/payment.*) 가맹 Callback
+app.post('/noti/elementpay', async (req, res) => {
+  try {
+    await handleElementPayWebhook(req, res);
+  } catch (e) {
+    console.error('[ElementPay] webhook handler error', e.message || e);
+    if (!res.headersSent) return res.status(500).send('ElementPay handler error');
+  }
+});
+app.post('/noti/webhook/elementpay', async (req, res) => {
+  try {
+    await handleElementPayWebhook(req, res);
+  } catch (e) {
+    console.error('[ElementPay] webhook handler error', e.message || e);
+    if (!res.headersSent) return res.status(500).send('ElementPay handler error');
+  }
+});
+
 // ========== POST /noti/:kind/:no (신규: /noti/callback/1, /noti/result/1) — JPAY는 /noti/callback/j1 … /noti/result/j20 ==========
 app.post('/noti/:kind/:no', async (req, res) => {
   const { kind, no } = req.params;
@@ -10428,7 +11001,8 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
         t(locale, 'nav_merchant'),
         ['/admin/merchants'],
         merchantsRegisterLink('chillpay', t(locale, 'merchants_nav_register_chillpay')) +
-          merchantsRegisterLink('jpay', t(locale, 'merchants_nav_register_jpay')),
+          merchantsRegisterLink('jpay', t(locale, 'merchants_nav_register_jpay')) +
+          merchantsRegisterLink('elementpay', t(locale, 'merchants_nav_register_elementpay')),
       ),
     );
   }
@@ -12930,11 +13504,16 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   const registerHeading =
     registerKind === 'jpay'
       ? t(locale, 'merchants_nav_register_jpay')
-      : t(locale, 'merchants_nav_register_chillpay');
+      : registerKind === 'elementpay'
+        ? t(locale, 'merchants_nav_register_elementpay')
+        : t(locale, 'merchants_nav_register_chillpay');
   const registerJpay = registerKind === 'jpay';
+  const registerElementPay = registerKind === 'elementpay';
 
   const sortType = (req.query.sort || 'recent').toString();
-  const sortedEntries = getSortedMerchantEntries(sortType);
+  const sortedEntries = getSortedMerchantEntries(sortType).filter(
+    ([, m]) => inferMerchantPgKind(m) === registerKind,
+  );
   const chillpayRedirectRouteNosJson = JSON.stringify(getChillpayRedirectRouteNosForUi());
   const chillpayRedirectAlertJson = JSON.stringify(t(locale, 'merchants_alert_redirect_hosted'));
   const internalTargetsRelayOffJson = JSON.stringify(
@@ -12947,7 +13526,12 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
     })),
   );
 
-  const merchantsEmptyMsg = t(locale, 'merchants_empty');
+  const merchantsEmptyMsg =
+    registerKind === 'jpay'
+      ? t(locale, 'merchants_empty_jpay') || t(locale, 'merchants_empty')
+      : registerKind === 'elementpay'
+        ? t(locale, 'merchants_empty_elementpay') || t(locale, 'merchants_empty')
+        : t(locale, 'merchants_empty_chillpay') || t(locale, 'merchants_empty');
   const merchantsListQueryBase = `kind=${registerKind}`;
   const merchantsSortHref = (sort) => `/admin/merchants?${merchantsListQueryBase}&sort=${sort}`;
   const merchantsColResizeTitle = escAttr(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절');
@@ -13036,10 +13620,14 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <td>${merchantListRouteNoCell(m)}</td>
         <td>${m.internalCustomerId || ''}</td>
         <td>${internalTargetId}</td>
-        <td class="cell-pg-acquirer" style="font-weight:600;color:${listPg === 'jpay' ? '#7c3aed' : '#0369a1'};">${
+        <td class="cell-pg-acquirer" style="font-weight:600;color:${
+          listPg === 'jpay' ? '#7c3aed' : listPg === 'elementpay' ? '#0f766e' : '#0369a1'
+        };">${
           listPg === 'jpay'
             ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
-            : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
+            : listPg === 'elementpay'
+              ? (t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay')
+              : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
         }</td>
         <td class="cell-noti-mode">${merchantNotiStyleCellHtml(locale, m)}</td>
         <td>${String(merchantChillpayRecurringCell(m))
@@ -13222,7 +13810,11 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <p class="admin-page-desc">${t(locale, 'merchants_subscription_service_hint')}</p>
         </div>
         <input type="hidden" name="merchantPgKind" id="merchant-pg-kind-hidden" value="${registerKind}" />
-        <div id="merch-pg-chillpay-block" style="display:${registerJpay ? 'none' : 'block'};">
+        <div id="merch-pg-elementpay-block" style="display:${registerElementPay ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;">
+          <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_elementpay_ingress_hint')}</p>
+          <div style="margin-top:8px;font-size:12px;color:#065f46;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/elementpay</div>
+        </div>
+        <div id="merch-pg-chillpay-block" style="display:${registerJpay || registerElementPay ? 'none' : 'block'};">
         <label>
           ${t(locale, 'merchants_label_chillpay_pg_slot_no')}
           <div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap;">
@@ -13473,6 +14065,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       var pgKindHidden = document.getElementById('merchant-pg-kind-hidden');
       var blockChill = document.getElementById('merch-pg-chillpay-block');
       var blockJpay = document.getElementById('merch-pg-jpay-block');
+      var blockEp = document.getElementById('merch-pg-elementpay-block');
       var cbPreview = document.getElementById('callback-url-preview');
       var rsPreview = document.getElementById('result-url-preview');
       var cbCopyBtn = document.getElementById('copy-callback-url');
@@ -13495,6 +14088,12 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 
       function isMerchantJpay() {
         return pgKindHidden && pgKindHidden.value === 'jpay';
+      }
+      function isMerchantElementPay() {
+        return pgKindHidden && pgKindHidden.value === 'elementpay';
+      }
+      function merchantPgKindNow() {
+        return (pgKindHidden && pgKindHidden.value) || 'chillpay';
       }
 
       function chillNoFromRouteKey(val) {
@@ -13612,10 +14211,13 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       }
 
       function syncPgBlocks() {
-        var j = isMerchantJpay();
-        if (blockChill) blockChill.style.display = j ? 'none' : 'block';
+        var kind = merchantPgKindNow();
+        var j = kind === 'jpay';
+        var ep = kind === 'elementpay';
+        if (blockChill) blockChill.style.display = j || ep ? 'none' : 'block';
         if (blockJpay) blockJpay.style.display = j ? 'block' : 'none';
-        if (chillSlotNo) chillSlotNo.disabled = !!j;
+        if (blockEp) blockEp.style.display = ep ? 'block' : 'none';
+        if (chillSlotNo) chillSlotNo.disabled = !!(j || ep);
         if (jpaySlotNo) jpaySlotNo.disabled = !j;
         var wrapRoute = document.getElementById('merch-chillpay-route-fields');
         var routeNoWrap = document.getElementById('merch-route-no-wrap');
@@ -13625,14 +14227,17 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var rn = document.getElementById('merchant-route-no');
         var cid = document.getElementById('merchant-internal-customer-id');
         var subWrap = document.getElementById('merch-subscription-service-wrap');
-        if (wrapRoute) wrapRoute.style.display = 'block';
-        if (routeNoWrap) routeNoWrap.style.display = 'block';
-        if (cidWrap) cidWrap.style.display = j ? 'none' : 'block';
-        if (chillRouteHint) chillRouteHint.style.display = j ? 'none' : 'block';
+        if (wrapRoute) wrapRoute.style.display = ep ? 'none' : 'block';
+        if (routeNoWrap) routeNoWrap.style.display = ep ? 'none' : 'block';
+        if (cidWrap) cidWrap.style.display = j || ep ? 'none' : 'block';
+        if (chillRouteHint) chillRouteHint.style.display = j || ep ? 'none' : 'block';
         if (jpayRouteHint) jpayRouteHint.style.display = j ? 'block' : 'none';
-        if (rn) rn.readOnly = true;
-        if (cid) cid.disabled = !!j;
-        if (subWrap) subWrap.style.display = j ? 'none' : 'block';
+        if (rn) {
+          rn.readOnly = true;
+          rn.disabled = !!ep;
+        }
+        if (cid) cid.disabled = !!(j || ep);
+        if (subWrap) subWrap.style.display = j || ep ? 'none' : 'block';
         syncRouteNoAuto();
       }
 
@@ -13772,14 +14377,18 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var rsUrlInput = form.querySelector('input[name="resultUrl"]');
         var routeNoInput = form.querySelector('input[name="routeNo"]');
         var internalCustomerInput = form.querySelector('input[name="internalCustomerId"]');
-        var pgKind = (button.dataset.merchantPgKind || 'chillpay').toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
+        var pgKindRaw = (button.dataset.merchantPgKind || 'chillpay').toLowerCase();
+        var pgKind =
+          pgKindRaw === 'jpay' ? 'jpay' : pgKindRaw === 'elementpay' ? 'elementpay' : 'chillpay';
         if (pgKindHidden) pgKindHidden.value = pgKind;
         var registerHeadingEl = document.getElementById('merchant-register-section');
         if (registerHeadingEl) {
           registerHeadingEl.textContent =
             pgKind === 'jpay'
               ? '${(t(locale, 'merchants_nav_register_jpay') || 'JPAY 등록').replace(/'/g, "\\'")}'
-              : '${(t(locale, 'merchants_nav_register_chillpay') || 'CHILLPAY 등록').replace(/'/g, "\\'")}';
+              : pgKind === 'elementpay'
+                ? '${(t(locale, 'merchants_nav_register_elementpay') || 'ElementPay 등록').replace(/'/g, "\\'")}'
+                : '${(t(locale, 'merchants_nav_register_chillpay') || 'CHILLPAY 등록').replace(/'/g, "\\'")}';
         }
         syncPgBlocks();
         var relayCheckbox = form.querySelector('input[name="enableRelay"]');
@@ -13886,11 +14495,16 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 
 function parseMerchantsRegisterKind(req) {
   const raw = req && req.query && req.query.kind ? String(req.query.kind).toLowerCase().trim() : '';
-  return raw === 'jpay' ? 'jpay' : 'chillpay';
+  if (raw === 'jpay') return 'jpay';
+  if (raw === 'elementpay' || raw === 'ep') return 'elementpay';
+  return 'chillpay';
 }
 
 function merchantsRegisterKindUrl(kind) {
-  return `/admin/merchants?kind=${kind === 'jpay' ? 'jpay' : 'chillpay'}`;
+  const k = String(kind || '').toLowerCase();
+  if (k === 'jpay') return '/admin/merchants?kind=jpay';
+  if (k === 'elementpay') return '/admin/merchants?kind=elementpay';
+  return '/admin/merchants?kind=chillpay';
 }
 
 /**
@@ -13899,7 +14513,7 @@ function merchantsRegisterKindUrl(kind) {
 function inferMerchantPgKind(m) {
   if (!m || typeof m !== 'object') return 'chillpay';
   const saved = String(m.merchantPgKind || '').toLowerCase().trim();
-  if (saved === 'jpay' || saved === 'chillpay') return saved;
+  if (saved === 'jpay' || saved === 'chillpay' || saved === 'elementpay') return saved;
   const jpayCb = String(m.jpayRouteCallbackKey || '').trim();
   const jpayRs = String(m.jpayRouteResultKey || '').trim();
   if (jpayCb || jpayRs) return 'jpay';
@@ -13911,7 +14525,7 @@ function inferMerchantPgKind(m) {
   const tid = String(m.internalTargetId || '').trim();
   if (tid && INTERNAL_TARGETS.has(tid)) {
     const pg = String(INTERNAL_TARGETS.get(tid).pgProvider || '').toLowerCase().trim();
-    if (pg === 'jpay' || pg === 'chillpay') return pg;
+    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay') return pg;
   }
   return 'chillpay';
 }
@@ -13920,17 +14534,19 @@ function resolveMerchantListPgAcquirer(m) {
   return inferMerchantPgKind(m);
 }
 
-/** 가맹점 목록: ChillPay 결제 방식(A/B). JPAY는 표시용 대시 */
+/** 가맹점 목록: ChillPay 결제 방식(A/B). JPAY/ElementPay는 표시용 대시 */
 function merchantChillpayPayModeLabel(locale, m) {
-  if (resolveMerchantListPgAcquirer(m) === 'jpay') return t(locale, 'merchants_mode_jpay_dash');
+  const pg = resolveMerchantListPgAcquirer(m);
+  if (pg === 'jpay' || pg === 'elementpay') return t(locale, 'merchants_mode_jpay_dash');
   const cb = String(m.routeCallbackKey || '').trim();
   if (isChillpayRedirectHostedPayment(cb)) return t(locale, 'merchants_mode_a_redirect');
   return t(locale, 'merchants_mode_b_inline');
 }
 
-/** 가맹점 목록: Recurring Y/N (ChillPay만; JPAY는 —) */
+/** 가맹점 목록: Recurring Y/N (ChillPay만; JPAY/EP는 —) */
 function merchantChillpayRecurringCell(m) {
-  if (resolveMerchantListPgAcquirer(m) === 'jpay') return '—';
+  const pg = resolveMerchantListPgAcquirer(m);
+  if (pg === 'jpay' || pg === 'elementpay') return '—';
   return m.chillpayRecurring === 'Y' ? 'Y' : 'N';
 }
 
@@ -14158,12 +14774,16 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
 
   const merchantId = (rawMerchantId || '').trim();
   const origId = (originalMerchantId || '').trim();
-  const pgKind = String(rawPgKind || '').toLowerCase().trim() === 'jpay' ? 'jpay' : 'chillpay';
+  const pgKindRaw = String(rawPgKind || '').toLowerCase().trim();
+  const pgKind =
+    pgKindRaw === 'jpay' ? 'jpay' : pgKindRaw === 'elementpay' ? 'elementpay' : 'chillpay';
   let chillCb = '';
   let chillRs = '';
   let jpayCb = '';
   let jpayRs = '';
-  if (pgKind === 'jpay') {
+  if (pgKind === 'elementpay') {
+    // EP: no PG slot URLs — merchant callback/result only
+  } else if (pgKind === 'jpay') {
     const slot =
       normalizePgNotiRouteNumber(rawJpaySlotNo) ||
       parseJpayNotiSlotFromToken(extractJpayPathToken(String(rawJpayRouteCallbackKey || '').trim()));
@@ -14267,7 +14887,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
       : '';
   const relayOffDevDedicatedSaved =
     !enableRelayOn && relayOffForwardSaved === 'dev_internal' && req.body && req.body.relayOffDevDedicatedUse === 'on';
-  if (pgKind === 'jpay' && relayOffDevDedicatedSaved) {
+  if ((pgKind === 'jpay' || pgKind === 'elementpay') && relayOffDevDedicatedSaved) {
     const probeMerchant = {
       internalTargetId: internalTargetId || '',
       relayOffDevCallbackUrl: relayOffDevCbSaved,
@@ -14284,7 +14904,35 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
   }
   const enableDevInternalSaved = enableDevInternal === 'on' || relayOffDevDedicatedSaved;
   let merchantRecord;
-  if (pgKind === 'jpay') {
+  if (pgKind === 'elementpay') {
+    merchantRecord = buildElementPayMerchantObject({
+      merchantId,
+      callbackUrl: cbSaved,
+      resultUrl: rsSaved,
+      routeNo: rnSaved,
+      internalTargetId,
+      options: {
+        enableRelay: enableRelayOn,
+        enableInternal: enableInternal === 'on',
+        enableDevInternal: enableDevInternalSaved,
+        relayFormat: fmt,
+        resultDeliveryMode: resultDeliveryModeSaved,
+        enableDealmaiWebhook: enableDealmaiWebhook === 'on',
+        dealmaiPartnerCode: String(rawDealmaiPartnerCode || '').trim(),
+        relayOffForwardTarget: relayOffForwardSaved,
+        relayOffInternalCallbackUrl: relayOffInternalCbSaved,
+        relayOffInternalResultUrl: relayOffInternalRsSaved,
+        relayOffDevCallbackUrl: relayOffDevCbSaved,
+        relayOffDevResultUrl: relayOffDevRsSaved,
+        relayOffDevDedicatedUse: relayOffDevDedicatedSaved,
+      },
+      prev,
+      icopayMeta: {
+        compId: merchantId,
+        compName: String((prev && (prev.name || prev.label)) || '').trim() || undefined,
+      },
+    });
+  } else if (pgKind === 'jpay') {
     merchantRecord = buildJpayMerchantObject({
       merchantId,
       slot: jpaySlotSaved,
@@ -14403,12 +15051,19 @@ app.post('/api/v1/icopay/merchants/provision', (req, res) => {
       return res.status(cached.status).json(cached.body);
     }
   }
-  const result = provisionJpayMerchant(req.body, {
+  const pgKindIn = String((req.body && req.body.pgKind) || '')
+    .toLowerCase()
+    .trim();
+  const provisionMeta = {
     locale,
     requestId,
     clientIp: provisionClientIp(req),
     actor: 'icopay-provision',
-  });
+  };
+  const result =
+    pgKindIn === 'elementpay'
+      ? provisionElementPayMerchant(req.body, provisionMeta)
+      : provisionJpayMerchant(req.body, provisionMeta);
   if (!result.ok) {
     return sendProvisionJson(
       res,
@@ -14430,10 +15085,13 @@ app.get('/api/v1/icopay/merchants/:merchantId', (req, res) => {
     return sendProvisionJson(res, auth.status, { success: false, errorCode: auth.errorCode }, locale);
   }
   const pgKind = String(req.query.pgKind || '').toLowerCase().trim();
-  if (pgKind !== 'jpay') {
+  if (pgKind !== 'jpay' && pgKind !== 'elementpay') {
     return sendProvisionJson(res, 400, { success: false, errorCode: pgKind ? 'INVALID_PG_KIND' : 'INVALID_REQUEST' }, locale);
   }
-  const result = getJpayMerchantProvision(req.params.merchantId);
+  const result =
+    pgKind === 'elementpay'
+      ? getElementPayMerchantProvision(req.params.merchantId)
+      : getJpayMerchantProvision(req.params.merchantId);
   if (!result.ok) {
     return sendProvisionJson(res, result.status, { success: false, errorCode: result.errorCode }, locale);
   }
@@ -14446,12 +15104,19 @@ app.put('/api/v1/icopay/merchants/:merchantId', (req, res) => {
   if (!auth.ok) {
     return sendProvisionJson(res, auth.status, { success: false, errorCode: auth.errorCode }, locale);
   }
-  const result = updateJpayMerchantProvision(req.params.merchantId, req.body, {
+  const pgKindIn = String((req.body && req.body.pgKind) || req.query.pgKind || '')
+    .toLowerCase()
+    .trim();
+  const provisionMeta = {
     locale,
     requestId: String(req.headers['x-icopay-request-id'] || '').trim(),
     clientIp: provisionClientIp(req),
     actor: 'icopay-provision',
-  });
+  };
+  const result =
+    pgKindIn === 'elementpay'
+      ? updateElementPayMerchantProvision(req.params.merchantId, req.body, provisionMeta)
+      : updateJpayMerchantProvision(req.params.merchantId, req.body, provisionMeta);
   if (!result.ok) {
     return sendProvisionJson(
       res,
@@ -14469,18 +15134,18 @@ app.delete('/api/v1/icopay/merchants/:merchantId', (req, res) => {
   if (!auth.ok) {
     return sendProvisionJson(res, auth.status, { success: false, errorCode: auth.errorCode }, locale);
   }
-  const pgKind = String(req.query.pgKind || 'jpay').toLowerCase().trim();
-  if (pgKind && pgKind !== 'jpay') {
-    return sendProvisionJson(res, 400, { success: false, errorCode: 'INVALID_PG_KIND' }, locale);
-  }
-  const force =
-    String(req.query.force || '').toLowerCase() === 'true' ||
-    String(req.query.force || '') === '1';
-  const result = deleteJpayMerchantProvision(req.params.merchantId, force, {
-    locale,
-    clientIp: provisionClientIp(req),
-    actor: 'icopay-provision',
-  });
+  const pgKind = String(req.query.pgKind || '').toLowerCase().trim();
+  const force = req.query.force === '1' || req.query.force === 'true';
+  const result =
+    pgKind === 'elementpay'
+      ? deleteElementPayMerchantProvision(req.params.merchantId, force, {
+          clientIp: provisionClientIp(req),
+          actor: 'icopay-provision',
+        })
+      : deleteJpayMerchantProvision(req.params.merchantId, force, {
+          clientIp: provisionClientIp(req),
+          actor: 'icopay-provision',
+        });
   if (!result.ok) {
     return sendProvisionJson(res, result.status, { success: false, errorCode: result.errorCode }, locale);
   }

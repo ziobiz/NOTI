@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "icopayNotifyUrl": "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/ELEMENTPAY",
+  "timeoutMs": 25000,
+  "note": "EP Cabinet Webhook → POST https://noti.icopay.net/noti/elementpay . NOTI forwards raw form body to icopayNotifyUrl and returns the ICOPAY response unchanged for check/pay."
+}
