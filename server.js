@@ -1618,7 +1618,7 @@ function trySaveJsonConfigOrWarn(filePath, value, context) {
 }
 
 // ========== 전산 노티 대상 설정 (internal targets) ==========
-// id -> { id, name, callbackUrl, resultUrl, devCallbackUrl?, devResultUrl?, pgProvider?: chillpay|jpay, linkedMid?: string }
+// id -> { id, name, callbackUrl, resultUrl, devCallbackUrl?, devResultUrl?, pgProvider?: chillpay|jpay|elementpay, linkedMid?: string }
 /** ChillPay 전산 연결 MID 기본값(설정 Production Mid 가 없을 때) */
 const CHILLPAY_INTERNAL_LINKED_MID = 'M035594';
 
@@ -1744,15 +1744,28 @@ function getJpayProfileMidsUniqueSorted() {
   return out;
 }
 
+function normalizeInternalTargetPgProvider(raw) {
+  const p = String(raw || '')
+    .trim()
+    .toLowerCase();
+  if (p === 'jpay') return 'jpay';
+  if (p === 'elementpay' || p === 'ep') return 'elementpay';
+  return 'chillpay';
+}
+
 function loadInternalTargets() {
   const loaded = loadJsonConfig(INTERNAL_TARGETS_CONFIG_PATH, null);
   if (loaded && typeof loaded === 'object') {
     const map = new Map();
     Object.entries(loaded).forEach(([id, v]) => {
       if (!v || typeof v !== 'object') return;
-      const pg = (v.pgProvider || '').toString().trim().toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
+      const pg = normalizeInternalTargetPgProvider(v.pgProvider);
       const linkedMid =
-        pg === 'chillpay' ? getChillpayProductionMidForInternalLinked() : String(v.linkedMid || '').trim();
+        pg === 'chillpay'
+          ? getChillpayProductionMidForInternalLinked()
+          : pg === 'jpay'
+            ? String(v.linkedMid || '').trim()
+            : String(v.linkedMid || '').trim();
       const entry = {
         id: v.id || id,
         name: v.name || '',
@@ -24871,6 +24884,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
   const formDevCbVal = editTarget ? escAttr(editTarget.devCallbackUrl || '') : '';
   const formDevResVal = editTarget ? escAttr(editTarget.devResultUrl || '') : '';
   const pgIsJpay = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'jpay');
+  const pgIsElementPay = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'elementpay');
   const formTzMode = editTarget ? normalizeInternalTargetTimezoneMode(editTarget.timezoneMode) : 'global';
   const formTzStd = editTarget ? (editTarget.standardTimezone || DEFAULT_CHILLPAY_TIMEZONE) : DEFAULT_CHILLPAY_TIMEZONE;
   const formTzOp = editTarget ? (editTarget.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE) : DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
@@ -24889,12 +24903,19 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
       : '';
   const rows = Array.from(INTERNAL_TARGETS.values())
     .map((target) => {
-      const pg = (target.pgProvider || 'chillpay') === 'jpay' ? 'jpay' : 'chillpay';
-      const pgLabel = pg === 'jpay' ? (t(locale, 'pg_provider_jpay') || 'JPAY') : (t(locale, 'pg_provider_chillpay') || 'ChillPay');
+      const pg = normalizeInternalTargetPgProvider(target.pgProvider);
+      const pgLabel =
+        pg === 'jpay'
+          ? t(locale, 'pg_provider_jpay') || 'JPAY'
+          : pg === 'elementpay'
+            ? t(locale, 'pg_provider_elementpay') || t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay'
+            : t(locale, 'pg_provider_chillpay') || 'ChillPay';
       const linkCell =
         pg === 'chillpay'
           ? escCell(getChillpayProductionMidForInternalLinked())
-          : escCell((target.linkedMid || '').trim() || '-');
+          : pg === 'jpay'
+            ? escCell((target.linkedMid || '').trim() || '-')
+            : escCell((target.linkedMid || '').trim() || '—');
       const tzDisp = formatInternalTargetTimezoneDisplay(locale, target);
       return `<tr>
           <td class="cell-compact">${escCell(target.id)}</td>
@@ -25013,11 +25034,13 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         <label>${t(locale, 'internal_targets_name')}<input type="text" name="name" required value="${formNameVal}" /></label>
         <label>${t(locale, 'internal_targets_pg_provider')}
           <select name="pgProvider" id="internal-target-pg" style="width:100%;max-width:320px;padding:8px 10px;margin-top:4px;border-radius:6px;border:1px solid #d1d5db;">
-            <option value="chillpay"${pgIsJpay ? '' : ' selected'}>${t(locale, 'pg_provider_chillpay') || 'ChillPay'}</option>
+            <option value="chillpay"${!pgIsJpay && !pgIsElementPay ? ' selected' : ''}>${t(locale, 'pg_provider_chillpay') || 'ChillPay'}</option>
             <option value="jpay"${pgIsJpay ? ' selected' : ''}>${t(locale, 'pg_provider_jpay') || 'JPAY'}</option>
+            <option value="elementpay"${pgIsElementPay ? ' selected' : ''}>${t(locale, 'pg_provider_elementpay') || t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay'}</option>
           </select>
         </label>
-        <p class="admin-page-desc">${t(locale, 'internal_targets_jpay_fields_hint')}</p>
+        <p class="admin-page-desc" id="internal-pg-hint-jpay" style="display:${pgIsJpay ? 'block' : 'none'};">${t(locale, 'internal_targets_jpay_fields_hint')}</p>
+        <p class="admin-page-desc" id="internal-pg-hint-ep" style="display:${pgIsElementPay ? 'block' : 'none'};">${t(locale, 'internal_targets_elementpay_fields_hint')}</p>
         <div id="internal-mid-chillpay-wrap" style="margin-top:10px;">
           <div style="font-size:14px;color:#1e293b;"><strong>${t(locale, 'internal_targets_linked_mid')}</strong>:
             <code style="background:#f1f5f9;padding:4px 10px;border-radius:6px;font-size:13px;">${chillMidDisplay}</code>
@@ -25032,7 +25055,10 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
             </select>
           </label>
         </div>
-        <p class="admin-page-desc">${t(locale, 'internal_targets_linked_mid_hint')}</p>
+        <div id="internal-mid-ep-wrap" style="display:none;margin-top:10px;">
+          <p class="admin-page-desc" style="margin:0;">${t(locale, 'internal_targets_elementpay_mid_hint')}</p>
+        </div>
+        <p class="admin-page-desc" id="internal-linked-mid-hint">${t(locale, 'internal_targets_linked_mid_hint')}</p>
         <label>${t(locale, 'internal_targets_callback_url')}<input type="text" name="callbackUrl" required value="${formCbVal}" /></label>
         <label>${t(locale, 'internal_targets_result_url')}<input type="text" name="resultUrl" value="${formResVal}" /></label>
         <p class="admin-page-desc">${t(locale, 'internal_targets_dev_urls_hint')}</p>
@@ -25064,11 +25090,21 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         var pg = document.getElementById('internal-target-pg');
         var wC = document.getElementById('internal-mid-chillpay-wrap');
         var wJ = document.getElementById('internal-mid-jpay-wrap');
+        var wE = document.getElementById('internal-mid-ep-wrap');
+        var hintJ = document.getElementById('internal-pg-hint-jpay');
+        var hintE = document.getElementById('internal-pg-hint-ep');
+        var midHint = document.getElementById('internal-linked-mid-hint');
         function syncPg() {
           if (!pg) return;
-          var j = pg.value === 'jpay';
-          if (wC) wC.style.display = j ? 'none' : 'block';
+          var v = pg.value;
+          var j = v === 'jpay';
+          var ep = v === 'elementpay';
+          if (wC) wC.style.display = !j && !ep ? 'block' : 'none';
           if (wJ) wJ.style.display = j ? 'block' : 'none';
+          if (wE) wE.style.display = ep ? 'block' : 'none';
+          if (hintJ) hintJ.style.display = j ? 'block' : 'none';
+          if (hintE) hintE.style.display = ep ? 'block' : 'none';
+          if (midHint) midHint.style.display = ep ? 'none' : 'block';
         }
         function syncTz() {
           var wrap = document.getElementById('internal-target-tz-custom-wrap');
@@ -25866,7 +25902,7 @@ app.post('/admin/internal-targets', requireAuth, requirePage('internal_targets')
   const locale = getLocale(req);
   const { id: rawId, name, callbackUrl, resultUrl, devCallbackUrl, devResultUrl, pgProvider, linkedMid: rawLinkedMid } = req.body;
   const id = (rawId || '').toString().trim();
-  const pg = (pgProvider || '').toString().trim().toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
+  const pg = normalizeInternalTargetPgProvider(pgProvider);
   const jpayMidPick = (rawLinkedMid || '').toString().trim();
   const allowedJpayMids = new Set(getJpayProfileMidsUniqueSorted());
   if (!id || !name || !callbackUrl) {
@@ -25877,13 +25913,16 @@ app.post('/admin/internal-targets', requireAuth, requirePage('internal_targets')
   let linkedMid = '';
   if (pg === 'chillpay') {
     linkedMid = getChillpayProductionMidForInternalLinked();
-  } else {
+  } else if (pg === 'jpay') {
     linkedMid = jpayMidPick;
     if (linkedMid && !allowedJpayMids.has(linkedMid)) {
       return res
         .status(400)
         .send(t(locale, 'internal_targets_err_unknown_jpay_mid') || 'JPAY: MID is not registered in environment profiles.');
     }
+  } else {
+    // ElementPay: ChillPay/JPAY MID 슬롯 없음 — Callback/Result URL만 사용
+    linkedMid = '';
   }
   const actor = req.session.adminUser || 'unknown';
   const clientIp =
