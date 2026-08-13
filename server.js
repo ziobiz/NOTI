@@ -2026,6 +2026,16 @@ function getInternalTargetName(internalTargetId) {
   return (t && t.name) ? t.name : (internalTargetId || '-');
 }
 
+/** Infer ISO currency from internal-target id/name (for ICOPAY catalog). */
+function inferInternalTargetCurrency(id, name) {
+  const blob = `${id || ''} ${name || ''}`.toUpperCase();
+  if (/\bJPY\b/.test(blob) || /_JPY\b/.test(blob) || blob.includes('엔') || blob.includes('円')) return 'JPY';
+  if (/\bUSD\b/.test(blob) || /_USD\b/.test(blob) || blob.includes('달러') || blob.includes('DOLLAR')) return 'USD';
+  if (/\bTHB\b/.test(blob) || /_THB\b/.test(blob) || blob.includes('바트') || blob.includes('บาท')) return 'THB';
+  if (/\bKRW\b/.test(blob) || /_KRW\b/.test(blob) || blob.includes('원') || blob.includes('WON')) return 'KRW';
+  return '';
+}
+
 /** 등록된 전산 대상 목록 (동적 추가 반영을 위해 설정 파일에서 읽음) */
 function getInternalTargetsList() {
   const loaded = loadJsonConfig(INTERNAL_TARGETS_CONFIG_PATH, null);
@@ -2033,32 +2043,111 @@ function getInternalTargetsList() {
     if (Array.isArray(loaded)) {
       const list = loaded
         .filter((t) => t && typeof t === 'object')
-        .map((t) => ({
-          id: t.id || '',
-          name: t.name || t.id || '',
-          callbackUrl: t.callbackUrl || '',
-          resultUrl: t.resultUrl || '',
-          devCallbackUrl: String(t.devCallbackUrl || '').trim(),
-          devResultUrl: String(t.devResultUrl || '').trim(),
-        }));
+        .map((t) => {
+          const id = t.id || '';
+          const name = t.name || t.id || '';
+          const pgProvider = normalizeInternalTargetPgProvider(t.pgProvider);
+          const currency =
+            String(t.currency || '').trim().toUpperCase() || inferInternalTargetCurrency(id, name);
+          return {
+            id,
+            name,
+            callbackUrl: t.callbackUrl || '',
+            resultUrl: t.resultUrl || '',
+            devCallbackUrl: String(t.devCallbackUrl || '').trim(),
+            devResultUrl: String(t.devResultUrl || '').trim(),
+            pgProvider,
+            linkedMid: String(t.linkedMid || '').trim(),
+            currency,
+          };
+        });
       if (list.length) return list;
     } else {
-      const list = Object.entries(loaded).map(([k, v]) =>
-        v && typeof v === 'object'
-          ? {
-              id: v.id || k,
-              name: v.name || v.id || k,
-              callbackUrl: v.callbackUrl || '',
-              resultUrl: v.resultUrl || '',
-              devCallbackUrl: String(v.devCallbackUrl || '').trim(),
-              devResultUrl: String(v.devResultUrl || '').trim(),
-            }
-          : { id: k, name: k, callbackUrl: '', resultUrl: '', devCallbackUrl: '', devResultUrl: '' },
-      );
+      const list = Object.entries(loaded).map(([k, v]) => {
+        if (!(v && typeof v === 'object')) {
+          return {
+            id: k,
+            name: k,
+            callbackUrl: '',
+            resultUrl: '',
+            devCallbackUrl: '',
+            devResultUrl: '',
+            pgProvider: 'chillpay',
+            linkedMid: '',
+            currency: inferInternalTargetCurrency(k, k),
+          };
+        }
+        const id = v.id || k;
+        const name = v.name || v.id || k;
+        const pgProvider = normalizeInternalTargetPgProvider(v.pgProvider);
+        const currency =
+          String(v.currency || '').trim().toUpperCase() || inferInternalTargetCurrency(id, name);
+        return {
+          id,
+          name,
+          callbackUrl: v.callbackUrl || '',
+          resultUrl: v.resultUrl || '',
+          devCallbackUrl: String(v.devCallbackUrl || '').trim(),
+          devResultUrl: String(v.devResultUrl || '').trim(),
+          pgProvider,
+          linkedMid: String(v.linkedMid || '').trim(),
+          currency,
+        };
+      });
       if (list.length) return list;
     }
   }
-  return Array.from(INTERNAL_TARGETS.values());
+  return Array.from(INTERNAL_TARGETS.values()).map((t) => {
+    const id = t.id || '';
+    const name = t.name || id;
+    const pgProvider = normalizeInternalTargetPgProvider(t.pgProvider);
+    return {
+      ...t,
+      pgProvider,
+      currency: String(t.currency || '').trim().toUpperCase() || inferInternalTargetCurrency(id, name),
+    };
+  });
+}
+
+/**
+ * ICOPAY 노티생성용 전산 대상 카탈로그.
+ * Optional filter: pgProvider|pgKind = chillpay|jpay|elementpay|ep
+ */
+function buildIcopayInternalTargetsCatalog(filterRaw) {
+  const filter = String(filterRaw || '')
+    .trim()
+    .toLowerCase();
+  let want = '';
+  if (filter === 'jpay') want = 'jpay';
+  else if (filter === 'elementpay' || filter === 'ep' || filter === 'element') want = 'elementpay';
+  else if (filter === 'chillpay' || filter === 'chill') want = 'chillpay';
+  const list = getInternalTargetsList();
+  const out = [];
+  for (const t of list) {
+    if (!t || !t.id) continue;
+    const pg = normalizeInternalTargetPgProvider(t.pgProvider);
+    if (want && pg !== want) continue;
+    const currency =
+      String(t.currency || '').trim().toUpperCase() || inferInternalTargetCurrency(t.id, t.name);
+    const row = {
+      id: String(t.id).trim(),
+      name: String(t.name || t.id).trim(),
+      pgProvider: pg,
+      label: [pg === 'elementpay' ? 'ElementPay' : pg === 'jpay' ? 'JPAY' : 'ChillPay', currency, t.id, t.name]
+        .filter(Boolean)
+        .join(' · '),
+    };
+    if (currency) row.currency = currency;
+    if (t.linkedMid) row.linkedMid = String(t.linkedMid).trim();
+    out.push(row);
+  }
+  out.sort((a, b) => {
+    const pa = a.pgProvider === 'elementpay' ? 0 : a.pgProvider === 'jpay' ? 1 : 2;
+    const pb = b.pgProvider === 'elementpay' ? 0 : b.pgProvider === 'jpay' ? 1 : 2;
+    if (pa !== pb) return pa - pb;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  return out;
 }
 
 // ========== JPAY 환경 설정(프로필: MID/KEY·노티 URL 세그먼트) — 시스템 환경설정에서 관리 ==========
@@ -15535,7 +15624,27 @@ app.post('/admin/merchants/delete', requireAuth, requirePage('merchants'), (req,
   return res.redirect(merchantsRegisterKindUrl(inferMerchantPgKind(before)));
 });
 
-// ICOPAY JPAY Provision API (Bearer 인증)
+// ICOPAY 전산 대상(internal-targets) 목록 — 노티생성 드롭다운용
+app.get('/api/v1/icopay/internal-targets', (req, res) => {
+  const locale = provisionApiLocale(req);
+  const auth = authenticateIcopayProvisionRequest(req, locale);
+  if (!auth.ok) {
+    return sendProvisionJson(res, auth.status, { success: false, errorCode: auth.errorCode }, locale);
+  }
+  const filter =
+    (req.query && (req.query.pgProvider || req.query.pgKind || req.query.pg || '')) || '';
+  const targets = buildIcopayInternalTargetsCatalog(filter);
+  return res.status(200).json({
+    success: true,
+    data: targets,
+    meta: {
+      count: targets.length,
+      filter: String(filter || '').trim() || null,
+    },
+  });
+});
+
+// ICOPAY JPAY / ElementPay Provision API (Bearer 인증)
 app.post('/api/v1/icopay/merchants/provision', (req, res) => {
   const locale = provisionApiLocale(req);
   const auth = authenticateIcopayProvisionRequest(req, locale);
