@@ -436,6 +436,26 @@ const messages = {
     internal_targets_jpay_mid_no_profiles: '등록된 JPAY MID 없음 — 환경설정 → JPAY 환경 설정에서 MID를 입력하세요',
     internal_targets_err_unknown_jpay_mid: 'JPAY 환경 설정에 등록되지 않은 MID입니다.',
     internal_targets_err_unknown_merchant: '등록되지 않은 가맹점 ID입니다. 먼저 가맹점을 등록하세요.',
+    elementpay_settings_title: 'ElementPay 연동 설정',
+    elementpay_settings_desc:
+      'EP Cabinet에는 고정 Webhook URL 하나만 등록합니다. NOTI는 수신 후 ICOPAY pg-notify로 전달하며, 가맹 Callback/Result는 가맹 설정으로 처리합니다. ElementPay Merchant Key·Secret은 ICOPAY(tb_pg_agency)에만 두고 NOTI에는 등록하지 않습니다.',
+    elementpay_settings_label_webhook: 'EP Cabinet Webhook URL (고정)',
+    elementpay_settings_label_result: '브라우저 Result URL (고정)',
+    elementpay_settings_cabinet_hint:
+      'Cabinet → Webhooks에 위 Webhook URL을 등록하세요. 가맹점 Result URL은 EP에 등록하지 말고 ICOPAY success/reject URL(또는 가맹 resultUrl)을 사용합니다.',
+    elementpay_settings_no_api_key_hint:
+      'ChillPay/JPAY처럼 Mid·ApiKey를 NOTI에 넣을 필요가 없습니다. 서명 검증·가맹 키는 ICOPAY에서 수행합니다.',
+    elementpay_settings_label_enabled: 'ElementPay 수신 활성화',
+    elementpay_settings_label_icopay_url: 'ICOPAY 수신 URL (pg-notify …/ELEMENTPAY)',
+    elementpay_settings_icopay_url_hint:
+      'NOTI가 EP 웹훅을 받은 뒤 전달할 ICOPAY 미들웨어 URL입니다. 토큰이 포함된 전체 경로를 입력하세요. 환경변수 ELEMENTPAY_ICOPAY_NOTIFY_URL이 있으면 그쪽이 우선합니다.',
+    elementpay_settings_label_lookup_url: '주문 조회 URL (선택, Result용)',
+    elementpay_settings_lookup_url_hint:
+      'Result에서 가맹 매칭을 보강할 때 사용합니다. URL에 {order}를 넣을 수 있으며, 응답 JSON/헤더의 Comp-Id를 읽습니다. 비워 두면 생략합니다.',
+    elementpay_settings_label_timeout: 'ICOPAY 전달 타임아웃 (ms)',
+    elementpay_settings_env_url_override:
+      '환경변수 ELEMENTPAY_ICOPAY_NOTIFY_URL이 설정되어 있어 URL 필드는 읽기 전용입니다. 변경하려면 서버 환경변수를 수정하세요.',
+    elementpay_settings_saved_ok: 'ElementPay 연동 설정을 저장했습니다.',
     jpay_settings_title: 'JPAY 환경 설정',
     jpay_settings_desc: 'JPAY API에는 Route 파라미터가 없고 가맹점·거래 연동은 MID 기준입니다. 여기서는 환경(테스트/운영)별로 노티 수신 URL 슬롯(j1~j20)에 MID·API Key·명칭을 매핑합니다. 동일 jN URL로 노티가 오면 본문 MID로 운영/샌드 프로필을 구분합니다.',
     jpay_settings_add_section: '가맹점 추가',
@@ -1818,6 +1838,26 @@ const messages = {
     internal_targets_jpay_mid_no_profiles: '登録済み JPAY MID なし — 環境設定の JPAY 環境設定で MID を入力してください',
     internal_targets_err_unknown_jpay_mid: 'JPAY 環境設定に未登録の MID です。',
     internal_targets_err_unknown_merchant: '未登録の加盟店 ID です。先に加盟店を登録してください。',
+    elementpay_settings_title: 'ElementPay 連携設定',
+    elementpay_settings_desc:
+      'EP Cabinet には固定 Webhook URL を1つだけ登録します。NOTI は受信後 ICOPAY pg-notify へ転送し、加盟店 Callback/Result は加盟店設定で処理します。ElementPay Merchant Key・Secret は ICOPAY（tb_pg_agency）のみに置き、NOTI には登録しません。',
+    elementpay_settings_label_webhook: 'EP Cabinet Webhook URL（固定）',
+    elementpay_settings_label_result: 'ブラウザ Result URL（固定）',
+    elementpay_settings_cabinet_hint:
+      'Cabinet → Webhooks に上記 Webhook URL を登録してください。加盟店 Result URL は EP に登録せず、ICOPAY の success/reject URL（または加盟店 resultUrl）を使用します。',
+    elementpay_settings_no_api_key_hint:
+      'ChillPay/JPAY のように Mid・ApiKey を NOTI に入れる必要はありません。署名検証・加盟店キーは ICOPAY 側で行います。',
+    elementpay_settings_label_enabled: 'ElementPay 受信を有効化',
+    elementpay_settings_label_icopay_url: 'ICOPAY 受信 URL（pg-notify …/ELEMENTPAY）',
+    elementpay_settings_icopay_url_hint:
+      'NOTI が EP Webhook を受けた後に転送する ICOPAY ミドルウェア URL です。トークン付きの完全パスを入力してください。環境変数 ELEMENTPAY_ICOPAY_NOTIFY_URL がある場合はそちらが優先されます。',
+    elementpay_settings_label_lookup_url: '注文照会 URL（任意、Result 用）',
+    elementpay_settings_lookup_url_hint:
+      'Result で加盟店マッチングを補強するときに使います。URL に {order} を含められ、応答 JSON/ヘッダの Comp-Id を読みます。空なら省略します。',
+    elementpay_settings_label_timeout: 'ICOPAY 転送タイムアウト（ms）',
+    elementpay_settings_env_url_override:
+      '環境変数 ELEMENTPAY_ICOPAY_NOTIFY_URL が設定されているため URL 欄は読み取り専用です。変更する場合はサーバー環境変数を編集してください。',
+    elementpay_settings_saved_ok: 'ElementPay 連携設定を保存しました。',
     jpay_settings_title: 'JPAY 環境設定',
     jpay_settings_desc: 'JPAY API には Route パラメータはなく、加盟店・取引の識別は MID です。ここでは環境（テスト/本番）ごとに通知受信 URL スロット（j1~j20）へ MID・API キー・名称を割り当てます。同一 jN URL の通知は本文 MID で本番/サンドボックス行を判別します。',
     jpay_settings_add_section: '加盟店追加',
@@ -3172,6 +3212,26 @@ const messages = {
     internal_targets_jpay_mid_no_profiles: 'No JPAY MIDs — enter MID under Settings → JPAY environment settings first',
     internal_targets_err_unknown_jpay_mid: 'MID is not registered in JPAY environment settings.',
     internal_targets_err_unknown_merchant: 'Unknown merchant ID. Register the merchant first.',
+    elementpay_settings_title: 'ElementPay integration settings',
+    elementpay_settings_desc:
+      'Register only one fixed Webhook URL in the EP Cabinet. NOTI forwards to ICOPAY pg-notify; merchant Callback/Result use merchant settings. ElementPay Merchant Key/Secret stay on ICOPAY (tb_pg_agency) — do not store them on NOTI.',
+    elementpay_settings_label_webhook: 'EP Cabinet Webhook URL (fixed)',
+    elementpay_settings_label_result: 'Browser Result URL (fixed)',
+    elementpay_settings_cabinet_hint:
+      'Register the Webhook URL above in Cabinet → Webhooks. Do not register merchant Result URLs on EP; use ICOPAY success/reject URLs (or merchant resultUrl).',
+    elementpay_settings_no_api_key_hint:
+      'Unlike ChillPay/JPAY, you do not need Mid/ApiKey on NOTI. Signature verification and merchant keys are handled by ICOPAY.',
+    elementpay_settings_label_enabled: 'Enable ElementPay ingress',
+    elementpay_settings_label_icopay_url: 'ICOPAY notify URL (pg-notify …/ELEMENTPAY)',
+    elementpay_settings_icopay_url_hint:
+      'URL NOTI calls after receiving an EP webhook. Enter the full path including the token. Env ELEMENTPAY_ICOPAY_NOTIFY_URL overrides this field when set.',
+    elementpay_settings_label_lookup_url: 'Order lookup URL (optional, for Result)',
+    elementpay_settings_lookup_url_hint:
+      'Used to strengthen merchant matching on Result. May include {order}; Comp-Id is read from JSON/headers. Leave blank to skip.',
+    elementpay_settings_label_timeout: 'ICOPAY forward timeout (ms)',
+    elementpay_settings_env_url_override:
+      'ELEMENTPAY_ICOPAY_NOTIFY_URL is set, so this URL field is read-only. Change the server environment variable to update it.',
+    elementpay_settings_saved_ok: 'ElementPay integration settings saved.',
     jpay_settings_title: 'JPAY environment settings',
     jpay_settings_desc: 'JPAY has no Route parameter; merchants and traffic are keyed by MID. Here you map MID, API key, and label to noti receive URL slots (j1–j20) per environment (sandbox/production). For the same jN URL, the notify body MID picks the correct profile row.',
     jpay_settings_add_section: 'Add merchant',
@@ -4545,6 +4605,26 @@ const messages = {
     internal_targets_jpay_mid_no_profiles: 'ยังไม่มี MID ของ JPAY — กรอก MID ในการตั้งค่าสภาพแวดล้อม JPAY ที่การตั้งค่า',
     internal_targets_err_unknown_jpay_mid: 'MID นี้ไม่ได้อยู่ในการตั้งค่าสภาพแวดล้อม JPAY',
     internal_targets_err_unknown_merchant: 'ไม่มีรหัสร้านค้านี้ โปรดลงทะเบียนร้านค้าก่อน',
+    elementpay_settings_title: 'การตั้งค่าการเชื่อมต่อ ElementPay',
+    elementpay_settings_desc:
+      'ลงทะเบียน Webhook URL คงที่เพียงหนึ่งรายการใน EP Cabinet เท่านั้น NOTI จะส่งต่อไปยัง ICOPAY pg-notify ส่วน Callback/Result ของร้านค้าใช้การตั้งค่าร้านค้า ElementPay Merchant Key/Secret เก็บที่ ICOPAY (tb_pg_agency) เท่านั้น — ไม่ลงทะเบียนบน NOTI',
+    elementpay_settings_label_webhook: 'EP Cabinet Webhook URL (คงที่)',
+    elementpay_settings_label_result: 'Browser Result URL (คงที่)',
+    elementpay_settings_cabinet_hint:
+      'ลงทะเบียน Webhook URL ด้านบนใน Cabinet → Webhooks อย่าลงทะเบียน Result URL ของร้านค้าบน EP ใช้ success/reject URL ของ ICOPAY (หรือ resultUrl ของร้านค้า)',
+    elementpay_settings_no_api_key_hint:
+      'ต่างจาก ChillPay/JPAY ไม่ต้องใส่ Mid/ApiKey บน NOTI การตรวจลายเซ็นและคีย์ร้านค้าทำที่ ICOPAY',
+    elementpay_settings_label_enabled: 'เปิดรับ ElementPay',
+    elementpay_settings_label_icopay_url: 'URL รับของ ICOPAY (pg-notify …/ELEMENTPAY)',
+    elementpay_settings_icopay_url_hint:
+      'URL ที่ NOTI เรียกหลังรับ EP webhook ใส่พาธเต็มรวมโทเคน หากมีตัวแปรสภาพแวดล้อม ELEMENTPAY_ICOPAY_NOTIFY_URL จะใช้ค่านั้นก่อน',
+    elementpay_settings_label_lookup_url: 'URL ค้นหาออเดอร์ (ไม่บังคับ สำหรับ Result)',
+    elementpay_settings_lookup_url_hint:
+      'ใช้เสริมการจับคู่ร้านค้าบน Result ใส่ {order} ใน URL ได้ และอ่าน Comp-Id จาก JSON/เฮดเดอร์ เว้นว่างเพื่อข้าม',
+    elementpay_settings_label_timeout: 'หมดเวลาส่งต่อ ICOPAY (ms)',
+    elementpay_settings_env_url_override:
+      'ตั้งค่า ELEMENTPAY_ICOPAY_NOTIFY_URL แล้ว ช่อง URL เป็นแบบอ่านอย่างเดียว เปลี่ยนที่ตัวแปรสภาพแวดล้อมของเซิร์ฟเวอร์',
+    elementpay_settings_saved_ok: 'บันทึกการตั้งค่า ElementPay แล้ว',
     jpay_settings_title: 'การตั้งค่าสภาพแวดล้อม JPAY',
     jpay_settings_desc: 'JPAY API ไม่มีพารามิเตอร์ Route การเชื่อมโยงใช้ MID ที่นี่แมป MID·API Key·ชื่อไปยังช่อง URL รับแจ้ง j1–j20 ต่อสภาพแวดล้อม แจ้งเตือน jN เดียวกันใช้ MID ในเนื้อหาแยกแถว',
     jpay_settings_add_section: 'เพิ่มร้านค้า',
@@ -5878,6 +5958,26 @@ const messages = {
     internal_targets_jpay_mid_no_profiles: '尚无 JPAY MID — 请先在环境设置 → JPAY 环境设置中填写 MID',
     internal_targets_err_unknown_jpay_mid: '该 MID 未在 JPAY 环境设置中登记。',
     internal_targets_err_unknown_merchant: '商户 ID 未注册，请先添加商户。',
+    elementpay_settings_title: 'ElementPay 对接设置',
+    elementpay_settings_desc:
+      '在 EP Cabinet 仅注册一个固定 Webhook URL。NOTI 接收后转发到 ICOPAY pg-notify；商户 Callback/Result 按商户配置处理。ElementPay Merchant Key/Secret 只保存在 ICOPAY（tb_pg_agency），不要登记到 NOTI。',
+    elementpay_settings_label_webhook: 'EP Cabinet Webhook URL（固定）',
+    elementpay_settings_label_result: '浏览器 Result URL（固定）',
+    elementpay_settings_cabinet_hint:
+      '请在 Cabinet → Webhooks 注册上方 Webhook URL。不要在 EP 注册商户 Result URL，请使用 ICOPAY 的 success/reject URL（或商户 resultUrl）。',
+    elementpay_settings_no_api_key_hint:
+      '与 ChillPay/JPAY 不同，NOTI 无需填写 Mid/ApiKey。签名校验与商户密钥由 ICOPAY 处理。',
+    elementpay_settings_label_enabled: '启用 ElementPay 接收',
+    elementpay_settings_label_icopay_url: 'ICOPAY 接收 URL（pg-notify …/ELEMENTPAY）',
+    elementpay_settings_icopay_url_hint:
+      'NOTI 收到 EP Webhook 后转发的 ICOPAY 中间件 URL。请填写含 token 的完整路径。若设置了环境变量 ELEMENTPAY_ICOPAY_NOTIFY_URL，则以环境变量为准。',
+    elementpay_settings_label_lookup_url: '订单查询 URL（可选，用于 Result）',
+    elementpay_settings_lookup_url_hint:
+      '用于加强 Result 的商户匹配。URL 可含 {order}，并从 JSON/响应头读取 Comp-Id。留空则跳过。',
+    elementpay_settings_label_timeout: 'ICOPAY 转发超时（ms）',
+    elementpay_settings_env_url_override:
+      '已设置环境变量 ELEMENTPAY_ICOPAY_NOTIFY_URL，URL 字段为只读。请修改服务器环境变量。',
+    elementpay_settings_saved_ok: '已保存 ElementPay 对接设置。',
     jpay_settings_title: 'JPAY 环境设置',
     jpay_settings_desc: 'JPAY API 无 Route 参数，商户与交易以 MID 标识。此处按环境将 MID、API Key、名称映射到通知接收 URL 槽位（j1~j20）。同一 jN URL 的通知依正文 MID 匹配对应行。',
     jpay_settings_add_section: '商户添加',

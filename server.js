@@ -3509,13 +3509,45 @@ function loadElementPayIngressConfig() {
   return {
     enabled: fromFile.enabled !== false,
     icopayNotifyUrl: envUrl || String(fromFile.icopayNotifyUrl || '').trim(),
+    icopayNotifyUrlFromEnv: !!envUrl,
     /** Optional: GET/POST URL with `{order}` — response JSON/header Comp-Id for Result matching */
     icopayOrderLookupUrl: envLookup || String(fromFile.icopayOrderLookupUrl || '').trim(),
+    icopayOrderLookupUrlFromEnv: !!envLookup,
     timeoutMs: Math.max(
       3000,
       Math.min(120000, Number(fromFile.timeoutMs) || Number(process.env.ELEMENTPAY_ICOPAY_TIMEOUT_MS) || 25000),
     ),
+    note: String(fromFile.note || '').trim(),
   };
+}
+
+function saveElementPayIngressConfig(patch) {
+  const cur = loadJsonConfig(ELEMENTPAY_INGRESS_CONFIG_PATH, {}) || {};
+  const next = {
+    enabled: patch.enabled !== undefined ? !!patch.enabled : cur.enabled !== false,
+    icopayNotifyUrl:
+      patch.icopayNotifyUrl !== undefined
+        ? String(patch.icopayNotifyUrl || '').trim()
+        : String(cur.icopayNotifyUrl || '').trim(),
+    icopayOrderLookupUrl:
+      patch.icopayOrderLookupUrl !== undefined
+        ? String(patch.icopayOrderLookupUrl || '').trim()
+        : String(cur.icopayOrderLookupUrl || '').trim(),
+    timeoutMs: Math.max(
+      3000,
+      Math.min(
+        120000,
+        Number(patch.timeoutMs != null ? patch.timeoutMs : cur.timeoutMs) || 25000,
+      ),
+    ),
+    note:
+      patch.note !== undefined
+        ? String(patch.note || '').trim()
+        : String(cur.note || '').trim() ||
+          'EP Cabinet Webhooks → POST https://noti.icopay.net/noti/elementpay . Merchant Key/Secret stay on ICOPAY.',
+  };
+  saveJsonConfig(ELEMENTPAY_INGRESS_CONFIG_PATH, next);
+  return next;
 }
 
 /** Fixed public EP ingress URLs (Cabinet Webhook + browser Result). No per-merchant slots. */
@@ -12218,6 +12250,67 @@ function renderJpayEnvironmentCard(locale, query) {
   );
 }
 
+function renderElementPayIngressSettingsCard(locale, query) {
+  const esc = (s) =>
+    String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/"/g, '&quot;');
+  const cfg = loadElementPayIngressConfig();
+  const urls = getElementPayPublicIngressUrls();
+  const q = query || {};
+  let inlineAlert = '';
+  if (q.epIngressSaved === '1') {
+    inlineAlert = `<div class="alert alert-ok" style="margin-bottom:12px;">${esc(t(locale, 'elementpay_settings_saved_ok'))}</div>`;
+  }
+  const confirmSave = String(t(locale, 'merchants_confirm_save') || 'Save?').replace(/'/g, "\\'");
+  const envUrlNote = cfg.icopayNotifyUrlFromEnv
+    ? `<p class="admin-page-desc" style="color:#b45309;">${esc(t(locale, 'elementpay_settings_env_url_override'))}</p>`
+    : '';
+  return `<div class="card card-chillpay" style="margin-top:18px;border:1px solid #a7f3d0;background:#f0fdf4;">
+      <h2 style="margin-top:0;color:#065f46;">${esc(t(locale, 'elementpay_settings_title'))}</h2>
+      <p class="admin-page-desc">${esc(t(locale, 'elementpay_settings_desc'))}</p>
+      ${inlineAlert}
+      <div style="margin:12px 0;padding:12px 14px;background:#ecfdf5;border:1px solid #6ee7b7;border-radius:8px;font-size:13px;">
+        <div style="margin-bottom:8px;"><strong>${esc(t(locale, 'elementpay_settings_label_webhook'))}</strong>
+          <code style="display:block;margin-top:4px;word-break:break-all;background:#fff;padding:6px 8px;border-radius:6px;">${esc(urls.elementpayWebhookUrl)}</code>
+        </div>
+        <div><strong>${esc(t(locale, 'elementpay_settings_label_result'))}</strong>
+          <code style="display:block;margin-top:4px;word-break:break-all;background:#fff;padding:6px 8px;border-radius:6px;">${esc(urls.elementpayResultUrl)}</code>
+        </div>
+        <p class="admin-page-desc" style="margin:10px 0 0;">${esc(t(locale, 'elementpay_settings_cabinet_hint'))}</p>
+      </div>
+      <p class="admin-page-desc">${esc(t(locale, 'elementpay_settings_no_api_key_hint'))}</p>
+      <form method="post" action="/admin/settings/elementpay-ingress" onsubmit="return confirm('${confirmSave}');">
+        <label style="display:flex;align-items:center;gap:8px;margin-top:12px;">
+          <input type="checkbox" name="enabled" value="on"${cfg.enabled ? ' checked' : ''} />
+          ${esc(t(locale, 'elementpay_settings_label_enabled'))}
+        </label>
+        <label style="margin-top:14px;display:block;font-size:14px;">
+          ${esc(t(locale, 'elementpay_settings_label_icopay_url'))}
+          <input type="url" name="icopayNotifyUrl" value="${esc(cfg.icopayNotifyUrl)}" ${cfg.icopayNotifyUrlFromEnv ? 'readonly' : ''}
+            style="width:100%;max-width:720px;margin-top:4px;padding:8px 10px;box-sizing:border-box;border-radius:6px;border:1px solid #d1d5db;font-family:monospace;font-size:12px;${cfg.icopayNotifyUrlFromEnv ? 'background:#f3f4f6;' : ''}"
+            placeholder="https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/{token}/ELEMENTPAY" />
+        </label>
+        ${envUrlNote}
+        <p class="admin-page-desc">${esc(t(locale, 'elementpay_settings_icopay_url_hint'))}</p>
+        <label style="margin-top:12px;display:block;font-size:14px;">
+          ${esc(t(locale, 'elementpay_settings_label_lookup_url'))}
+          <input type="url" name="icopayOrderLookupUrl" value="${esc(cfg.icopayOrderLookupUrl)}" ${cfg.icopayOrderLookupUrlFromEnv ? 'readonly' : ''}
+            style="width:100%;max-width:720px;margin-top:4px;padding:8px 10px;box-sizing:border-box;border-radius:6px;border:1px solid #d1d5db;font-family:monospace;font-size:12px;"
+            placeholder="https://…/order-lookup?order={order}" />
+        </label>
+        <p class="admin-page-desc">${esc(t(locale, 'elementpay_settings_lookup_url_hint'))}</p>
+        <label style="margin-top:12px;display:block;font-size:14px;">
+          ${esc(t(locale, 'elementpay_settings_label_timeout'))}
+          <input type="number" name="timeoutMs" min="3000" max="120000" step="1000" value="${Number(cfg.timeoutMs) || 25000}"
+            style="width:140px;margin-top:4px;padding:8px 10px;box-sizing:border-box;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <button type="submit" style="margin-top:16px;background:#059669;">${esc(t(locale, 'common_save'))}</button>
+      </form>
+    </div>`;
+}
+
 function renderIcopaySettingsCard(locale) {
   const q = (v) => (v != null && typeof v === 'string' ? String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
   const codes = ['392', '840', '410', '764'];
@@ -12626,6 +12719,7 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
           t(locale, 'common_save') +
           '</button></div></form></div>'
           + renderJpayEnvironmentCard(locale, req.query || {})
+          + renderElementPayIngressSettingsCard(locale, req.query || {})
           + '<div class="card card-chillpay"><h2>' + t(locale, 'chillpay_time_title') + '</h2><p class="admin-page-desc">' + t(locale, 'chillpay_time_desc') + '</p>'
           + '<form method="post" action="/admin/settings/chillpay-time" onsubmit="return confirm(\'' + (t(locale, 'chillpay_time_confirm_save') || '').replace(/'/g, "\\'") + '\');">'
           + renderChillpayTimezoneSection(locale, c)
@@ -12750,6 +12844,24 @@ function keepIfNotEmpty(currentVal, submittedVal) {
   const sub = submittedVal != null ? String(submittedVal).trim() : '';
   return sub === '' ? cur : sub;
 }
+
+app.post('/admin/settings/elementpay-ingress', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
+  const body = req.body || {};
+  const enabled = body.enabled === 'on' || body.enabled === '1' || body.enabled === true;
+  const patch = {
+    enabled,
+    timeoutMs: Number(body.timeoutMs) || 25000,
+  };
+  // Env overrides win at runtime; do not overwrite file URL when env is set.
+  if (!String(process.env.ELEMENTPAY_ICOPAY_NOTIFY_URL || '').trim()) {
+    patch.icopayNotifyUrl = body.icopayNotifyUrl != null ? String(body.icopayNotifyUrl) : '';
+  }
+  if (!String(process.env.ELEMENTPAY_ICOPAY_ORDER_LOOKUP_URL || '').trim()) {
+    patch.icopayOrderLookupUrl = body.icopayOrderLookupUrl != null ? String(body.icopayOrderLookupUrl) : '';
+  }
+  saveElementPayIngressConfig(patch);
+  return res.redirect('/admin/settings?epIngressSaved=1');
+});
 
 app.post('/admin/settings/jpay-profiles/add', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
   const locale = getLocale(req);
