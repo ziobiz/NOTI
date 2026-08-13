@@ -239,7 +239,9 @@ const messages = {
     merchants_nav_register_jpay: 'JPAY 등록',
     merchants_nav_register_elementpay: 'ElementPay 등록',
     merchants_elementpay_ingress_hint:
-      'ElementPay는 PG Webhook이 본사 고정 1개입니다. EP Cabinet → Webhooks에 아래 URL을 등록하세요. 가맹별 PG Call/Re URL은 발급하지 않으며, 가맹 Callback/Result·relayFormat만 설정합니다.',
+      'ElementPay는 PG Webhook·Result 입구가 본사 고정 1개입니다. EP Cabinet → Webhooks에는 Webhook URL만 등록하세요(가맹 Result URL 등록 금지). 가맹 Callback/Result·relayFormat만 설정합니다.',
+    merchants_elementpay_result_hint:
+      'ICOPAY 결제 _successUrl/_rejectUrl/_waitingUrl = Result URL. 브라우저 도착 후 가맹 resultUrl로 전달됩니다.',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_nav_list_chillpay: 'CHILLPAY 등록',
     merchants_nav_list_jpay: 'JPAY 등록',
@@ -1622,7 +1624,9 @@ const messages = {
     merchants_title: '加盟店通知設定',
     merchants_nav_register_elementpay: 'ElementPay 登録',
     merchants_elementpay_ingress_hint:
-      'ElementPayはPG Webhookが本社固定1件です。EP Cabinet → Webhooksに下記URLを登録してください。加盟店ごとのPG Call/Re URLは発行せず、加盟店 Callback/Result・relayFormatのみ設定します。',
+      'ElementPayはWebhook・Result入口が本社固定1件です。EP Cabinet → WebhooksにはWebhook URLのみ登録（加盟店Result URL登録禁止）。加盟店Callback/Result・relayFormatのみ設定します。',
+    merchants_elementpay_result_hint:
+      'ICOPAY決済の_successUrl/_rejectUrl/_waitingUrl = Result URL。ブラウザ到着後、加盟店resultUrlへ転送します。',
     merchants_desc: '加盟店別の通知URL、基幹対象、リレー/基幹送信を設定します。',
     merchants_register: '登録/編集',
     merchants_list: '登録済み加盟店',
@@ -2965,7 +2969,9 @@ const messages = {
     merchants_nav_register_jpay: 'JPAY Registration',
     merchants_nav_register_elementpay: 'ElementPay Registration',
     merchants_elementpay_ingress_hint:
-      'ElementPay uses one fixed company Webhook. Register the URL below in the EP Cabinet → Webhooks. Per-merchant PG Call/Re URLs are not issued; configure merchant Callback/Result and relayFormat only.',
+      'ElementPay uses one fixed company Webhook and Result ingress. Register only the Webhook URL in EP Cabinet → Webhooks (do not register merchant Result URLs). Configure merchant Callback/Result and relayFormat only.',
+    merchants_elementpay_result_hint:
+      'ICOPAY payment _successUrl/_rejectUrl/_waitingUrl = Result URL. After the browser lands here, NOTI forwards to the merchant resultUrl.',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_nav_list_chillpay: 'CHILLPAY Registration',
     merchants_nav_list_jpay: 'JPAY Registration',
@@ -4335,7 +4341,9 @@ const messages = {
     merchants_title: 'ตั้งค่า Noti ตัวแทน',
     merchants_nav_register_elementpay: 'ลงทะเบียน ElementPay',
     merchants_elementpay_ingress_hint:
-      'ElementPay ใช้ Webhook บริษัทแบบคงที่ 1 URL ลงทะเบียนด้านล่างใน EP Cabinet → Webhooks ไม่ออก PG Call/Re รายร้าน ตั้งค่า Callback/Result และ relayFormat ของร้านเท่านั้น',
+      'ElementPay ใช้ Webhook และ Result บริษัทแบบคงที่ 1 URL ลงทะเบียนเฉพาะ Webhook ใน EP Cabinet → Webhooks (ห้ามลง Result ของร้าน) ตั้งค่า Callback/Result และ relayFormat ของร้านเท่านั้น',
+    merchants_elementpay_result_hint:
+      'ICOPAY _successUrl/_rejectUrl/_waitingUrl = Result URL หลังเบราว์เซอร์มาที่นี่ จะส่งต่อไปยัง resultUrl ของร้าน',
     merchants_desc: 'ตั้งค่า URL แจ้งเตือน เป้าหมายภายใน และการส่งต่อต่อร้านค้า',
     merchants_register: 'ลงทะเบียน/แก้ไข',
     merchants_list: 'ร้านค้าที่ลงทะเบียน',
@@ -5661,7 +5669,9 @@ const messages = {
     merchants_title: '商户通知设置',
     merchants_nav_register_elementpay: 'ElementPay 注册',
     merchants_elementpay_ingress_hint:
-      'ElementPay 的 PG Webhook 为本社固定 1 个。请在 EP Cabinet → Webhooks 注册下方 URL。不按商户发放 PG Call/Re URL，仅配置商户 Callback/Result 与 relayFormat。',
+      'ElementPay 的 Webhook 与 Result 入口为本社固定各 1 个。EP Cabinet → Webhooks 仅注册 Webhook URL（禁止注册商户 Result）。仅配置商户 Callback/Result 与 relayFormat。',
+    merchants_elementpay_result_hint:
+      'ICOPAY 支付 _successUrl/_rejectUrl/_waitingUrl = Result URL。浏览器到达后转发至商户 resultUrl。',
     merchants_desc: '按商户配置通知URL、内部对象及是否转送/内部发送。',
     merchants_register: '注册/修改',
     merchants_list: '已注册商户',

@@ -3492,13 +3492,25 @@ function loadElementPayIngressConfig() {
   const file = loadJsonConfig(ELEMENTPAY_INGRESS_CONFIG_PATH, {});
   const fromFile = file && typeof file === 'object' ? file : {};
   const envUrl = String(process.env.ELEMENTPAY_ICOPAY_NOTIFY_URL || '').trim();
+  const envLookup = String(process.env.ELEMENTPAY_ICOPAY_ORDER_LOOKUP_URL || '').trim();
   return {
     enabled: fromFile.enabled !== false,
     icopayNotifyUrl: envUrl || String(fromFile.icopayNotifyUrl || '').trim(),
+    /** Optional: GET/POST URL with `{order}` — response JSON/header Comp-Id for Result matching */
+    icopayOrderLookupUrl: envLookup || String(fromFile.icopayOrderLookupUrl || '').trim(),
     timeoutMs: Math.max(
       3000,
       Math.min(120000, Number(fromFile.timeoutMs) || Number(process.env.ELEMENTPAY_ICOPAY_TIMEOUT_MS) || 25000),
     ),
+  };
+}
+
+/** Fixed public EP ingress URLs (Cabinet Webhook + browser Result). No per-merchant slots. */
+function getElementPayPublicIngressUrls() {
+  const base = 'https://noti.icopay.net';
+  return {
+    elementpayWebhookUrl: base + '/noti/elementpay',
+    elementpayResultUrl: base + '/noti/result/elementpay',
   };
 }
 
@@ -3598,6 +3610,7 @@ function merchantToElementPayProvisionApiData(merchant, extras) {
     relayOffDevDedicatedUse: !!m.relayOffDevDedicatedUse,
     resultDeliveryMode: String(m.resultDeliveryMode || 'auto').trim(),
     relayFormat: String(m.relayFormat || 'raw').trim(),
+    ...getElementPayPublicIngressUrls(),
     created: extras && extras.created === false ? false : true,
     provisionRequestId: extras && extras.provisionRequestId ? String(extras.provisionRequestId) : undefined,
   };
@@ -3813,6 +3826,219 @@ function findElementPayMerchantByCompId(compId) {
     }
   }
   return null;
+}
+
+function extractElementPayBrowserPayload(req) {
+  const incomingContentType =
+    (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
+  let body = req.body && typeof req.body === 'object' ? { ...req.body } : {};
+  if (Object.keys(body).length === 0 && req.rawBodyBuffer && req.rawBodyBuffer.length) {
+    const parsed = parseNotiRawBodyToObject(req.rawBodyBuffer, incomingContentType);
+    if (Object.keys(parsed).length) body = parsed;
+  }
+  if (req.query && typeof req.query === 'object') {
+    for (const [k, v] of Object.entries(req.query)) {
+      if (v === undefined || v === null || v === '') continue;
+      if (body[k] === undefined || body[k] === null || body[k] === '') {
+        body[k] = Array.isArray(v) ? v[0] : v;
+      }
+    }
+  }
+  const order = String(
+    body.order || body.orderNo || body.OrderNo || body.orderid || body.orderID || body.orderId || '',
+  ).trim();
+  const compId = String(
+    body.compId ||
+      body.CompId ||
+      body.merchantId ||
+      body.MerchantId ||
+      body.memberid ||
+      body.MID ||
+      '',
+  ).trim();
+  const method = elementPayNoti.normalizeElementPayMethod(
+    body.method || body.elementpayReturn || body.paymentStatus || body.status || '',
+  );
+  return { body, order, compId, method, incomingContentType };
+}
+
+/** Recent webhook logs: order → ElementPay merchant (Comp-Id path already logged as merchantId). */
+function findElementPayMerchantByOrderFromLogs(order) {
+  const o = String(order || '').trim();
+  if (!o) return null;
+  const logs = loadPgNotiLogsSafe();
+  const start = Math.max(0, logs.length - 8000);
+  for (let i = logs.length - 1; i >= start; i--) {
+    const L = logs[i];
+    if (!L || L.pgProvider !== 'elementpay') continue;
+    if (L.routeKey !== 'elementpay/webhook' && L.routeKey !== 'elementpay/result') continue;
+    const b = L.body && typeof L.body === 'object' ? L.body : {};
+    const orderInLog = String(
+      b.order || b.orderNo || b.OrderNo || b.orderid || b.orderID || b.OrderNo || '',
+    ).trim();
+    if (!orderInLog || orderInLog !== o) continue;
+    const mid = String(L.merchantId || '').trim();
+    if (!mid) continue;
+    const m = MERCHANTS.get(mid);
+    if (m && inferMerchantPgKind(m) === 'elementpay') {
+      return { merchantId: mid, merchant: m, via: 'log' };
+    }
+    const byComp = findElementPayMerchantByCompId(mid);
+    if (byComp) return { ...byComp, via: 'log' };
+  }
+  return null;
+}
+
+async function lookupElementPayCompIdFromIcopay(order) {
+  const cfg = loadElementPayIngressConfig();
+  const template = String(cfg.icopayOrderLookupUrl || '').trim();
+  if (!template || !order) return '';
+  const url = template.split('{order}').join(encodeURIComponent(String(order)));
+  try {
+    const res = await axios.get(url, {
+      timeout: Math.min(cfg.timeoutMs || 25000, 15000),
+      validateStatus: () => true,
+      headers: { Accept: 'application/json' },
+    });
+    const fromHdr = elementPayNoti.headerGetIgnoreCase(res.headers || {}, 'x-icopay-comp-id');
+    if (fromHdr) return fromHdr;
+    let data = res.data;
+    if (typeof data === 'string') {
+      try {
+        data = JSON.parse(data);
+      } catch (_) {
+        data = null;
+      }
+    }
+    if (data && typeof data === 'object') {
+      const nested = data.data && typeof data.data === 'object' ? data.data : data;
+      const id = String(
+        nested.compId || nested.CompId || nested.merchantId || nested.MerchantId || '',
+      ).trim();
+      if (id) return id;
+    }
+  } catch (e) {
+    console.warn('[ElementPay] order lookup failed', e.message || e);
+  }
+  return '';
+}
+
+async function resolveElementPayMerchantForBrowserResult(payload) {
+  if (payload.compId) {
+    const byComp = findElementPayMerchantByCompId(payload.compId);
+    if (byComp) return { ...byComp, via: 'compId' };
+  }
+  if (payload.order) {
+    const lookedUp = await lookupElementPayCompIdFromIcopay(payload.order);
+    if (lookedUp) {
+      const byLookup = findElementPayMerchantByCompId(lookedUp);
+      if (byLookup) return { ...byLookup, via: 'icopayLookup' };
+    }
+    const byLog = findElementPayMerchantByOrderFromLogs(payload.order);
+    if (byLog) return byLog;
+  }
+  return null;
+}
+
+function sendElementPayResultFallbackPage(res, reason) {
+  const msg = String(reason || 'merchant_not_found');
+  const html = `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>Payment</title>
+<style>body{font-family:system-ui,sans-serif;max-width:420px;margin:48px auto;padding:0 16px;color:#111827;line-height:1.5}h1{font-size:1.25rem;margin:0 0 12px}p{margin:0 0 8px;color:#4b5563;font-size:14px}</style></head><body>
+<h1>결제 처리 안내</h1>
+<p>결제가 처리되었습니다. 가맹점 결과 페이지로 연결하지 못했습니다.</p>
+<p style="font-size:12px;color:#9ca3af;">ref: ${escapeHtmlAttr(msg)}</p>
+</body></html>`;
+  return res.status(200).type('html').send(html);
+}
+
+/**
+ * Browser Result ingress: EP → GET|POST /noti/result/elementpay → merchant resultUrl
+ * (resultDeliveryMode: 302 GET or auto form POST). Never register merchant Result on EP Cabinet.
+ */
+async function handleElementPayBrowserResult(req, res) {
+  const payload = extractElementPayBrowserPayload(req);
+  const { body, order, method } = payload;
+  console.log(
+    '[ElementPay] result',
+    'method=',
+    method || '-',
+    'order=',
+    order || '-',
+    'compId=',
+    payload.compId || '-',
+  );
+
+  const match = await resolveElementPayMerchantForBrowserResult(payload);
+  const notifyBody = elementPayNoti.mapElementPayToMerchantNotifyBody(body, method || 'pay');
+
+  if (!match || !match.merchant) {
+    appendPgNotiLog({
+      routeKey: 'elementpay/result',
+      merchantId: '',
+      kind: 'result',
+      body: notifyBody,
+      rawBody: undefined,
+      targetUrl: '',
+      contentType: payload.incomingContentType || '',
+      env: APP_ENV === 'test' ? 'sandbox' : 'production',
+      pgProvider: 'elementpay',
+      relayStatus: 'fail',
+      relayFailReason: 'merchant_not_found',
+    });
+    return sendElementPayResultFallbackPage(res, order ? 'order_unmatched' : 'missing_order');
+  }
+
+  const { merchantId, merchant } = match;
+  const enableRelay = merchant.enableRelay !== false;
+  let targetUrl = resolveJpayResultBrowserForwardUrl(merchant, enableRelay) || String(merchant.resultUrl || '').trim();
+  const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
+  const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
+  if (targetUrl && isOurTestReturnUrl(targetUrl, reqHost)) {
+    targetUrl = baseUrl + '/noti/test-result' + (targetUrl.includes('?') ? targetUrl.slice(targetUrl.indexOf('?')) : '');
+  }
+
+  if (!targetUrl) {
+    appendPgNotiLog({
+      routeKey: 'elementpay/result',
+      merchantId,
+      kind: 'result',
+      body: notifyBody,
+      targetUrl: '',
+      contentType: payload.incomingContentType || '',
+      env: APP_ENV === 'test' ? 'sandbox' : 'production',
+      pgProvider: 'elementpay',
+      relayStatus: 'fail',
+      relayFailReason: 'resultUrl_empty',
+    });
+    return sendElementPayResultFallbackPage(res, 'resultUrl_empty');
+  }
+
+  appendPgNotiLog({
+    routeKey: 'elementpay/result',
+    merchantId,
+    kind: 'result',
+    body: notifyBody,
+    targetUrl,
+    contentType: payload.incomingContentType || '',
+    env: APP_ENV === 'test' ? 'sandbox' : 'production',
+    pgProvider: 'elementpay',
+    relayStatus: 'ok',
+    relayFailReason: '',
+    relayFormatUsed: merchantForcesResultBrowserRedirect(merchant) ? 'browser_post' : 'browser_302',
+  });
+
+  if (merchantForcesResultBrowserRedirect(merchant)) {
+    return sendMerchantResultBrowserPostFormPage(res, targetUrl, notifyBody);
+  }
+  try {
+    const url = new URL(targetUrl.trim());
+    for (const [k, v] of Object.entries(notifyBody || {})) {
+      if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+    }
+    return res.redirect(302, url.toString());
+  } catch (e) {
+    return res.redirect(302, targetUrl.trim());
+  }
 }
 
 async function forwardElementPayToIcopay(rawBodyStr, contentType, attempt) {
@@ -10695,6 +10921,25 @@ app.post('/noti/webhook/elementpay', async (req, res) => {
   }
 });
 
+// ========== ElementPay 브라우저 Result (본사 고정 1 URL) — /noti/:kind/:no 보다 먼저 ==========
+// EP → GET|POST /noti/result/elementpay → 가맹 resultUrl (resultDeliveryMode)
+app.get('/noti/result/elementpay', async (req, res) => {
+  try {
+    await handleElementPayBrowserResult(req, res);
+  } catch (e) {
+    console.error('[ElementPay] result handler error', e.message || e);
+    if (!res.headersSent) return sendElementPayResultFallbackPage(res, 'handler_error');
+  }
+});
+app.post('/noti/result/elementpay', async (req, res) => {
+  try {
+    await handleElementPayBrowserResult(req, res);
+  } catch (e) {
+    console.error('[ElementPay] result handler error', e.message || e);
+    if (!res.headersSent) return sendElementPayResultFallbackPage(res, 'handler_error');
+  }
+});
+
 // ========== POST /noti/:routeKey (기존 형태 유지) ==========
 // 예: /noti/rount_c1
 app.post('/noti/:routeKey', async (req, res) => {
@@ -13813,6 +14058,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <div id="merch-pg-elementpay-block" style="display:${registerElementPay ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;">
           <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_elementpay_ingress_hint')}</p>
           <div style="margin-top:8px;font-size:12px;color:#065f46;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/elementpay</div>
+          <div style="margin-top:6px;font-size:12px;color:#065f46;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/elementpay</div>
+          <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_elementpay_result_hint')}</p>
         </div>
         <div id="merch-pg-chillpay-block" style="display:${registerJpay || registerElementPay ? 'none' : 'block'};">
         <label>

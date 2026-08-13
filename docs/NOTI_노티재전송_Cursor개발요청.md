@@ -203,5 +203,7 @@ X-Noti-Attempt: 2
 
 - Ingress: `POST /noti/elementpay` → ICOPAY `…/ELEMENTPAY` 원문 패스스루
 - 가맹 Callback: `pay` / `payment.*` 시 `X-Icopay-Comp-Id`로 매칭, `relayFormat` raw/json/form (JPAY 동일 스키마)
+- 브라우저 Result: `GET|POST /noti/result/elementpay` → order/Comp-Id로 가맹 매칭 → `resultUrl` (`resultDeliveryMode`)
 - 설정: `config/elementpay-ingress.json` (예: `elementpay-ingress.example.json`)
+- 스펙: `docs/NOTI_ElementPay_가맹통보_추가개발요청.md`, `docs/NOTI_ElementPay_Result입구_개발요청.md`
 
