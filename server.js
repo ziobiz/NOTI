@@ -3953,7 +3953,10 @@ function sendElementPayResultFallbackPage(res, reason) {
 
 /**
  * Browser Result ingress: EP → GET|POST /noti/result/elementpay → merchant resultUrl
- * (resultDeliveryMode: 302 GET or auto form POST). Never register merchant Result on EP Cabinet.
+ * RESULT 전달 모드는 ChillPay/JPAY 와 동일:
+ * - GET: 브라우저 GET 복귀 — 302+GET (POST+302 이면 폼 POST). PG 서버 노티 경로와 동일 정책.
+ * - POST(브라우저): 가맹 resultUrl 서버 릴레이 후
+ *   AUTO/AUTOT → 302+GET, POST → JSON만, POST+302 → HTML 폼 POST
  */
 async function handleElementPayBrowserResult(req, res) {
   const payload = extractElementPayBrowserPayload(req);
@@ -3966,6 +3969,8 @@ async function handleElementPayBrowserResult(req, res) {
     order || '-',
     'compId=',
     payload.compId || '-',
+    'http=',
+    req.method,
   );
 
   const match = await resolveElementPayMerchantForBrowserResult(payload);
@@ -3994,7 +3999,8 @@ async function handleElementPayBrowserResult(req, res) {
   const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
   const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
   if (targetUrl && isOurTestReturnUrl(targetUrl, reqHost)) {
-    targetUrl = baseUrl + '/noti/test-result' + (targetUrl.includes('?') ? targetUrl.slice(targetUrl.indexOf('?')) : '');
+    targetUrl =
+      baseUrl + '/noti/test-result' + (targetUrl.includes('?') ? targetUrl.slice(targetUrl.indexOf('?')) : '');
   }
 
   if (!targetUrl) {
@@ -4013,6 +4019,110 @@ async function handleElementPayBrowserResult(req, res) {
     return sendElementPayResultFallbackPage(res, 'resultUrl_empty');
   }
 
+  const isGet = String(req.method || 'GET').toUpperCase() === 'GET';
+  const apiKeyHeader =
+    (req.get && (req.get('Api-Key') || req.get('api-key') || req.get('X-Api-Key'))) ||
+    (req.headers && (req.headers['api-key'] || req.headers['x-api-key'])) ||
+    '';
+  function isLikelyBrowserResultReturnEp() {
+    if (apiKeyHeader && String(apiKeyHeader).trim().length > 0) return false;
+    const accept = (req.get && req.get('Accept')) || (req.headers && req.headers.accept) || '';
+    const ua = (req.get && req.get('User-Agent')) || (req.headers && req.headers['user-agent']) || '';
+    if (typeof accept === 'string' && accept.toLowerCase().includes('text/html')) return true;
+    const uaLower = String(ua).toLowerCase();
+    if (/mozilla|chrome|safari|msie|edge|opera|firefox/i.test(uaLower)) return true;
+    return false;
+  }
+
+  // —— GET: ChillPay/JPAY GET Result 와 동일 (서버 릴레이 없이 브라우저만 전달) ——
+  if (isGet) {
+    appendPgNotiLog({
+      routeKey: 'elementpay/result',
+      merchantId,
+      kind: 'result',
+      body: notifyBody,
+      targetUrl,
+      contentType: payload.incomingContentType || '',
+      env: APP_ENV === 'test' ? 'sandbox' : 'production',
+      pgProvider: 'elementpay',
+      relayStatus: 'ok',
+      relayFailReason: '',
+      relayFormatUsed: merchantForcesResultBrowserRedirect(merchant) ? 'browser_post' : 'browser_302',
+    });
+    if (merchantForcesResultBrowserRedirect(merchant)) {
+      return sendMerchantResultBrowserPostFormPage(res, targetUrl, notifyBody);
+    }
+    try {
+      const url = new URL(targetUrl.trim());
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+      }
+      return res.redirect(302, url.toString());
+    } catch (e) {
+      return res.redirect(302, targetUrl.trim());
+    }
+  }
+
+  // —— POST: ChillPay/JPAY RESULT(브라우저 POST) 와 동일 — 서버 릴레이 후 모드별 브라우저 전달 ——
+  const relayFormat =
+    merchant.relayFormat === 'json' || merchant.relayFormat === 'form' ? merchant.relayFormat : 'raw';
+  let relaySuccess = false;
+  let relayFailReason = '';
+  let relayOpts;
+  if (relayFormat === 'json') {
+    relayOpts = { contentType: 'application/json', rawBody: undefined };
+  } else if (relayFormat === 'form') {
+    relayOpts = { contentType: 'application/x-www-form-urlencoded', rawBody: undefined };
+  } else {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(notifyBody || {})) {
+      if (v === undefined || v === null) continue;
+      params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+    }
+    relayOpts = {
+      contentType: 'application/x-www-form-urlencoded',
+      rawBody: params.toString(),
+    };
+  }
+
+  if (enableRelay && targetUrl) {
+    try {
+      console.log(
+        '[ElementPay][result] 가맹점 릴레이:',
+        merchantId,
+        targetUrl,
+        'relayFormat=',
+        relayFormat,
+      );
+      let relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+      relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+      if (!relaySuccess) {
+        relayFailReason =
+          `HTTP ${relayRes.status}` +
+          (relayRes.data && typeof relayRes.data === 'string'
+            ? ': ' + String(relayRes.data).slice(0, 200)
+            : '');
+        await new Promise((r) => setTimeout(r, 2000));
+        relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      }
+    } catch (err) {
+      relayFailReason = err.code || err.message || String(err);
+      try {
+        await new Promise((r) => setTimeout(r, 2000));
+        const retryRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = retryRes.status >= 200 && retryRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      } catch (err2) {
+        if (!relayFailReason) relayFailReason = err2.code || err2.message || String(err2);
+      }
+    }
+  } else if (enableRelay && !targetUrl) {
+    relayFailReason = '가맹점 URL 없음';
+  }
+
+  const formatUsed = relaySuccess ? relayFormat : undefined;
   appendPgNotiLog({
     routeKey: 'elementpay/result',
     merchantId,
@@ -4022,23 +4132,34 @@ async function handleElementPayBrowserResult(req, res) {
     contentType: payload.incomingContentType || '',
     env: APP_ENV === 'test' ? 'sandbox' : 'production',
     pgProvider: 'elementpay',
-    relayStatus: 'ok',
-    relayFailReason: '',
-    relayFormatUsed: merchantForcesResultBrowserRedirect(merchant) ? 'browser_post' : 'browser_302',
+    relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
+    relayFailReason: enableRelay ? relayFailReason || '' : '',
+    relayFormatUsed: formatUsed,
   });
 
-  if (merchantForcesResultBrowserRedirect(merchant)) {
-    return sendMerchantResultBrowserPostFormPage(res, targetUrl, notifyBody);
-  }
-  try {
-    const url = new URL(targetUrl.trim());
-    for (const [k, v] of Object.entries(notifyBody || {})) {
-      if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+  const skipBrowser = merchantSkipsResultBrowserRedirect(merchant);
+  const forcePost = merchantForcesResultBrowserRedirect(merchant);
+  const browserLike = isLikelyBrowserResultReturnEp();
+  const shouldRedirectResultBrowser =
+    (forcePost || browserLike) && !skipBrowser;
+
+  if (shouldRedirectResultBrowser) {
+    if (forcePost) {
+      return sendMerchantResultBrowserPostFormPage(res, targetUrl, notifyBody);
     }
-    return res.redirect(302, url.toString());
-  } catch (e) {
-    return res.redirect(302, targetUrl.trim());
+    try {
+      const url = new URL(targetUrl.trim());
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+      }
+      return res.redirect(302, url.toString());
+    } catch (e) {
+      return res.redirect(302, targetUrl.trim());
+    }
   }
+
+  // POST 모드(no_browser_redirect): 릴레이만 하고 JSON 종료 — ChillPay/JPAY 동일
+  return res.status(200).json({ ok: true, relay: relaySuccess });
 }
 
 async function forwardElementPayToIcopay(rawBodyStr, contentType, attempt) {
@@ -14485,6 +14606,10 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         }
         if (cid) cid.disabled = !!(j || ep);
         if (subWrap) subWrap.style.display = j || ep ? 'none' : 'block';
+        var enrichSelPg = document.getElementById('merchant-relay-enrichment');
+        if (enrichSelPg && (j || ep)) {
+          enrichSelPg.value = 'plain';
+        }
         syncRouteNoAuto();
       }
 
@@ -15112,7 +15237,8 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
       : rnManual || (chillCbN ? String(chillCbN) : '');
   const icSaved = pgKind === 'jpay' ? '' : String(internalCustomerId || '').trim();
   const recRaw = String(rawChillpayRecurring || '').trim().toUpperCase();
-  const chillpayRecurringYn = pgKind === 'jpay' ? 'N' : recRaw === 'Y' ? 'Y' : 'N';
+  const chillpayRecurringYn =
+    pgKind === 'jpay' || pgKind === 'elementpay' ? 'N' : recRaw === 'Y' ? 'Y' : 'N';
   const relayOffForwardSaved = enableRelayOn
     ? ''
     : normalizeMerchantRelayOffForwardTarget(req.body && req.body.relayOffForwardTarget);
