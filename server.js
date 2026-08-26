@@ -4394,7 +4394,7 @@ async function relayElementPayMerchantNotify(merchantId, merchant, notifyBody, e
     relayFailReason = '가맹점 URL 없음';
   }
 
-  appendPgNotiLog({
+  const pgLogEntry = {
     routeKey: 'elementpay/webhook',
     merchantId,
     kind: 'callback',
@@ -4407,7 +4407,8 @@ async function relayElementPayMerchantNotify(merchantId, merchant, notifyBody, e
     relayFailReason: relaySuccess ? '' : relayFailReason || '',
     relayFormatUsed: enableRelay && relaySuccess ? relayFormat : undefined,
     pgProvider: 'elementpay',
-  });
+  };
+  appendPgNotiLog(pgLogEntry);
 
   // Internal / dev (same flags as JPAY)
   if (merchant.enableInternal !== false) {
@@ -4430,7 +4431,29 @@ async function relayElementPayMerchantNotify(merchantId, merchant, notifyBody, e
       console.warn('[ElementPay] internal notify failed', e.message || e);
     }
   }
-  return { relaySuccess, relayFailReason };
+
+  // DEALMAI (same as JPAY): enableDealmaiWebhook on merchant + global webhook URL
+  let epWebhookResult = { skipped: true };
+  if (merchantShouldDeliverDealmaiWebhook(merchant)) {
+    try {
+      epWebhookResult = await dispatchDealmaiWebhookForNoti(merchant, {
+        body: notifyBody,
+        rawBody: epRaw || undefined,
+        contentType: incomingContentType,
+        pgProvider: 'elementpay',
+        merchantId,
+        kind: 'callback',
+        env: 'live',
+        routeKey: 'elementpay/webhook',
+      });
+    } catch (err) {
+      console.error('[ElementPay] DEALMAI webhook failed', err.message || err);
+      epWebhookResult = { ok: false, skipped: false };
+    }
+  }
+  mergeDealmaiWebhookIntoPgNotiLog(pgLogEntry, merchant, epWebhookResult);
+
+  return { relaySuccess, relayFailReason, dealmai: epWebhookResult };
 }
 
 async function handleElementPayWebhook(req, res) {
@@ -4467,8 +4490,12 @@ async function handleElementPayWebhook(req, res) {
         ).toString();
 
   const ico = await forwardElementPayToIcopay(forwardBody, incomingContentType, 1);
-  const compId = elementPayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-comp-id');
+  const compIdHdr = elementPayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-comp-id');
   const orderHdr = elementPayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-order-no');
+  // Header first; ICOPAY resend/mirror may put Comp-Id only in body
+  const compId =
+    compIdHdr ||
+    String(body.compId || body.CompId || body.merchantId || body.MerchantId || '').trim();
 
   // Merchant notify after ICOPAY (pay / payment.*) — never block EP response body
   if (elementPayNoti.elementPayShouldNotifyMerchant(method)) {
@@ -4483,9 +4510,9 @@ async function handleElementPayWebhook(req, res) {
       );
       appendPgNotiLog({
         routeKey: 'elementpay/webhook',
-        merchantId: '',
+        merchantId: compId || '',
         kind: 'callback',
-        body,
+        body: elementPayNoti.mapElementPayToMerchantNotifyBody(body, method),
         rawBody: forwardBody || undefined,
         targetUrl: '',
         contentType: incomingContentType,
@@ -6604,9 +6631,20 @@ function merchantShouldDeliverDealmaiWebhook(merchant) {
   return !!(merchant && merchant.enableDealmaiWebhook === true);
 }
 
+/** Dealmai payload/log PG key: chillpay | jpay | elementpay */
+function normalizeDealmaiPgProvider(raw) {
+  const p = String(raw || '')
+    .toLowerCase()
+    .trim();
+  if (p === 'elementpay' || p === 'ep' || p === 'element') return 'elementpay';
+  if (p === 'jpay') return 'jpay';
+  return 'chillpay';
+}
+
 function classifyDealmaiWebhookEvent(body, pgProvider) {
   if (!body || typeof body !== 'object') return 'unknown';
-  if (pgProvider === 'jpay') {
+  // ElementPay merchant notify uses JPAY-compatible returncode schema
+  if (pgProvider === 'jpay' || pgProvider === 'elementpay') {
     const rc = String(body.returncode ?? body.returnCode ?? '').trim();
     if (rc === '00' || rc === '0') return 'paid';
     if (rc) return 'fail';
@@ -6657,7 +6695,7 @@ function countryFromDealmaiCurrency(currency) {
 }
 
 function pickDealmaiAmount(body, pgProvider) {
-  if (pgProvider === 'jpay') {
+  if (pgProvider === 'jpay' || pgProvider === 'elementpay') {
     const v = body.total_fee ?? body.amount ?? body.Amount;
     if (v != null && String(v).trim() !== '') {
       const n = Number(v);
@@ -6705,7 +6743,7 @@ function buildDealmaiWebhookPayload(merchant, opts) {
     }
   }
   if (!body || typeof body !== 'object') body = {};
-  const pgProvider = o.pgProvider === 'jpay' ? 'jpay' : 'chillpay';
+  const pgProvider = normalizeDealmaiPgProvider(o.pgProvider);
   const cfg = loadDealmaiWebhookSettings();
   const partner =
     String((merchant && merchant.dealmaiPartnerCode) || '').trim() || String(cfg.defaultPartnerCode || '').trim();
@@ -6716,6 +6754,7 @@ function buildDealmaiWebhookPayload(merchant, opts) {
     String((merchant && merchant.dealmaiCountry) || '').trim() ||
     countryFromDealmaiCurrency(currency);
   const eventOverride = o.eventOverride ? String(o.eventOverride).trim().toLowerCase() : '';
+  const paygw = pgProvider === 'jpay' || pgProvider === 'elementpay' ? 'JPAY' : 'CHILLP';
   const outbound = {
     event: mapDealmaiOnthelineEvent(body, pgProvider, eventOverride),
     transaction_id: pickDealmaiTransactionId(body),
@@ -6727,7 +6766,7 @@ function buildDealmaiWebhookPayload(merchant, opts) {
     amount: pickDealmaiAmount(body, pgProvider),
     currency,
     partner,
-    paygw: pgProvider === 'jpay' ? 'JPAY' : 'CHILLP',
+    paygw,
   };
   return {
     outbound,
@@ -6860,7 +6899,7 @@ async function dispatchDealmaiWebhookForNoti(merchant, opts) {
     webhookHttpStatus: result.status != null ? result.status : undefined,
     webhookResponsePreview: result.responsePreview || undefined,
     webhookError: result.error || undefined,
-    pgProvider: opts.pgProvider === 'jpay' ? 'jpay' : 'chillpay',
+    pgProvider: normalizeDealmaiPgProvider(opts.pgProvider),
     kind: opts.kind || 'callback',
     routeKey: opts.routeKey || '',
   });
@@ -7253,15 +7292,15 @@ function routeNoSearchExactMatch(routeVal, wantRaw) {
 }
 
 function notiHaystackPgResultLog(log, locale, logPg) {
-  const body = parseNotiBody(log);
+  const body = parseNotiBodyForDisplay(log);
   const dt = formatDateAndTimeForLog(log);
   const routeNo = (log.routeKey && (log.routeKey.match(/\/(\d+)$/) || [null, log.routeKey])[1]) || log.routeKey || '';
   const envLabel = (log.env && String(log.env).toLowerCase()) === 'sandbox' ? 'sandbox' : 'live';
   const relayStatus = String(log.relayStatus || '');
-  const failReason = String(log.relayFailReason || '');
-  const txId = String(body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : ''));
-  const orderNo = String(body.OrderNo != null ? body.OrderNo : (body.orderNo != null ? body.orderNo : ''));
-  const amtRaw = body.Amount != null ? body.Amount : (body.amount != null ? body.amount : '');
+  const merchantId = resolveNotiLogMerchantId(log, body);
+  const txId = notifBodyTxId(body);
+  const orderNo = notifBodyOrderNo(body);
+  const amtRaw = body.Amount != null ? body.Amount : body.amount != null ? body.amount : '';
   const amtDisplay = amtRaw !== '' && amtRaw != null ? String(formatAmountWithSeparator(amtRaw)) : '';
   const currency = String(formatCurrencyForDisplay(body.Currency || body.currency) || body.Currency || body.currency || '');
   const pgK = logPg === 'jpay' || logPg === 'elementpay' ? 'jpay' : 'chillpay';
@@ -7271,14 +7310,25 @@ function notiHaystackPgResultLog(log, locale, logPg) {
     const ic = computeIcopayAmount(amtRawIcopay, body.Currency ?? body.currency, pgK);
     if (Number.isFinite(ic)) icopayStr = String(formatAmountWithSeparator(ic));
   }
-  const relayLabel =
-    relayStatus === 'ok'
-      ? t(locale, 'status_ok')
-      : relayStatus === 'fail'
-        ? t(locale, 'status_fail')
-        : relayStatus === 'skip'
-          ? t(locale, 'status_skip')
-          : relayStatus;
+  const payOk = isSuccessPaymentBody(body);
+  const outcomeLabel =
+    logPg === 'elementpay'
+      ? payOk
+        ? t(locale, 'status_ok')
+        : t(locale, 'status_fail')
+      : relayStatus === 'ok'
+        ? t(locale, 'status_ok')
+        : relayStatus === 'fail'
+          ? t(locale, 'status_fail')
+          : relayStatus === 'skip'
+            ? t(locale, 'status_skip')
+            : relayStatus;
+  const failReason =
+    logPg === 'elementpay' && payOk
+      ? ''
+      : logPg === 'elementpay' && !payOk
+        ? String(body.status_message || body.statusMessage || log.relayFailReason || '').trim()
+        : String(log.relayFailReason || '');
   const resendKindVal = isCancelNotiBody(body) ? 'cancel' : 'payment';
   const notiKindLabel = resendKindVal === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
   let bodyJson = '';
@@ -7294,14 +7344,14 @@ function notiHaystackPgResultLog(log, locale, logPg) {
     dt.timeJp,
     routeNo,
     envLabel,
-    log.merchantId,
+    merchantId,
     txId,
     orderNo,
     amtDisplay,
     currency,
     icopayStr,
     relayStatus,
-    relayLabel,
+    outcomeLabel,
     failReason,
     notiKindLabel,
     jpayMid,
@@ -15944,7 +15994,8 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
           : relayStatus === 'skip' && !relayHasTarget
           ? 'status-none'
           : '';
-      const body = log.body && typeof log.body === 'object' ? log.body : (typeof log.body === 'string' ? (() => { try { return JSON.parse(log.body); } catch { return {}; } })() : {});
+      const body = bodyForDisplayPg;
+      const merchantIdDispPg = resolveNotiLogMerchantId(log, body);
       const canResend = (relayStatus === 'fail' || relayStatus === 'ok') && relayHasTarget && (log.body || log.rawBody);
       const resendKindVal = isCancelNotiBody(body) ? 'cancel' : 'payment';
       const resendKindLabel = resendKindVal === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
@@ -15953,10 +16004,10 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
         : !relayHasTarget
         ? '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawPg, esc) + '</span>'
         : '-';
-      const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : null);
+      const txId = notifBodyTxId(body) || null;
       const isSuccess = isSuccessPaymentBody(body);
       const baseDate = body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
-      const windowType = txId && isSuccess && log.merchantId && MERCHANTS.get(log.merchantId) ? getVoidRefundWindow(baseDate) : null;
+      const windowType = txId && isSuccess && merchantIdDispPg && MERCHANTS.get(merchantIdDispPg) ? getVoidRefundWindow(baseDate) : null;
       const canRefundByWindow = baseDate && isWithinRefundWindow(baseDate);
       const cfg = loadChillPayTransactionConfig();
       const useSandbox = cfg.useSandbox;
@@ -15972,7 +16023,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
         received_time:
           '<td class="col-time">' + dualTimeCellInner(dt, esc, logSearchRawPg) + '</td>',
         route: '<td class="col-narrow">' + highlightLogSearchHtml(log.routeKey || '', logSearchRawPg, esc) + '</td>',
-        merchant_id: '<td class="col-narrow">' + highlightLogSearchHtml(log.merchantId || '', logSearchRawPg, esc) + '</td>',
+        merchant_id: '<td class="col-narrow">' + highlightLogSearchHtml(resolveNotiLogMerchantId(log, bodyForDisplayPg) || '', logSearchRawPg, esc) + '</td>',
         relay_status:
           '<td class="col-status"><span class="' +
           relayClass +
@@ -15991,7 +16042,14 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
         void_refund: '<td class="col-void-refund">' + voidRefundBtns + '</td>',
         delete:
           '<td class="col-action">' +
-          renderNotiLogDeleteButtonHtml(locale, 'pg_noti', log, esc, pgLogsBackUrl, logPg === 'jpay' ? 'jpay' : '') +
+          renderNotiLogDeleteButtonHtml(
+            locale,
+            'pg_noti',
+            log,
+            esc,
+            pgLogsBackUrl,
+            logPg === 'chillpay' ? '' : logPg,
+          ) +
           '</td>',
       };
       return '<tr>' + pgLogsColFiltered.map((c) => rowCells[c.key] || '').join('') + '</tr>';
@@ -16023,7 +16081,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       line-height: 1.25;
     }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: middle; text-align: center; }
+    th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
     .col-date { width: 8%; min-width: 70px; }
@@ -16233,7 +16291,7 @@ const cancelRefundLayoutCss = ADMIN_PAGE_DESC_BOX_CSS + `
     white-space: nowrap;
   }
   table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
-  th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: middle; text-align: center; }
+  th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; vertical-align: middle; text-align: center; }
   th { background: #e5f0ff; }
   .card table th, .card table td { text-align: center; vertical-align: middle; }
   tr:nth-child(even) { background:#f9fafb; }
@@ -16998,10 +17056,131 @@ function enrichJpayNotiBodyForDisplay(body, log) {
   return out;
 }
 
+/** ElementPay / ICOPAY mirror: order·id·timestamp → OrderNo·TransactionId·PaymentDate */
+function formatElementPayUnixTimestampForDisplay(tsRaw) {
+  const n = Number(tsRaw);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const ms = n > 1e12 ? n : n * 1000;
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return '';
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Bangkok',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(d);
+    const get = (t) => {
+      const p = parts.find((x) => x.type === t);
+      return p ? p.value : '';
+    };
+    return get('year') + get('month') + get('day') + get('hour') + get('minute') + get('second');
+  } catch (_) {
+    return d.toISOString();
+  }
+}
+
+function enrichElementPayNotiBodyForDisplay(body, log) {
+  if (!body || typeof body !== 'object') body = {};
+  const out = { ...body };
+  if (log && log.rawBody != null && String(log.rawBody).trim()) {
+    try {
+      const rawParsed = parseNotiRawBodyToObject(Buffer.from(String(log.rawBody), 'utf8'), log.contentType || '');
+      if (rawParsed && typeof rawParsed === 'object') {
+        for (const [k, v] of Object.entries(rawParsed)) {
+          if (out[k] == null || out[k] === '') out[k] = v;
+        }
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  // Flatten data JSON (merchantOrder, buyer fields if ICOPAY/EP adds them)
+  if (out.data != null && String(out.data).trim()) {
+    try {
+      const rawData = typeof out.data === 'string' ? out.data : JSON.stringify(out.data);
+      let decoded = rawData;
+      try {
+        decoded = decodeURIComponent(String(rawData).replace(/\+/g, ' '));
+      } catch (_) {
+        decoded = String(rawData);
+      }
+      const dj = JSON.parse(decoded);
+      if (dj && typeof dj === 'object' && !Array.isArray(dj)) {
+        for (const [k, v] of Object.entries(dj)) {
+          if (out[k] == null || out[k] === '') out[k] = v;
+        }
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  const order = String(out.OrderNo || out.orderNo || out.orderid || out.orderID || out.order || out.merchantOrder || '').trim();
+  if (order) {
+    if (!out.OrderNo) out.OrderNo = order;
+    if (!out.orderNo) out.orderNo = order;
+    if (!out.orderid) out.orderid = order;
+    if (!out.orderID) out.orderID = order;
+  }
+  const txId = String(
+    out.TransactionId || out.transaction_id || out.transactionId || out.id || '',
+  ).trim();
+  if (txId) {
+    if (!out.TransactionId) out.TransactionId = txId;
+    if (!out.transaction_id) out.transaction_id = txId;
+  }
+  if ((out.Amount == null || out.Amount === '') && out.amount != null && out.amount !== '') {
+    out.Amount = out.amount;
+  }
+  if ((out.Currency == null || out.Currency === '') && out.currency != null && out.currency !== '') {
+    out.Currency = out.currency;
+  }
+  if (!out.PaymentDate && !out.paymentDate) {
+    const pd = formatElementPayUnixTimestampForDisplay(out.timestamp);
+    if (pd) out.PaymentDate = pd;
+  }
+  // CustomerId: EP/ICOPAY mirror may send email / customerNm / CustomerId
+  const cid = String(
+    out.CustomerId ||
+      out.customerId ||
+      out.payEmailAddress ||
+      out.pay_email_address ||
+      out.email ||
+      out.Email ||
+      out.customerEmail ||
+      out.customer_email ||
+      '',
+  ).trim();
+  if (cid) {
+    if (!out.CustomerId) out.CustomerId = cid;
+    if (!out.customerId) out.customerId = cid;
+  }
+  const cname = String(out.CustomerName || out.customerName || out.customerNm || out.customer || '').trim();
+  if (cname && !out.CustomerName) out.CustomerName = cname;
+  return out;
+}
+
+/** 로그 merchantId 비어 있을 때 EP 본문 Comp-Id/merchantId 사용 */
+function resolveNotiLogMerchantId(log, bodyOptional) {
+  const fromLog = String((log && log.merchantId) || '').trim();
+  if (fromLog) return fromLog;
+  const body = bodyOptional && typeof bodyOptional === 'object' ? bodyOptional : parseNotiBody(log);
+  return String(
+    (body && (body.merchantId || body.MerchantId || body.compId || body.CompId)) || '',
+  ).trim();
+}
+
 function parseNotiBodyForDisplay(log) {
   const body = parseNotiBody(log);
   if (log && getNotiLogPgAcquirer(log) === 'jpay') {
     return enrichJpayNotiBodyForDisplay(body, log);
+  }
+  if (log && getNotiLogPgAcquirer(log) === 'elementpay') {
+    return enrichElementPayNotiBodyForDisplay(body, log);
   }
   return body;
 }
@@ -17013,14 +17192,19 @@ const JPAY_TX_EXTRA_COLUMNS = [
 ];
 
 function getTransactionListColumns(txSource) {
-  if (txSource !== 'jpay') return TRANSACTION_LIST_COLUMNS;
+  if (txSource !== 'jpay' && txSource !== 'elementpay') return TRANSACTION_LIST_COLUMNS;
   const cols = [];
   for (const col of TRANSACTION_LIST_COLUMNS) {
     cols.push(col);
     if (col.type === 'fixed' && col.id === 'noti') {
       cols.push({ type: 'fixed', id: 'webhook' });
     }
-    if (col.type === 'body' && col.keys && (col.keys[0] === 'CustomerId' || col.keys.includes('customerId'))) {
+    if (
+      txSource === 'jpay' &&
+      col.type === 'body' &&
+      col.keys &&
+      (col.keys[0] === 'CustomerId' || col.keys.includes('customerId'))
+    ) {
       cols.push(...JPAY_TX_EXTRA_COLUMNS);
     }
   }
@@ -17082,7 +17266,7 @@ function getPgLogsListColumnDefs(locale, logPg) {
     { key: 'noti_state', label: t(locale, 'pg_logs_th_state') },
     { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
   ];
-  if (logPg === 'jpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
+  if (logPg === 'jpay' || logPg === 'elementpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
   cols.push({ key: 'void_refund', label: t(locale, 'pg_logs_th_void_refund') });
   cols.push({ key: 'delete', label: t(locale, 'noti_log_th_delete') });
   return cols;
@@ -17126,7 +17310,7 @@ function getLogsResultListColumnDefs(locale, logPg) {
     { key: 'fail_reason', label: t(locale, 'cr_th_fail_reason') },
     { key: 'noti_kind', label: t(locale, 'logs_result_th_noti_kind') },
   ];
-  if (logPg === 'jpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
+  if (logPg === 'jpay' || logPg === 'elementpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
   cols.push({ key: 'resend', label: t(locale, 'pg_logs_th_resend') });
   cols.push({ key: 'delete', label: t(locale, 'noti_log_th_delete') });
   return cols;
@@ -17415,7 +17599,8 @@ function jpayCrExtraCellsHtml(log, esc) {
 }
 
 function jpayWebhookCellHtml(locale, log, esc) {
-  if (getNotiLogPgAcquirer(log) !== 'jpay') {
+  const pg = getNotiLogPgAcquirer(log);
+  if (pg !== 'jpay' && pg !== 'elementpay') {
     return '<td class="col-narrow">-</td>';
   }
   const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
@@ -17463,12 +17648,12 @@ const TRANSACTION_LIST_COLUMNS = [
   { type: 'fixed', id: 'no' },
   { type: 'fixed', id: 'received_date' },
   { type: 'fixed', id: 'received_time' },
-  { type: 'body', keys: ['TransactionId', 'transactionId', 'transaction_id'] },
+  { type: 'body', keys: ['TransactionId', 'transactionId', 'transaction_id', 'id'] },
   { type: 'fixed', id: 'pg_acquirer' },
   { type: 'fixed', id: 'merchant' },
   { type: 'fixed', id: 'route_no' },
-  { type: 'body', keys: ['CustomerId', 'customerId'] },
-  { type: 'body', keys: ['OrderNo', 'orderNo', 'orderid', 'orderID'] },
+  { type: 'body', keys: ['CustomerId', 'customerId', 'email', 'Email', 'payEmailAddress'] },
+  { type: 'body', keys: ['OrderNo', 'orderNo', 'orderid', 'orderID', 'order'] },
   { type: 'body', keys: ['PaymentDate', 'paymentDate', 'datetime'] },
   { type: 'body', keys: ['Amount', 'amount', 'true_amount', 'trueAmount'] },
   { type: 'fixed', id: 'internal_amount' },
@@ -18138,7 +18323,8 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     const isVoidedOrRefunded = isSuccess && (hasVoidLike || hasRefundLike);
     const badgeClass = statusClass.replace('tx-status-', 'tx-badge-');
     const dt = formatNotiLogPaymentDateTimeTHJP(log, chillTz);
-    const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
+    const merchantIdDisp = resolveNotiLogMerchantId(log, body);
+    const merchant = merchantIdDisp ? MERCHANTS.get(merchantIdDisp) : null;
     const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
     const cells = [];
     for (const col of txListColumns) {
@@ -18148,7 +18334,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
         else if (col.id === 'received_time') cells.push('<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>');
         else if (col.id === 'route_no') cells.push('<td class="col-route">' + esc(routeNoDisplay) + '</td>');
         else if (col.id === 'pg_acquirer') cells.push('<td class="col-acquirer">' + esc(acquirerLabelFromLog(locale, log)) + '</td>');
-        else if (col.id === 'merchant') cells.push('<td class="col-merchant">' + esc(log.merchantId || '') + '</td>');
+        else if (col.id === 'merchant') cells.push('<td class="col-merchant">' + esc(merchantIdDisp || '') + '</td>');
         else if (col.id === 'internal_amount') {
           const pgK = icopayAmountPgKeyFromLog(log);
           const amt = getNotiBodyAmountRawForIcopay(body, pgK);
@@ -18187,6 +18373,8 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
             }
           } else if (isCancel) {
             detailHtml = buildCancelDetailCellText(locale, t, body);
+          } else if (!isSuccess) {
+            detailHtml = buildFailDetailCellText(locale, t, body);
           }
           cells.push('<td class="col-void-refund-detail">' + esc(normDetailNl(detailHtml)) + '</td>');
         }
@@ -20778,6 +20966,11 @@ function getTransactionListLogs(req) {
 // → 노티(콜백)에서는 0=성공, 2=취소 이므로, 0을 취소로 넣지 않고 2/3/Cancel 만 취소로 처리.
 function isSuccessPaymentBody(body) {
   if (!body || typeof body !== 'object') return false;
+  // ElementPay / ICOPAY mirror: 205 = Payment success (must not use ChillPay status=0 rules)
+  if (elementPayNoti.looksLikeElementPayCallbackBody(body)) {
+    if (elementPayNoti.elementPayIsSuccessCallbackStatus(body)) return true;
+    if (elementPayNoti.elementPayIsFailureCallbackStatus(body)) return false;
+  }
   // J-Pay Sale 비동기 노티: returncode "00" = 성공 (docs/api/sale)
   if (isJpaySaleAsyncNotifyBody(body)) {
     const rc = String(body.returncode).trim();
@@ -20935,6 +21128,24 @@ function buildCancelDetailReasonLine(locale, tFn, body) {
 /** 노티거래내역 내역/사유 열 — 취소 행: 「내역:」「사유:」 없이 `취소 / …` 형식 */
 function buildCancelDetailCellText(locale, tFn, body) {
   return tFn(locale, 'tx_status_cancel') + ' / ' + buildCancelDetailReasonLine(locale, tFn, body);
+}
+
+/** 실패 건 내역/사유 (ElementPay status_message·status 코드 등) */
+function buildFailDetailCellText(locale, tFn, body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const sup = extractCancelSupplementFromNotiBody(b);
+  let reason = String(sup.primary || '').trim();
+  if (!reason) {
+    reason = String(b.status_message || b.statusMessage || b.message || '').trim();
+  }
+  if (elementPayNoti.looksLikeElementPayCallbackBody(b)) {
+    const code = elementPayNoti.elementPayCallbackStatusCode(b);
+    if (code != null) {
+      reason = reason ? code + ' · ' + reason : String(code);
+    }
+  }
+  if (!reason) reason = tFn(locale, 'tx_fail_reason_none');
+  return tFn(locale, 'tx_status_fail') + ' / ' + tFn(locale, 'tx_reason_label') + ': ' + reason;
 }
 
 /** 종합거래·노티거래내역·로그분석 공통: 왼쪽 한 번에 보기+총 건수, 가운데 페이지(최대 20블록 &lt; &gt;) */
@@ -23516,7 +23727,7 @@ app.get('/admin/logs/noti-deleted-list', requireAuth, requirePageAny(NOTI_LOG_DE
     locale +
     '"><head><meta charset="UTF-8" /><title>' +
     esc(t(locale, 'noti_log_deleted_list_title')) +
-    '</title><style>body{font-family:system-ui,sans-serif;background:#edf2f7;margin:0;padding:24px;}table{border-collapse:collapse;width:100%;background:#fff;}th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;}th{background:#f1f5f9;}</style></head><body><div style="max-width:1100px;margin:0 auto;"><h1>' +
+    '</title><style>body{font-family:system-ui,sans-serif;background:#edf2f7;margin:0;padding:24px;}table{border-collapse:collapse;width:100%;background:#fff;}th,td{border:1px solid #e5e7eb;padding:4px 6px;font-size:11px;}th{background:#f1f5f9;}</style></head><body><div style="max-width:1100px;margin:0 auto;"><h1>' +
     esc(t(locale, 'noti_log_deleted_list_title')) +
     '</h1><p class="admin-page-desc">' +
     esc(t(locale, 'noti_log_deleted_list_desc')) +
@@ -24744,7 +24955,7 @@ app.get('/admin/noti-analysis', requireAuth, requirePage('test_run'), (req, res)
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; color:#111827; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#ffffff; border-radius:8px; overflow:hidden; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; text-align: center; vertical-align: middle; }
+    th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; text-align: center; vertical-align: middle; }
     th { background: #e5f0ff; color:#1f2937; text-align: center; }
     tr:nth-child(even) { background:#f9fafb; }
     a { color:#2563eb; text-decoration:none; }
@@ -24913,12 +25124,57 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       const envLabel = (log.env && String(log.env).toLowerCase()) === 'sandbox' ? 'sandbox' : 'live';
       const routeNo = (log.routeKey && (log.routeKey.match(/\/(\d+)$/) || [null, log.routeKey])[1]) || log.routeKey || '-';
       const relayStatus = log.relayStatus || '-';
-      const relayLabel = relayStatus === 'ok' ? t(locale, 'status_ok') : relayStatus === 'fail' ? t(locale, 'status_fail') : relayStatus === 'skip' ? t(locale, 'status_skip') : relayStatus;
       const formatUsed = log.relayFormatUsed || (log.relaySentAsJson === true ? 'json' : 'raw');
-      const relayClass = relayStatus === 'ok' ? (formatUsed === 'json' ? 'status-ok' : formatUsed === 'form' ? 'status-ok-form' : 'status-ok-normal') : relayStatus === 'fail' ? 'status-fail' : '';
-      const failReason = (log.relayFailReason || '').trim();
-      const canResend = (relayStatus === 'fail' || relayStatus === 'ok') && (log.targetUrl || findMerchantByRouteKey(log.routeKey)) && (log.body || log.rawBody);
-      const body = parseNotiBody(log);
+      const body = parseNotiBodyForDisplay(log);
+      const merchantIdDisp = resolveNotiLogMerchantId(log, body);
+      const payOk = isSuccessPaymentBody(body);
+      // ElementPay: 성공유무 = 결제 결과(205 등). 그 외 PG = 가맹 릴레이 결과.
+      let relayLabel;
+      let relayClass;
+      let failReason;
+      if (logPgResult === 'elementpay') {
+        if (payOk) {
+          relayLabel = t(locale, 'status_ok');
+          relayClass = 'status-ok';
+          failReason = '';
+        } else {
+          relayLabel = t(locale, 'status_fail');
+          relayClass = 'status-fail';
+          failReason = String(
+            body.status_message || body.statusMessage || body.message || log.relayFailReason || '',
+          ).trim();
+          const code = elementPayNoti.elementPayCallbackStatusCode(body);
+          if (code != null && failReason && !String(failReason).startsWith(String(code))) {
+            failReason = code + ' · ' + failReason;
+          } else if (code != null && !failReason) {
+            failReason = String(code);
+          }
+        }
+      } else {
+        relayLabel =
+          relayStatus === 'ok'
+            ? t(locale, 'status_ok')
+            : relayStatus === 'fail'
+              ? t(locale, 'status_fail')
+              : relayStatus === 'skip'
+                ? t(locale, 'status_skip')
+                : relayStatus;
+        relayClass =
+          relayStatus === 'ok'
+            ? formatUsed === 'json'
+              ? 'status-ok'
+              : formatUsed === 'form'
+                ? 'status-ok-form'
+                : 'status-ok-normal'
+            : relayStatus === 'fail'
+              ? 'status-fail'
+              : '';
+        failReason = (log.relayFailReason || '').trim();
+      }
+      const canResend =
+        (relayStatus === 'fail' || relayStatus === 'ok') &&
+        (log.targetUrl || findMerchantByRouteKey(log.routeKey) || merchantIdDisp) &&
+        (log.body || log.rawBody);
       const resendKindVal = isCancelNotiBody(body) ? 'cancel' : 'payment';
       const resendKindLabel = resendKindVal === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
       const notiKindClass = resendKindVal === 'cancel' ? 'noti-kind-cancel' : 'noti-kind-payment';
@@ -24926,9 +25182,9 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       const resendBtn = canResend
         ? `<div class="resend-wrap" style="display:inline-flex;flex-direction:row;gap:6px;align-items:center;flex-wrap:nowrap;"><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_plain') || '').replace(/'/g, "\\'")}');">${t(locale, 'pg_logs_btn_plain')}</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_json') || '').replace(/'/g, "\\'")}');">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_form') || '').replace(/'/g, "\\'")}');">FORM</button></form></div>`
         : '-';
-      const txId = body.TransactionId != null ? body.TransactionId : (body.transactionId != null ? body.transactionId : '-');
-      const orderNo = body.OrderNo != null ? body.OrderNo : (body.orderNo != null ? body.orderNo : '-');
-      const amtRaw = body.Amount != null ? body.Amount : (body.amount != null ? body.amount : '');
+      const txId = notifBodyTxId(body) || '-';
+      const orderNo = notifBodyOrderNo(body) || '-';
+      const amtRaw = body.Amount != null ? body.Amount : body.amount != null ? body.amount : '';
       const amtDisplay = amtRaw !== '' && amtRaw != null ? formatAmountWithSeparator(amtRaw) : '-';
       const currency = formatCurrencyForDisplay(body.Currency || body.currency) || '';
       // ICOPAY 열: 시스템 환경설정 ICOPAY 금액 규칙(icopay-amount-settings.json, PG별)
@@ -24945,7 +25201,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
           '<td>' + dualTimeCellInner(dt, esc, logSearchRaw) + '</td>',
         route: '<td>' + highlightLogSearchHtml(String(routeNo), logSearchRaw, esc) + '</td>',
         env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRaw, esc) + '</td>',
-        merchant_id: '<td>' + highlightLogSearchHtml(log.merchantId || '-', logSearchRaw, esc) + '</td>',
+        merchant_id: '<td>' + highlightLogSearchHtml(merchantIdDisp || '-', logSearchRaw, esc) + '</td>',
         transaction_id: '<td>' + highlightLogSearchHtml(String(txId), logSearchRaw, esc) + '</td>',
         order_no: '<td>' + highlightLogSearchHtml(String(orderNo), logSearchRaw, esc) + '</td>',
         amount: '<td>' + highlightLogSearchHtml(String(amtDisplay), logSearchRaw, esc) + '</td>',
@@ -24958,7 +25214,14 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
         resend: '<td>' + resendBtn + '</td>',
         delete:
           '<td>' +
-          renderNotiLogDeleteButtonHtml(locale, 'pg_noti', log, esc, logsResultBackUrl, logPgResult === 'jpay' ? 'jpay' : '') +
+          renderNotiLogDeleteButtonHtml(
+            locale,
+            'pg_noti',
+            log,
+            esc,
+            logsResultBackUrl,
+            logPgResult === 'chillpay' ? '' : logPgResult,
+          ) +
           '</td>',
       };
       return '<tr>' + logsResultColFiltered.map((c) => lrCells[c.key] || '').join('') + '</tr>';
@@ -24981,12 +25244,12 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
   <title>${t(locale, 'nav_pg_result')}</title>
   <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
-    .logs-result-table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; table-layout: fixed; }
+    .logs-result-table { border-collapse: collapse; width: 100%; background:#fff; font-size: 11px; table-layout: fixed; }
     .card .logs-result-table { max-width: 100%; }
     .logs-result-table th { position: relative; }
     .logs-result-resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 1; user-select: none; }
     .logs-result-resizer:hover { background: rgba(37, 99, 235, 0.2); }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
+    th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
     .status-ok { color: #059669; font-weight: 600; }
@@ -25249,11 +25512,11 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
     h1 { margin-bottom: 8px; }
     h2 { margin-top: 32px; }
     table { border-collapse: collapse; width: 100%; background:#fff; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 14px; }
+    th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; }
     th { background: #e5f0ff; text-align: center; }
     td { text-align: center; }
     table.internal-targets-list { table-layout: fixed; }
-    table.internal-targets-list th { font-size: 12px; padding: 6px 6px; line-height: 1.25; }
+    table.internal-targets-list th { font-size: 11px; padding: 4px 6px; line-height: 1.25; }
     table.internal-targets-list td.cell-url-one-line {
       font-size: 11px;
       line-height: 1.2;
@@ -25650,7 +25913,7 @@ app.get('/admin/internal-noti-settings', requireAuth, requirePage('internal_noti
     h1 { margin-bottom: 8px; }
     h2 { margin-top: 24px; }
     table { border-collapse: collapse; width: 100%; table-layout: auto; background:#fff; }
-    th, td { border: 1px solid #e5e7eb; padding: 6px 8px; font-size: 13px; text-align: center; white-space: nowrap; }
+    th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; text-align: center; white-space: nowrap; }
     th { background: #e5f0ff; color:#1f2937; }
     tr:nth-child(even) { background:#f9fafb; }
     .cell-form { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 0; }
@@ -25860,7 +26123,7 @@ app.get('/admin/dev-internal-noti-settings', requireAuth, requirePage('dev_inter
     h1 { margin-bottom: 8px; }
     h2 { margin-top: 24px; }
     table { border-collapse: collapse; width: 100%; table-layout: auto; background:#fff; }
-    th, td { border: 1px solid #e5e7eb; padding: 6px 8px; font-size: 13px; text-align: center; white-space: nowrap; }
+    th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; text-align: center; white-space: nowrap; }
     th { background: #e5f0ff; color:#1f2937; }
     tr:nth-child(even) { background:#f9fafb; }
     .cell-form { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 0; }
@@ -28380,7 +28643,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: middle; text-align: center; }
+    th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
@@ -28924,7 +29187,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; vertical-align: middle; text-align: center; }
+    th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
@@ -29162,7 +29425,7 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
     .map((log, revIdx) => ({ log, realIndex: DEALMAI_WEBHOOK_LOGS.length - 1 - revIdx }))
     .filter(({ log }) => !isNotiLogUiDeleted(log, 'dealmai_webhook', deletedNotiLogsDw));
   let filtered = withIndex.filter(({ log }) => {
-    const pg = String(log.pgProvider || 'chillpay').toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
+    const pg = normalizeDealmaiPgProvider(log.pgProvider);
     return pg === logPg;
   });
   const dr = parseLogDateRangeFromQuery(q);
@@ -29222,7 +29485,7 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
       const statusLabel = dealmaiWebhookDeliveryLabel(locale, log.webhookDeliveryStatus);
       const resendBtn =
         log.webhookTargetUrl && (log.payload || log.pgSource)
-          ? `<form method="post" action="/admin/dealmai-webhook/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="source" value="${logPg === 'jpay' ? 'jpay' : 'chillpay'}" /><button type="submit" class="btn-resend">${esc(t(locale, 'pg_logs_btn_resend'))}</button></form>`
+          ? `<form method="post" action="/admin/dealmai-webhook/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="source" value="${esc(logPg)}" /><button type="submit" class="btn-resend">${esc(t(locale, 'pg_logs_btn_resend'))}</button></form>`
           : '—';
       const rowCellsDw = {
         received_date: '<td>' + esc(dt.date) + '</td>',
@@ -29237,7 +29500,14 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
         resend: '<td>' + resendBtn + '</td>',
         delete:
           '<td>' +
-          renderNotiLogDeleteButtonHtml(locale, 'dealmai_webhook', log, esc, dwBackUrl, logPg === 'jpay' ? 'jpay' : '') +
+          renderNotiLogDeleteButtonHtml(
+            locale,
+            'dealmai_webhook',
+            log,
+            esc,
+            dwBackUrl,
+            logPg === 'chillpay' ? '' : logPg,
+          ) +
           '</td>',
       };
       return '<tr>' + joinListColCells(dwColFiltered, rowCellsDw) + '</tr>';
@@ -29246,7 +29516,7 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head><meta charset="UTF-8" /><title>${esc(t(locale, 'nav_dealmai_webhook_log'))}</title>
-<style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LIST_COL_GUIDE_CSS} body{font-family:system-ui,sans-serif;margin:0;background:#edf2f7;} .layout{display:flex;min-height:100vh;} .main{flex:1;padding:16px 24px;} table{border-collapse:collapse;width:100%;background:#fff;} th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;text-align:center;} th{background:#e5f0ff;} .btn-resend{padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;}</style>
+<style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LIST_COL_GUIDE_CSS} body{font-family:system-ui,sans-serif;margin:0;background:#edf2f7;} .layout{display:flex;min-height:100vh;} .main{flex:1;padding:16px 24px;} table{border-collapse:collapse;width:100%;background:#fff;} th,td{border:1px solid #e5e7eb;padding:4px 6px;font-size:11px;text-align:center;} th{background:#e5f0ff;} .btn-resend{padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;}</style>
 </head>
 <body><div class="layout">
 ${getAdminSidebar(locale, adminUser, req.session.member, '/admin/dealmai-webhook', req)}
@@ -29281,7 +29551,7 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
       ? '<div class="alert alert-fail" style="margin-bottom:12px;padding:10px;background:#fee2e2;border-radius:8px;">' + esc(t(locale, 'pg_logs_resend_pay_fail')) + (q.reason ? ': ' + esc(q.reason) : '') + '</div>'
       : '';
   let logs = [...DEALMAI_WEBHOOK_LOGS].reverse().filter((log) => {
-    const pg = String(log.pgProvider || 'chillpay').toLowerCase() === 'jpay' ? 'jpay' : 'chillpay';
+    const pg = normalizeDealmaiPgProvider(log.pgProvider);
     return pg === logPg && !isNotiLogUiDeleted(log, 'dealmai_webhook', deletedNotiLogsDwr);
   });
   const dr = parseLogDateRangeFromQuery(q);
@@ -29332,7 +29602,7 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
     const statusLabel = dealmaiWebhookDeliveryLabel(locale, log.webhookDeliveryStatus);
     const resendBtn =
       log.webhookTargetUrl && (log.payload || log.pgSource)
-        ? `<form method="post" action="/admin/dealmai-webhook/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="result" /><input type="hidden" name="source" value="${logPg === 'jpay' ? 'jpay' : 'chillpay'}" /><button type="submit" class="btn-resend">${esc(t(locale, 'pg_logs_btn_resend'))}</button></form>`
+        ? `<form method="post" action="/admin/dealmai-webhook/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="result" /><input type="hidden" name="source" value="${esc(logPg)}" /><button type="submit" class="btn-resend">${esc(t(locale, 'pg_logs_btn_resend'))}</button></form>`
         : '—';
     const rowCellsDwr = {
       received_date: '<td>' + esc(dt.date) + '</td>',
@@ -29345,14 +29615,21 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
       resend: '<td>' + resendBtn + '</td>',
       delete:
         '<td>' +
-        renderNotiLogDeleteButtonHtml(locale, 'dealmai_webhook', log, esc, dwrBackUrl, logPg === 'jpay' ? 'jpay' : '') +
+        renderNotiLogDeleteButtonHtml(
+          locale,
+          'dealmai_webhook',
+          log,
+          esc,
+          dwrBackUrl,
+          logPg === 'chillpay' ? '' : logPg,
+        ) +
         '</td>',
     };
     return '<tr>' + joinListColCells(dwrColFiltered, rowCellsDwr) + '</tr>';
   }).join('');
   res.send(`<!DOCTYPE html>
 <html lang="${locale}"><head><meta charset="UTF-8" /><title>${esc(t(locale, 'nav_dealmai_webhook_result'))}</title>
-<style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LIST_COL_GUIDE_CSS} body{font-family:system-ui,sans-serif;margin:0;background:#edf2f7;} .layout{display:flex;min-height:100vh;} .main{flex:1;padding:16px 24px;} table{border-collapse:collapse;width:100%;background:#fff;} th,td{border:1px solid #e5e7eb;padding:8px;font-size:13px;text-align:center;} th{background:#e5f0ff;} .summary{display:flex;gap:16px;margin-bottom:12px;font-size:14px;} .btn-resend{padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;}</style>
+<style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LIST_COL_GUIDE_CSS} body{font-family:system-ui,sans-serif;margin:0;background:#edf2f7;} .layout{display:flex;min-height:100vh;} .main{flex:1;padding:16px 24px;} table{border-collapse:collapse;width:100%;background:#fff;} th,td{border:1px solid #e5e7eb;padding:4px 6px;font-size:11px;text-align:center;} th{background:#e5f0ff;} .summary{display:flex;gap:16px;margin-bottom:12px;font-size:14px;} .btn-resend{padding:4px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;}</style>
 </head><body><div class="layout">
 ${getAdminSidebar(locale, adminUser, req.session.member, '/admin/dealmai-webhook-result', req)}
 <main class="main">
@@ -29374,7 +29651,8 @@ ${dwrColHello.panelHtml}
 app.post('/admin/dealmai-webhook/resend', requireAuth, requirePageAny(['dealmai_webhook_logs', 'dealmai_webhook_result']), async (req, res) => {
   const returnTo = (req.body.returnTo || '').trim();
   const base = returnTo === 'result' ? '/admin/dealmai-webhook-result' : '/admin/dealmai-webhook';
-  const srcQ = (req.body.source || '').toString().toLowerCase() === 'jpay' ? '&source=jpay' : '';
+  const srcNorm = normalizeAdminPgSource(req.body.source) || normalizeDealmaiPgProvider(req.body.source);
+  const srcQ = srcNorm && srcNorm !== 'chillpay' ? '&source=' + encodeURIComponent(srcNorm) : '';
   const index = parseInt(req.body.index, 10);
   if (Number.isNaN(index) || index < 0 || index >= DEALMAI_WEBHOOK_LOGS.length) {
     return res.redirect(base + '?err=invalid' + srcQ);
@@ -29391,7 +29669,7 @@ app.post('/admin/dealmai-webhook/resend', requireAuth, requirePageAny(['dealmai_
       const merchant = MERCHANTS.get(log.merchantId || '') || null;
       const built = buildDealmaiWebhookPayload(merchant, {
         body: log.pgSource || log.payload && log.payload.body || log.payload,
-        pgProvider: log.pgProvider === 'jpay' ? 'jpay' : 'chillpay',
+        pgProvider: normalizeDealmaiPgProvider(log.pgProvider),
         kind: log.kind || 'callback',
       });
       outbound = built.outbound;
@@ -29488,7 +29766,7 @@ app.get('/admin/pg-notify-delivery', requireAuth, requirePage('dev_internal_logs
   <style>${ADMIN_PAGE_DESC_BOX_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     table { border-collapse: collapse; width: 100%; background:#ffffff; border-radius:8px; overflow:hidden; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 13px; }
+    th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; }
     th { background: #e5f0ff; text-align: center; color:#1f2937; }
     td { text-align: center; }
     tr:nth-child(even) { background:#f9fafb; }
@@ -31028,7 +31306,7 @@ app.get('/admin/traffic', requireAuth, requirePage('traffic_analysis'), (req, re
     h1 { margin-bottom:8px; }
     h2 { margin-top:20px; margin-bottom:12px; font-size:16px; }
     table { border-collapse:collapse; width:100%; table-layout:auto; }
-    th, td { border:1px solid #e5e7eb; padding:10px 12px; font-size:14px; text-align:center; }
+    th, td { border:1px solid #e5e7eb; padding:4px 6px; font-size:11px; text-align:center; }
     th { background:#e5f0ff; color:#1f2937; }
     tr:nth-child(even) { background:#f9fafb; }
     .bar-wrap { background:#e5e7eb; border-radius:4px; height:22px; min-width:120px; overflow:hidden; }
