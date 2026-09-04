@@ -18,6 +18,7 @@ const nodemailer = require('nodemailer');
 const { t } = require('./locales');
 const pgNotifyDelivery = require('./lib/pgNotifyDelivery');
 const elementPayNoti = require('./lib/elementpayNoti');
+const opsManual = require('./lib/opsManual');
 
 const app = express();
 /** Nginx 등 리버스 프록시 뒤에서 X-Forwarded-*·req.ip 반영. 끄려면 TRUST_PROXY=0 */
@@ -149,27 +150,40 @@ const ADMIN_LIST_COL_GUIDE_CSS = `
     .btn-list-col-hello--restore { background:#fef3c7; border-color:#f59e0b; color:#92400e; }
 `;
 
-/** 관리자 레이아웃 공통: 사이드바·네비·상단바·main (getAdminSidebar 앞에 삽입) */
+/** 관리자 레이아웃 공통: 사이드바·네비·상단바·main — ziobiz/Crypto(TINPASS) 사이드바 톤 */
 const ADMIN_LAYOUT_SHELL_CSS = `
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
-    .sidebar { width:195px; flex-shrink:0; background:#111827; padding:6px 12px; border-radius:0 10px 10px 0; box-shadow:0 10px 30px rgba(15,23,42,0.4); border-right:1px solid #1f2937; }
-    .sidebar-title { font-weight:700; margin-bottom:1px; color:#f9fafb; font-size:18px; }
-    .sidebar-sub { font-size:12px; color:#9ca3af; margin-bottom:4px; }
-    .sidebar-user { font-size:13px; color:#e5e7eb; margin-bottom:6px; padding:4px 8px; background:#1f2937; border-radius:6px; }
-    .sidebar-lang { margin-top:12px; font-size:12px; color:#9ca3af; }
+    .sidebar { width:220px; flex-shrink:0; background:#2c2f36; padding:0 0 12px; border-radius:0; box-shadow:none; border-right:1px solid #1e2128; display:flex; flex-direction:column; min-height:100vh; transition:width .2s ease; }
+    .sidebar.sidebar-collapsed { width:64px; }
+    .sidebar-brand { display:flex; align-items:center; justify-content:center; min-height:52px; padding:8px 12px; background:#2c2f36; text-decoration:none; color:inherit; }
+    .sidebar-title { font-weight:700; margin:0; color:#f9fafb; font-size:16px; letter-spacing:0.02em; line-height:1.2; }
+    .sidebar-sub { font-size:11px; color:#9ca3af; margin:2px 0 0; line-height:1.3; }
+    .sidebar.sidebar-collapsed .sidebar-sub,
+    .sidebar.sidebar-collapsed .sidebar-user,
+    .sidebar.sidebar-collapsed .nav-group-summary-text,
+    .sidebar.sidebar-collapsed .nav-group-items a span.nav-label,
+    .sidebar.sidebar-collapsed .nav > a span.nav-label { display:none !important; }
+    .sidebar.sidebar-collapsed .nav-group-summary::after { display:none; }
+    .sidebar-collapse-wrap { display:flex; align-items:stretch; min-height:40px; margin-bottom:8px; border-top:1px solid rgba(255,255,255,0.1); border-bottom:1px solid rgba(255,255,255,0.1); background:rgba(0,0,0,0.18); }
+    .sidebar-collapse-btn { flex:1; border:none; background:transparent; color:#c5cad3; font-size:12px; cursor:pointer; padding:8px; }
+    .sidebar-collapse-btn:hover { background:rgba(255,255,255,0.06); color:#fff; }
+    .sidebar-user { font-size:12px; color:#e5e7eb; margin:8px 10px 10px; padding:6px 8px; background:rgba(0,0,0,0.22); border-radius:6px; }
+    .nav { flex:1; overflow-y:auto; padding:0 8px 8px; }
     .nav-section-title { font-size:11px; font-weight:600; color:#6b7280; margin:3px 4px 1px; text-transform:uppercase; letter-spacing:0.08em; }
-    .nav-group { margin-bottom:2px; border:1px solid transparent; border-radius:6px; }
-    .nav-group-summary { font-size:14px; font-weight:600; color:#e5e7eb; padding:6px 8px; cursor:pointer; list-style:none; text-transform:uppercase; letter-spacing:0.06em; display:flex; align-items:center; justify-content:space-between; border-radius:6px; }
+    .nav-group { margin-bottom:2px; border:none; border-radius:6px; }
+    .nav-group-summary { font-size:13px; font-weight:500; color:#d1d5db; padding:10px 12px; cursor:pointer; list-style:none; text-transform:none; letter-spacing:0; display:flex; align-items:center; gap:10px; border-radius:6px; line-height:1.35; }
     .nav-group-summary::-webkit-details-marker { display:none; }
     .nav-group-summary::marker { content:""; }
-    .nav-group-summary::after { content:"\\25BC"; font-size:14px; opacity:0.7; transition:transform 0.15s ease; flex-shrink:0; }
-    .nav-group[open] .nav-group-summary::after { transform:rotate(-180deg); }
+    .nav-group-summary::after { content:"\\25BE"; font-size:11px; opacity:0.7; margin-left:auto; flex-shrink:0; }
+    .nav-group[open] .nav-group-summary::after { transform:none; content:"\\25B4"; }
     .nav-group-summary .nav-group-summary-link { flex:1; min-width:0; display:block; text-align:left; padding:0; margin:0; font:inherit; color:inherit; text-decoration:none; }
-    .nav-group-items { padding-left:4px; padding-bottom:6px; display:flex; flex-direction:column; gap:2px; }
-    .nav-group-items a { display:block; padding:6px 10px; color:#e5e7eb; text-decoration:none; font-size:13px; line-height:1.4; border-radius:6px; box-sizing:border-box; }
-    .nav a, .nav a:visited { display:block; padding:4px 10px; margin-bottom:0; color:#e5e7eb; text-decoration:none; font-size:14px; border-radius:6px; }
-    .nav a:hover, .nav a.active { background:rgba(59, 130, 246, 0.35); color:#dbeafe; }
-    .nav-group-items a:hover, .nav-group-items a.active { background:rgba(59, 130, 246, 0.35); color:#dbeafe; }
+    .nav-group-summary:hover { background:rgba(255,255,255,0.06); color:#f9fafb; }
+    .nav-ico { width:18px; height:18px; flex-shrink:0; opacity:0.95; stroke:currentColor; fill:none; stroke-width:1.75; }
+    .nav-group-items { padding:0 0 6px 4px; display:flex; flex-direction:column; gap:2px; }
+    .nav-group-items a { display:flex; align-items:center; gap:10px; padding:9px 12px; color:#c5cad3; text-decoration:none; font-size:13px; line-height:1.35; border-radius:6px; box-sizing:border-box; }
+    .nav a, .nav a:visited { display:flex; align-items:center; gap:10px; padding:10px 12px; margin-bottom:2px; color:#c5cad3; text-decoration:none; font-size:13px; border-radius:6px; line-height:1.35; }
+    .nav a:hover, .nav a.active,
+    .nav-group-items a:hover, .nav-group-items a.active { background:rgba(59,130,246,0.28); color:#dbeafe; font-weight:500; }
     .nav-github-style .nav-item-small { font-size:12px; white-space:nowrap; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; min-width:0; }
     .topbar { background:linear-gradient(180deg, #f8fafc 0%, #e0f2fe 100%); border-radius:10px; padding:10px 16px; font-size:13px; color:#1e293b; border:1px solid #bae6fd; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px 16px; box-shadow:0 1px 2px rgba(15,23,42,0.05); }
@@ -183,8 +197,6 @@ const ADMIN_LAYOUT_SHELL_CSS = `
     .topbar-lang-links a:hover { text-decoration:underline; color:#1d4ed8; }
     .topbar-logout { color:#0369a1; text-decoration:none; font-weight:600; font-size:13px; padding:5px 12px; border-radius:6px; border:1px solid #7dd3fc; background:#fff; }
     .topbar-logout:hover { background:#e0f2fe; color:#1e40af; }
-    .sidebar-lang a { color:#93c5fd; text-decoration:none; margin:0 2px; font-weight:600; }
-    .sidebar-lang a:hover { color:#dbeafe; text-decoration:underline; }
     .hub-nav-links { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; margin-top:8px; width:100%; }
     .hub-nav-link { padding:4px 10px; border-radius:6px; text-decoration:none; font-size:12px; font-weight:600; background:#fff; color:#374151; border:1px solid #d1d5db; white-space:nowrap; }
     .hub-nav-link:hover { background:#f1f5f9; color:#1e293b; }
@@ -203,6 +215,13 @@ const ADMIN_LAYOUT_SHELL_CSS = `
     .hub-nav-guide-list { display:flex; flex-wrap:wrap; gap:6px 12px; }
     .hub-nav-guide-item { font-size:12px; color:#374151; display:inline-flex; align-items:center; gap:4px; }
     .hub-nav-guide-item--off { opacity:0.55; }
+    .ops-manual-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:14px; margin-top:16px; }
+    .ops-manual-card { border:1px solid #e2e8f0; border-radius:10px; padding:16px; background:#fff; box-shadow:0 1px 2px rgba(15,23,42,0.04); }
+    .ops-manual-card h3 { margin:0 0 6px; font-size:15px; color:#0f172a; }
+    .ops-manual-card p { margin:0 0 12px; font-size:13px; color:#64748b; line-height:1.45; }
+    .ops-manual-card a { display:inline-block; font-size:13px; font-weight:700; color:#1565c0; text-decoration:none; }
+    .ops-manual-card a:hover { text-decoration:underline; }
+    .ops-manual-ver { display:inline-block; border-radius:999px; background:#eff6ff; color:#1e40af; font-size:12px; font-weight:700; padding:4px 12px; }
     ${ADMIN_LIST_COL_GUIDE_CSS}
 `;
 
@@ -2803,6 +2822,7 @@ const DEV_INTERNAL_LOG_PATH = path.join(DATA_DIR, 'dev-internal-noti.log');
 const DEALMAI_WEBHOOK_LOG_PATH = path.join(DATA_DIR, 'dealmai-webhook.log');
 const TEST_LOG_PATH = path.join(DATA_DIR, 'test-payments.log');
 const CONFIG_LOG_PATH = path.join(DATA_DIR, 'config-change.log');
+const OPS_MANUAL_VERSION_PATH = path.join(DATA_DIR, 'ops-manual-versions.json');
 const VOID_REFUND_NOTI_LOG_PATH = path.join(DATA_DIR, 'void-refund-noti.log');
 const VOID_UI_DELETED_PATH = path.join(DATA_DIR, 'void-ui-deleted.log');
 const ICOPAY_PROVISION_IDEMPOTENCY_PATH = path.join(DATA_DIR, 'icopay-provision-idempotency.json');
@@ -4108,12 +4128,15 @@ async function handleElementPayBrowserResult(req, res) {
   );
 
   const match = await resolveElementPayMerchantForBrowserResult(payload);
-  const notifyBody = elementPayNoti.mapElementPayToMerchantNotifyBody(body, method || 'pay');
+  const notifyBody = stampElementPayCompIdOnBody(
+    elementPayNoti.mapElementPayToMerchantNotifyBody(body, method || 'pay'),
+    (match && match.merchantId) || payload.compId || '',
+  );
 
   if (!match || !match.merchant) {
     appendPgNotiLog({
       routeKey: 'elementpay/result',
-      merchantId: '',
+      merchantId: String(payload.compId || '').trim(),
       kind: 'result',
       body: notifyBody,
       rawBody: undefined,
@@ -4492,10 +4515,23 @@ async function handleElementPayWebhook(req, res) {
   const ico = await forwardElementPayToIcopay(forwardBody, incomingContentType, 1);
   const compIdHdr = elementPayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-comp-id');
   const orderHdr = elementPayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-order-no');
-  // Header first; ICOPAY resend/mirror may put Comp-Id only in body
-  const compId =
+  // Header first; ICOPAY resend/mirror may put Comp-Id only in body; then order lookup / data JSON
+  let compId =
     compIdHdr ||
-    String(body.compId || body.CompId || body.merchantId || body.MerchantId || '').trim();
+    String(body.compId || body.CompId || body.merchantId || body.MerchantId || body['Comp-Id'] || '').trim() ||
+    extractElementPayCompIdFromBody(body);
+  const orderForComp = orderHdr || order;
+  if (!compId && orderForComp) {
+    try {
+      compId = await lookupElementPayCompIdFromIcopay(orderForComp);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  if (!compId && orderForComp) {
+    const byLog = findElementPayMerchantByOrderFromLogs(orderForComp);
+    if (byLog && byLog.merchantId) compId = byLog.merchantId;
+  }
 
   // Merchant notify after ICOPAY (pay / payment.*) — never block EP response body
   if (elementPayNoti.elementPayShouldNotifyMerchant(method)) {
@@ -4508,11 +4544,15 @@ async function handleElementPayWebhook(req, res) {
         'order=',
         orderHdr || order || '-',
       );
+      const notifyBodyFail = stampElementPayCompIdOnBody(
+        elementPayNoti.mapElementPayToMerchantNotifyBody(body, method),
+        compId,
+      );
       appendPgNotiLog({
         routeKey: 'elementpay/webhook',
         merchantId: compId || '',
         kind: 'callback',
-        body: elementPayNoti.mapElementPayToMerchantNotifyBody(body, method),
+        body: notifyBodyFail,
         rawBody: forwardBody || undefined,
         targetUrl: '',
         contentType: incomingContentType,
@@ -4522,7 +4562,10 @@ async function handleElementPayWebhook(req, res) {
         pgProvider: 'elementpay',
       });
     } else {
-      const notifyBody = elementPayNoti.mapElementPayToMerchantNotifyBody(body, method);
+      const notifyBody = stampElementPayCompIdOnBody(
+        elementPayNoti.mapElementPayToMerchantNotifyBody(body, method),
+        match.merchantId || compId,
+      );
       try {
         await relayElementPayMerchantNotify(
           match.merchantId,
@@ -6022,6 +6065,8 @@ function notifBodyPaymentDateForWindow(body) {
       body.transactionDate ||
       body.time_end ||
       body.datetime ||
+      body.timestamp ||
+      body.Timestamp ||
       '',
   ).trim();
 }
@@ -7029,7 +7074,7 @@ function syncJpayPgLogsFromInternalLogs() {
   return added;
 }
 
-// ===== 설정 변경 로그 (관리자 설정, 가맹점, 전산 대상 등) =====
+// ===== 설정 변경 로그 (관리자 설정, 가맹점, 전산 대상 등) + 운영매뉴얼 버전 이력 =====
 function appendConfigChangeLog(entry) {
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -7040,6 +7085,18 @@ function appendConfigChangeLog(entry) {
     fs.appendFile(CONFIG_LOG_PATH, JSON.stringify(log) + '\n', () => {});
   } catch {
     // 무시
+  }
+  try {
+    const action = String((entry && entry.action) || 'settings');
+    if (/settings|chillpay|jpay|site_|provision|elementpay|internal_noti|dealmai|timezone|redirect/i.test(action)) {
+      opsManual.recordSettingsChange(OPS_MANUAL_VERSION_PATH, {
+        action,
+        detail: (entry && (entry.detail || entry.action)) || action,
+        actor: (entry && entry.actor) || 'unknown',
+      });
+    }
+  } catch (_) {
+    /* ignore version bump failures */
   }
 }
 
@@ -8804,21 +8861,39 @@ function formatDateYmdInChillpayTimezone(date, tz) {
   return '';
 }
 
-/** 목록 기간 필터: 본문 결제·거래일 → 설정 TZ 기준 ymd. 파싱 실패·없음이면 '' */
+/** 목록 기간 필터: 본문 결제·거래일 → 설정 TZ 기준 ymd. 파싱 실패·없음이면 수신일(ISO) 폴백, 그래도 없으면 '' */
 function getCrVoidRefundPaymentCalendarYmd(log, tzFallback) {
-  const body = parseNotiBody(log);
+  const body = parseNotiBodyForDisplay(log);
   const payRaw = String(
     notifBodyPaymentDateForWindow(body) ||
-      (body && (body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate)) ||
+      (body && (body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || body.timestamp)) ||
       '',
   ).trim();
-  if (!payRaw) return '';
-  const merchant = log.merchantId && typeof MERCHANTS !== 'undefined' && MERCHANTS ? MERCHANTS.get(log.merchantId) : null;
+  const merchantId = resolveNotiLogMerchantId(log, body);
+  const merchant =
+    merchantId && typeof MERCHANTS !== 'undefined' && MERCHANTS ? MERCHANTS.get(merchantId) : null;
   const wallTz = resolvePaymentWallClockTimezone(log, merchant);
-  const pd = parseVoidRefundScheduleDateRaw(payRaw, wallTz);
-  if (!pd) return '';
-  const ymd = formatDateYmdInChillpayTimezone(pd, tzFallback);
-  return ymd || '';
+  if (payRaw) {
+    const pd = parseVoidRefundScheduleDateRaw(payRaw, wallTz);
+    if (pd) {
+      const ymd = formatDateYmdInChillpayTimezone(pd, tzFallback);
+      if (ymd) return ymd;
+    }
+  }
+  const recIso = log && (log.receivedAtIso || log.receivedAt);
+  if (!recIso) return '';
+  try {
+    return (
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: tzFallback || DEFAULT_CHILLPAY_TIMEZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date(recIso)) || ''
+    );
+  } catch (_) {
+    return '';
+  }
 }
 
 /** 기간 구간: 결제일·노티 수신일 중 하나라도 [dateFrom, dateTo] 안이면 포함 (결제일만 쓰면 당일 프리셋에서 전부 빠지는 경우 방지) */
@@ -11532,52 +11607,151 @@ app.get('/admin/set-locale', (req, res) => {
   res.redirect(back);
 });
 
-function getAdminSidebar(locale, adminUser, member, currentPath, req) {
+app.post('/admin/set-sidebar-collapsed', requireAuth, express.json(), (req, res) => {
+  if (req.session) {
+    req.session.sidebarCollapsed = !!(req.body && req.body.collapsed);
+  }
+  res.json({ ok: true, collapsed: !!(req.session && req.session.sidebarCollapsed) });
+});
+
+app.get('/admin/ops-manual', requireAuth, (req, res) => {
+  const locale = getLocale(req);
+  const adminUser = req.session.adminUser;
   const site = loadSiteSettings();
+  const verState = opsManual.loadVersionState(OPS_MANUAL_VERSION_PATH);
+  const catalog = opsManual.getManualCatalog();
+  const cards = catalog
+    .map((c) => {
+      const title = opsManual.pickLocaleMap(c.title, locale);
+      const sub = opsManual.pickLocaleMap(c.subtitle, locale);
+      return (
+        '<div class="ops-manual-card"><h3>' +
+        String(title).replace(/</g, '&lt;') +
+        '</h3><p>' +
+        String(sub).replace(/</g, '&lt;') +
+        '</p><a href="/admin/ops-manual/view/' +
+        encodeURIComponent(c.id) +
+        '" target="_blank" rel="noopener">' +
+        (t(locale, 'ops_manual_open') || '매뉴얼 열기') +
+        ' →</a></div>'
+      );
+    })
+    .join('');
+  const body =
+    '<div class="layout">' +
+    getAdminSidebar(locale, adminUser, req.session.member, req.originalUrl || '/admin/ops-manual', req) +
+    '<div class="main">' +
+    getAdminTopbar(locale, null, new Date(), null, adminUser, req.originalUrl) +
+    '<div class="card" style="background:#fff;border-radius:10px;padding:20px 22px;border:1px solid #e2e8f0;">' +
+    '<div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;">' +
+    '<div><h1 style="margin:0;font-size:18px;">' +
+    (t(locale, 'ops_manual_title') || '이용매뉴얼') +
+    '</h1><p class="admin-page-desc" style="margin:8px 0 0;">' +
+    (t(locale, 'ops_manual_desc') ||
+      '결제대행사별 운영 매뉴얼입니다. ICOPAY 매뉴얼과 동일한 형식이며, 환경설정 변경은 버전 이력으로 기록됩니다.') +
+    '</p></div>' +
+    '<span class="ops-manual-ver">' +
+    (t(locale, 'ops_manual_live_version') || '운영 버전') +
+    ' V' +
+    String(verState.liveVersion || opsManual.OPS_MANUAL_LIVE_VERSION).replace(/</g, '&lt;') +
+    '</span></div>' +
+    '<div class="ops-manual-grid">' +
+    cards +
+    '</div></div></div></div>';
+  res.send(
+    '<!DOCTYPE html><html lang="' +
+      locale +
+      '"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>' +
+      (t(locale, 'ops_manual_title') || '이용매뉴얼') +
+      '</title></head><body style="margin:0;background:#f1f5f9;">' +
+      body +
+      '</body></html>',
+  );
+});
+
+app.get('/admin/ops-manual/view/:id', requireAuth, (req, res) => {
+  const locale = getLocale(req);
+  const id = String(req.params.id || '').trim();
+  const site = loadSiteSettings();
+  const verState = opsManual.loadVersionState(OPS_MANUAL_VERSION_PATH);
+  const html = opsManual.buildManualHtml(id, locale, {
+    siteTitle: site.sidebarTitle || DEFAULT_SIDEBAR_TITLE,
+    versionFilePath: OPS_MANUAL_VERSION_PATH,
+    liveVersion: verState.liveVersion,
+  });
+  if (!html) return res.status(404).send('Manual not found');
+  res.type('html').send(html);
+});
+
+function adminNavIcon(kind) {
+  const common =
+    'class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"';
+  const paths = {
+    merchants:
+      '<path stroke-linecap="round" stroke-linejoin="round" d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path stroke-linecap="round" d="M22 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/>',
+    logs:
+      '<path stroke-linecap="round" d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+    settings:
+      '<path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/>',
+    trades:
+      '<path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M7 15h1m4 0h1M5 6h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z"/>',
+    test:
+      '<rect x="4" y="3" width="16" height="18" rx="2"/><path stroke-linecap="round" d="M8 7h8M8 12h3M13 12h3M8 16h3M13 16h3"/>',
+    system:
+      '<path stroke-linecap="round" stroke-linejoin="round" d="M3 7h6v4H3V7zm12-2h6v4h-6V5zM9 15h6v4H9v-4z"/>',
+    manual:
+      '<path stroke-linecap="round" stroke-linejoin="round" d="M4 5a2 2 0 012-2h9l5 5v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5z"/><path stroke-linecap="round" d="M14 3v5h5M8 13h8M8 17h5"/>',
+  };
+  const inner = paths[kind] || paths.manual;
+  return `<svg ${common} fill="none" stroke="currentColor" stroke-width="1.75">${inner}</svg>`;
+}
+
+function createAdminSidebarNavHelpers(locale, currentPath, req, member) {
   const pathMatch = (path) => currentPath && (currentPath === path || currentPath.startsWith(path + '?'));
   const link = (path, label, extraClass) => {
     const isActive = pathMatch(path);
-    const cls = [
-      isActive ? 'active' : '',
-      extraClass || '',
-    ].filter(Boolean).join(' ');
+    const cls = [isActive ? 'active' : '', extraClass || ''].filter(Boolean).join(' ');
     const clsAttr = cls ? ` class="${cls}"` : '';
-    return `<a href="${path}"${clsAttr}>${label}</a>`;
+    return `<a href="${path}"${clsAttr}><span class="nav-label">${label}</span></a>`;
   };
-  const langLinks = SUPPORTED_LOCALES.map((l) => {
-    const label = l === 'zh' ? 'CH' : l.toUpperCase();
-    return `<a href="/admin/set-locale?lang=${l}">${label}</a>`;
-  }).join(' ');
   const role = member && member.role ? member.role : null;
   const canSeeMembers = role === ROLES.SUPER_ADMIN || role === ROLES.ADMIN;
   const perms = member && member.permissions ? member.permissions : PAGE_KEYS;
-  const can = (key) => canSeeMembers || perms.includes(key) || (typeof key === 'string' && key.startsWith('cr_') && perms.includes('cancel_refund'));
+  const can = (key) =>
+    canSeeMembers ||
+    perms.includes(key) ||
+    (typeof key === 'string' && key.startsWith('cr_') && perms.includes('cancel_refund'));
   const sectionOpen = (paths) => paths.some((p) => pathMatch(p));
-  // 왼쪽 메뉴: 섹션별로 접었다 펼치는 드롭다운 구조
-  const navGroup = (sectionTitle, paths, itemsHtml) => {
+  const navGroup = (sectionTitle, paths, itemsHtml, iconKind) => {
     const open = sectionOpen(paths);
-    return `<details class="nav-group"${open ? ' open' : ''}><summary class="nav-group-summary">${sectionTitle}</summary><div class="nav-group-items">${itemsHtml}</div></details>`;
+    const ico = adminNavIcon(iconKind || 'trades');
+    return `<details class="nav-group"${open ? ' open' : ''}><summary class="nav-group-summary">${ico}<span class="nav-group-summary-text">${sectionTitle}</span></summary><div class="nav-group-items">${itemsHtml}</div></details>`;
   };
+  const merchantsRegisterLink = (kind, label) => {
+    const href = `/admin/merchants?kind=${kind}`;
+    let isActive = false;
+    if (currentPath && (currentPath === '/admin/merchants' || currentPath.startsWith('/admin/merchants?'))) {
+      const qIdx = currentPath.indexOf('?');
+      const qs = qIdx >= 0 ? currentPath.slice(qIdx + 1) : '';
+      let k = 'chillpay';
+      if (qs) {
+        try {
+          k = new URLSearchParams(qs).get('kind') || 'chillpay';
+        } catch (_) {}
+      }
+      if (k !== 'jpay' && k !== 'elementpay') k = 'chillpay';
+      isActive = k === kind;
+    }
+    const clsAttr = isActive ? ' class="active"' : '';
+    return `<a href="${href}"${clsAttr}>${label}</a>`;
+  };
+  return { pathMatch, link, can, canSeeMembers, sectionOpen, navGroup, merchantsRegisterLink, locale, req };
+}
+
+function buildAdminSidebarNavItems(h) {
+  const { link, can, canSeeMembers, sectionOpen, navGroup, merchantsRegisterLink, locale, req, pathMatch } = h;
   const nav = [];
   if (can('merchants')) {
-    const merchantsRegisterLink = (kind, label) => {
-      const href = `/admin/merchants?kind=${kind}`;
-      let isActive = false;
-      if (currentPath && (currentPath === '/admin/merchants' || currentPath.startsWith('/admin/merchants?'))) {
-        const qIdx = currentPath.indexOf('?');
-        const qs = qIdx >= 0 ? currentPath.slice(qIdx + 1) : '';
-        let k = 'chillpay';
-        if (qs) {
-          try {
-            k = new URLSearchParams(qs).get('kind') || 'chillpay';
-          } catch (_) {}
-        }
-        if (k !== 'jpay') k = 'chillpay';
-        isActive = k === kind;
-      }
-      const clsAttr = isActive ? ' class="active"' : '';
-      return `<a href="${href}"${clsAttr}>${label}</a>`;
-    };
     nav.push(
       navGroup(
         t(locale, 'nav_merchant'),
@@ -11585,65 +11759,145 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
         merchantsRegisterLink('chillpay', t(locale, 'merchants_nav_register_chillpay')) +
           merchantsRegisterLink('jpay', t(locale, 'merchants_nav_register_jpay')) +
           merchantsRegisterLink('elementpay', t(locale, 'merchants_nav_register_elementpay')),
+        'merchants',
       ),
     );
   }
-  if (can('pg_logs') || can('internal_logs') || can('dev_internal_logs') || can('dealmai_webhook_logs') || can('pg_result') || can('internal_result') || can('dev_result') || can('dealmai_webhook_result') || can('traffic_analysis') || can('mail_logs')) {
-    const logPaths = ['/admin/logs-result', '/admin/internal-result', '/admin/dev-internal-result', '/admin/dealmai-webhook-result', '/admin/logs', '/admin/internal', '/admin/dev-internal', '/admin/dealmai-webhook', '/admin/pg-notify-delivery', '/admin/mail-logs', '/admin/traffic'];
+  if (
+    can('pg_logs') ||
+    can('internal_logs') ||
+    can('dev_internal_logs') ||
+    can('dealmai_webhook_logs') ||
+    can('pg_result') ||
+    can('internal_result') ||
+    can('dev_result') ||
+    can('dealmai_webhook_result') ||
+    can('traffic_analysis') ||
+    can('mail_logs')
+  ) {
+    const logPaths = [
+      '/admin/logs-result',
+      '/admin/internal-result',
+      '/admin/dev-internal-result',
+      '/admin/dealmai-webhook-result',
+      '/admin/logs',
+      '/admin/internal',
+      '/admin/dev-internal',
+      '/admin/dealmai-webhook',
+      '/admin/pg-notify-delivery',
+      '/admin/mail-logs',
+      '/admin/traffic',
+    ];
     const logItems = [];
     if (can('pg_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs-result'), t(locale, 'nav_pg_result')));
-    if (can('internal_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal-result'), t(locale, 'nav_internal_result')));
-    if (can('dev_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal-result'), t(locale, 'nav_dev_result')));
-    if (can('dealmai_webhook_result')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook-result'), t(locale, 'nav_dealmai_webhook_result')));
+    if (can('internal_result'))
+      logItems.push(link(urlWithSessionPgSource(req, '/admin/internal-result'), t(locale, 'nav_internal_result')));
+    if (can('dev_result'))
+      logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal-result'), t(locale, 'nav_dev_result')));
+    if (can('dealmai_webhook_result'))
+      logItems.push(
+        link(urlWithSessionPgSource(req, '/admin/dealmai-webhook-result'), t(locale, 'nav_dealmai_webhook_result')),
+      );
     if (can('pg_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/logs'), t(locale, 'nav_pg_noti_log')));
-    if (can('internal_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/internal'), t(locale, 'nav_internal_noti_log')));
+    if (can('internal_logs'))
+      logItems.push(link(urlWithSessionPgSource(req, '/admin/internal'), t(locale, 'nav_internal_noti_log')));
     if (can('dev_internal_logs')) {
       logItems.push(link(urlWithSessionPgSource(req, '/admin/dev-internal'), t(locale, 'nav_dev_internal_noti_log')));
       logItems.push(link('/admin/pg-notify-delivery', t(locale, 'nav_pg_notify_delivery')));
     }
-    if (can('dealmai_webhook_logs')) logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook'), t(locale, 'nav_dealmai_webhook_log')));
+    if (can('dealmai_webhook_logs'))
+      logItems.push(link(urlWithSessionPgSource(req, '/admin/dealmai-webhook'), t(locale, 'nav_dealmai_webhook_log')));
     if (can('mail_logs')) logItems.push(link('/admin/mail-logs', t(locale, 'nav_mail_logs')));
     if (can('traffic_analysis')) logItems.push(link('/admin/traffic', t(locale, 'nav_traffic_analysis')));
-    nav.push(navGroup(t(locale, 'nav_logs'), logPaths, logItems.join('')));
+    nav.push(navGroup(t(locale, 'nav_logs'), logPaths, logItems.join(''), 'logs'));
   }
-  if (can('internal_targets') || can('internal_noti_settings') || can('dev_internal_noti_settings') || can('dealmai_webhook_settings') || can('test_run')) {
-    const internalPaths = ['/admin/internal-targets', '/admin/internal-noti-settings', '/admin/dev-internal-noti-settings', '/admin/dealmai-webhook-settings', '/admin/noti-analysis'];
+  if (
+    can('internal_targets') ||
+    can('internal_noti_settings') ||
+    can('dev_internal_noti_settings') ||
+    can('dealmai_webhook_settings') ||
+    can('test_run')
+  ) {
+    const internalPaths = [
+      '/admin/internal-targets',
+      '/admin/internal-noti-settings',
+      '/admin/dev-internal-noti-settings',
+      '/admin/dealmai-webhook-settings',
+      '/admin/noti-analysis',
+    ];
     const internalItems = [];
     if (can('internal_targets')) internalItems.push(link('/admin/internal-targets', t(locale, 'nav_internal_targets')));
-    if (can('internal_noti_settings')) internalItems.push(link('/admin/internal-noti-settings', t(locale, 'nav_internal_noti_settings')));
-    if (can('dev_internal_noti_settings')) internalItems.push(link('/admin/dev-internal-noti-settings', t(locale, 'nav_dev_internal_noti_settings')));
-    if (can('dealmai_webhook_settings')) internalItems.push(link('/admin/dealmai-webhook-settings', t(locale, 'nav_dealmai_webhook_settings')));
+    if (can('internal_noti_settings'))
+      internalItems.push(link('/admin/internal-noti-settings', t(locale, 'nav_internal_noti_settings')));
+    if (can('dev_internal_noti_settings'))
+      internalItems.push(link('/admin/dev-internal-noti-settings', t(locale, 'nav_dev_internal_noti_settings')));
+    if (can('dealmai_webhook_settings'))
+      internalItems.push(link('/admin/dealmai-webhook-settings', t(locale, 'nav_dealmai_webhook_settings')));
     if (can('test_run')) internalItems.push(link('/admin/noti-analysis', t(locale, 'nav_noti_analysis')));
-    nav.push(navGroup(t(locale, 'nav_internal'), internalPaths, internalItems.join('')));
+    nav.push(navGroup(t(locale, 'nav_internal'), internalPaths, internalItems.join(''), 'settings'));
   }
-  const crAny = can('cr_transactions') || can('cr_pg_transactions') || can('cr_cancel') || can('cr_void') || can('cr_void_summary') || can('cr_refund') || can('cr_force_refund') || can('cr_noti') || can('cr_void_deleted');
+  const crAny =
+    can('cr_transactions') ||
+    can('cr_pg_transactions') ||
+    can('cr_cancel') ||
+    can('cr_void') ||
+    can('cr_void_summary') ||
+    can('cr_refund') ||
+    can('cr_force_refund') ||
+    can('cr_noti') ||
+    can('cr_void_deleted') ||
+    can('cr_jpay_followup');
   if (crAny) {
     const crCfg = loadChillPayTransactionConfig();
     const forceRefundDaysNav = Number(crCfg.forceRefundWindowDays) >= 0 ? crCfg.forceRefundWindowDays : 0;
-    const crPaths = ['/admin/transactions', '/admin/daily-noti-summary', '/admin/daily-noti-summary/export', '/admin/pg-transactions', '/admin/daily-pg-summary', '/admin/daily-pg-summary/export', '/admin/cancel-refund/cancel', '/admin/cancel-refund/void', '/admin/cancel-refund/void-summary', '/admin/cancel-refund/refund', '/admin/cancel-refund/force-refund', '/admin/cancel-refund/noti', '/admin/cancel-refund/void-deleted-list', '/admin/cancel-refund/jpay-followup'];
+    const crPaths = [
+      '/admin/transactions',
+      '/admin/daily-noti-summary',
+      '/admin/daily-noti-summary/export',
+      '/admin/pg-transactions',
+      '/admin/daily-pg-summary',
+      '/admin/daily-pg-summary/export',
+      '/admin/cancel-refund/cancel',
+      '/admin/cancel-refund/void',
+      '/admin/cancel-refund/void-summary',
+      '/admin/cancel-refund/refund',
+      '/admin/cancel-refund/force-refund',
+      '/admin/cancel-refund/noti',
+      '/admin/cancel-refund/void-deleted-list',
+      '/admin/cancel-refund/jpay-followup',
+    ];
     const crLabel = t(locale, 'nav_cancel_refund');
     const crItems = [];
     const txNavUrl = urlWithSessionPgSource(req, '/admin/transactions');
     if (can('cr_transactions')) crItems.push(link(txNavUrl, t(locale, 'nav_transaction_list')));
     if (can('cr_transactions')) {
       crItems.push(
-        link(urlWithSessionPgSource(req, '/admin/daily-noti-summary?period=thisMonth&dateSort=desc'), t(locale, 'nav_daily_noti_summary')),
+        link(
+          urlWithSessionPgSource(req, '/admin/daily-noti-summary?period=thisMonth&dateSort=desc'),
+          t(locale, 'nav_daily_noti_summary'),
+        ),
       );
     }
     if (can('cr_jpay_followup')) {
       crItems.push(link('/admin/cancel-refund/jpay-followup?source=jpay', t(locale, 'nav_jpay_followup')));
     }
-    if (can('cr_pg_transactions')) crItems.push(link('/admin/pg-transactions?sort=today', t(locale, 'nav_pg_transaction_list')));
-    if (can('cr_pg_transactions')) crItems.push(link('/admin/daily-pg-summary?sort=thisMonth&dateSort=desc', t(locale, 'nav_daily_pg_summary')));
+    if (can('cr_pg_transactions'))
+      crItems.push(link('/admin/pg-transactions?sort=today', t(locale, 'nav_pg_transaction_list')));
+    if (can('cr_pg_transactions'))
+      crItems.push(link('/admin/daily-pg-summary?sort=thisMonth&dateSort=desc', t(locale, 'nav_daily_pg_summary')));
     if (can('cr_cancel')) crItems.push(link('/admin/cancel-refund/cancel', t(locale, 'nav_cancel_refund_cancel')));
     if (can('cr_void')) crItems.push(link('/admin/cancel-refund/void', t(locale, 'nav_cancel_refund_void')));
-    if (can('cr_void_summary')) crItems.push(link('/admin/cancel-refund/void-summary', t(locale, 'nav_cancel_refund_void_summary')));
+    if (can('cr_void_summary'))
+      crItems.push(link('/admin/cancel-refund/void-summary', t(locale, 'nav_cancel_refund_void_summary')));
     if (can('cr_refund')) crItems.push(link('/admin/cancel-refund/refund', t(locale, 'nav_cancel_refund_refund')));
-    if (can('cr_force_refund') && forceRefundDaysNav > 0) crItems.push(link('/admin/cancel-refund/force-refund', t(locale, 'nav_cancel_refund_force_refund')));
+    if (can('cr_force_refund') && forceRefundDaysNav > 0)
+      crItems.push(link('/admin/cancel-refund/force-refund', t(locale, 'nav_cancel_refund_force_refund')));
     if (can('cr_noti')) crItems.push(link('/admin/cancel-refund/noti', t(locale, 'nav_cancel_refund_noti'), 'nav-item-small'));
     if (can('cr_void_deleted')) crItems.push(link('/admin/cancel-refund/void-deleted-list', t(locale, 'cr_void_deleted_list')));
     const crOpen = sectionOpen(crPaths);
-    nav.push(`<details class="nav-group"${crOpen ? ' open' : ''}><summary class="nav-group-summary"><a href="${txNavUrl}" class="nav-group-summary-link" style="color:inherit;text-decoration:none;" onclick="event.stopPropagation()">${crLabel}</a></summary><div class="nav-group-items">${crItems.join('')}</div></details>`);
+    nav.push(
+      `<details class="nav-group"${crOpen ? ' open' : ''}><summary class="nav-group-summary">${adminNavIcon('trades')}<a href="${txNavUrl}" class="nav-group-summary-link nav-group-summary-text" style="color:inherit;text-decoration:none;" onclick="event.stopPropagation()">${crLabel}</a></summary><div class="nav-group-items">${crItems.join('')}</div></details>`,
+    );
   }
   if (can('test_config') || can('test_run') || can('test_history')) {
     const testPaths = ['/admin/test-configs', '/admin/test-pay', '/admin/test-recurring', '/admin/test-logs'];
@@ -11652,7 +11906,13 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
     if (can('test_run')) testItems.push(link('/admin/test-pay', t(locale, 'nav_test_run')));
     if (can('test_run')) testItems.push(link('/admin/test-recurring', t(locale, 'nav_test_recurring')));
     if (can('test_history')) testItems.push(link('/admin/test-logs', t(locale, 'nav_test_history')));
-    nav.push(navGroup(t(locale, 'nav_test'), testPaths, testItems.join('')));
+    nav.push(navGroup(t(locale, 'nav_test'), testPaths, testItems.join(''), 'test'));
+  }
+  {
+    const manualActive = pathMatch('/admin/ops-manual');
+    nav.push(
+      `<a href="/admin/ops-manual"${manualActive ? ' class="active"' : ''}>${adminNavIcon('manual')}<span class="nav-label">${t(locale, 'nav_ops_manual')}</span></a>`,
+    );
   }
   if (canSeeMembers || can('settings') || can('account') || can('account_reset') || can('advanced_system_monitor')) {
     const sysPaths = ['/admin/members', '/admin/account', '/admin/account-reset', '/admin/settings', '/admin/system-monitor'];
@@ -11662,8 +11922,15 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
     if (can('account_reset')) sysItems.push(link('/admin/account-reset', t(locale, 'nav_account_reset')));
     if (can('settings')) sysItems.push(link('/admin/settings', t(locale, 'nav_settings')));
     if (can('advanced_system_monitor')) sysItems.push(link('/admin/system-monitor', t(locale, 'nav_server_manage')));
-    nav.push(navGroup(t(locale, 'nav_system'), sysPaths, sysItems.join('')));
+    nav.push(navGroup(t(locale, 'nav_system'), sysPaths, sysItems.join(''), 'system'));
   }
+  return nav;
+}
+
+function getAdminSidebar(locale, adminUser, member, currentPath, req) {
+  const site = loadSiteSettings();
+  const h = createAdminSidebarNavHelpers(locale, currentPath, req, member);
+  const nav = buildAdminSidebarNavItems(h);
   const titleText = (site.sidebarTitle || '').replace(/</g, '&lt;').replace(/"/g, '&quot;') || DEFAULT_SIDEBAR_TITLE;
   const subText = (site.sidebarSub || '').replace(/</g, '&lt;').replace(/"/g, '&quot;') || DEFAULT_SIDEBAR_SUB;
   const forbiddenSettingsMsg = (t(locale, 'err_forbidden_contact_admin') || '해당 전산 대상에 대한 접근 권한이 없습니다. 관리자에게 문의하세요.').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' ');
@@ -11682,21 +11949,44 @@ function getAdminSidebar(locale, adminUser, member, currentPath, req) {
       }
     }
   }
+  const collapsed = !!(req && req.session && req.session.sidebarCollapsed);
+  const collapseLabel = collapsed ? '»' : '« ' + (t(locale, 'nav_collapse') || '접기');
   return `
     <style>${ADMIN_LAYOUT_SHELL_CSS}</style>
-    <aside class="sidebar">
-      <a href="/admin/merchants" style="color:inherit;text-decoration:none;display:block;">
-        <div class="sidebar-title" style="font-size:18px;">${titleText}</div>
-        <div class="sidebar-sub" style="font-size:12px;">${subText}</div>
+    <aside class="sidebar${collapsed ? ' sidebar-collapsed' : ''}" id="admin-sidebar">
+      <a href="/admin/merchants" class="sidebar-brand">
+        <div>
+          <div class="sidebar-title">${titleText}</div>
+          <div class="sidebar-sub">${subText}</div>
+        </div>
       </a>
-      <div class="sidebar-user" style="font-size:13px;margin-top:18px;margin-bottom:18px;">${t(locale, 'user_label')}: ${adminUser || '-'}</div>
+      <div class="sidebar-collapse-wrap">
+        <button type="button" class="sidebar-collapse-btn" id="admin-sidebar-collapse" title="${(t(locale, 'nav_collapse') || '접기').replace(/"/g, '&quot;')}">${collapseLabel}</button>
+      </div>
+      <div class="sidebar-user">${t(locale, 'user_label')}: ${adminUser || '-'}</div>
       <nav class="nav nav-github-style">${nav.join('')}</nav>
-      <div class="sidebar-lang">${t(locale, 'lang_switch')}: ${langLinks}</div>
     </aside>
     <script>
-    (function(){ var q = location.search; if (q.indexOf('err=forbidden_settings') !== -1) { alert('${forbiddenSettingsMsg}'); var s = q.replace(/[?&]err=forbidden_settings(&|$)/g, '$1').replace(/^&/, '?'); history.replaceState(null, '', location.pathname + (s === '?' ? '' : s) + location.hash); } })();
+    (function(){
+      var q = location.search;
+      if (q.indexOf('err=forbidden_settings') !== -1) {
+        alert('${forbiddenSettingsMsg}');
+        var s = q.replace(/[?&]err=forbidden_settings(&|$)/g, '$1').replace(/^&/, '?');
+        history.replaceState(null, '', location.pathname + (s === '?' ? '' : s) + location.hash);
+      }
+      var btn = document.getElementById('admin-sidebar-collapse');
+      var side = document.getElementById('admin-sidebar');
+      if (btn && side) {
+        btn.addEventListener('click', function(){
+          fetch('/admin/set-sidebar-collapsed', { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ collapsed: !side.classList.contains('sidebar-collapsed') }) })
+            .then(function(){ location.reload(); })
+            .catch(function(){ side.classList.toggle('sidebar-collapsed'); });
+        });
+      }
+    })();
     </script>${healthOverlay}`;
 }
+
 const LOCALE_TO_INTL = { ko: 'ko-KR', ja: 'ja-JP', en: 'en-US', th: 'th-TH', zh: 'zh-CN' };
 function formatTimeForLocale(date, locale) {
   const intlLocale = LOCALE_TO_INTL[locale] || 'ko-KR';
@@ -16022,7 +16312,10 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
         received_date: '<td class="col-date">' + highlightLogSearchHtml(dt.date, logSearchRawPg, esc) + '</td>',
         received_time:
           '<td class="col-time">' + dualTimeCellInner(dt, esc, logSearchRawPg) + '</td>',
-        route: '<td class="col-narrow">' + highlightLogSearchHtml(log.routeKey || '', logSearchRawPg, esc) + '</td>',
+        route:
+          '<td class="col-narrow">' +
+          highlightLogSearchHtml(formatLogsResultRouteDisplay(log.routeKey, logPg), logSearchRawPg, esc) +
+          '</td>',
         merchant_id: '<td class="col-narrow">' + highlightLogSearchHtml(resolveNotiLogMerchantId(log, bodyForDisplayPg) || '', logSearchRawPg, esc) + '</td>',
         relay_status:
           '<td class="col-status"><span class="' +
@@ -17053,6 +17346,26 @@ function enrichJpayNotiBodyForDisplay(body, log) {
   if (cardno && !pickFromJpayFieldSources([out], ['cardno', 'cardNo', 'CardNumber', 'pay_cardno'])) {
     out.cardno = cardno;
   }
+  if ((out.Currency == null || out.Currency === '') && (out.currency == null || out.currency === '')) {
+    const fee =
+      out.fee_type != null && out.fee_type !== ''
+        ? out.fee_type
+        : pickFromJpayFieldSources(sources, ['fee_type', 'Currency', 'currency']);
+    if (fee != null && fee !== '') {
+      out.Currency = fee;
+      out.currency = fee;
+    }
+  }
+  if ((out.Currency == null || out.Currency === '') && (out.currency == null || out.currency === '')) {
+    const mid = String(
+      (log && log.merchantId) || out.memberid || out.memberId || out.merchantId || '',
+    ).trim();
+    const hint = resolveMerchantCurrencyHint(mid);
+    if (hint) {
+      out.Currency = hint;
+      out.currency = hint;
+    }
+  }
   return out;
 }
 
@@ -17139,9 +17452,45 @@ function enrichElementPayNotiBodyForDisplay(body, log) {
   if ((out.Currency == null || out.Currency === '') && out.currency != null && out.currency !== '') {
     out.Currency = out.currency;
   }
+  if ((out.Currency == null || out.Currency === '') && (out.currency == null || out.currency === '')) {
+    const orderForCur = String(out.OrderNo || out.orderNo || out.orderid || out.order || '').trim();
+    if (orderForCur) {
+      const sib = findSiblingNotiLogByOrderNo(orderForCur, 'elementpay', {
+        excludeLog: log,
+        want: 'currency',
+      });
+      if (sib) {
+        const sb = parseNotiBody(sib);
+        const cur =
+          sb && (sb.Currency != null && sb.Currency !== '' ? sb.Currency : sb.currency != null ? sb.currency : '');
+        if (cur !== '' && cur != null) {
+          out.Currency = cur;
+          out.currency = cur;
+        }
+        if ((out.Amount == null || out.Amount === '') && sb && (sb.Amount != null || sb.amount != null)) {
+          out.Amount = sb.Amount != null ? sb.Amount : sb.amount;
+          out.amount = out.Amount;
+        }
+      }
+    }
+  }
+  if ((out.Currency == null || out.Currency === '') && (out.currency == null || out.currency === '')) {
+    const midHint = String(
+      (log && log.merchantId) || out.merchantId || out.compId || out.CompId || '',
+    ).trim();
+    const hint = resolveMerchantCurrencyHint(midHint);
+    if (hint) {
+      out.Currency = hint;
+      out.currency = hint;
+    }
+  }
   if (!out.PaymentDate && !out.paymentDate) {
     const pd = formatElementPayUnixTimestampForDisplay(out.timestamp);
     if (pd) out.PaymentDate = pd;
+  }
+  {
+    const cidEp = extractElementPayCompIdFromBody(out);
+    if (cidEp) stampElementPayCompIdOnBody(out, cidEp);
   }
   // CustomerId: EP/ICOPAY mirror may send email / customerNm / CustomerId
   const cid = String(
@@ -17164,14 +17513,58 @@ function enrichElementPayNotiBodyForDisplay(body, log) {
   return out;
 }
 
-/** 로그 merchantId 비어 있을 때 EP 본문 Comp-Id/merchantId 사용 */
+/** 로그 merchantId 비어 있을 때 EP/JPAY 본문 Comp-Id·merchantId, 동일 OrderNo 형제 로그 사용 */
 function resolveNotiLogMerchantId(log, bodyOptional) {
   const fromLog = String((log && log.merchantId) || '').trim();
   if (fromLog) return fromLog;
   const body = bodyOptional && typeof bodyOptional === 'object' ? bodyOptional : parseNotiBody(log);
-  return String(
-    (body && (body.merchantId || body.MerchantId || body.compId || body.CompId)) || '',
+  const fromBody = String(
+    (body &&
+      (body.merchantId ||
+        body.MerchantId ||
+        body.compId ||
+        body.CompId ||
+        body['Comp-Id'] ||
+        body.Comp_Id ||
+        body.memberid ||
+        body.memberId ||
+        body.MID ||
+        body.mid)) ||
+      '',
   ).trim();
+  if (fromBody) return fromBody;
+  const pg = log ? getNotiLogPgAcquirer(log) : '';
+  if (pg === 'elementpay') {
+    const fromEp = extractElementPayCompIdFromBody(body);
+    if (fromEp) {
+      const byComp = findElementPayMerchantByCompId(fromEp);
+      if (byComp && byComp.merchantId) return byComp.merchantId;
+      return fromEp;
+    }
+  }
+  const order = notifBodyOrderNo(body);
+  if (order) {
+    if (pg === 'elementpay') {
+      const byOrder = findElementPayMerchantByOrderFromLogs(order);
+      if (byOrder && byOrder.merchantId) return byOrder.merchantId;
+    }
+    const sib = findSiblingNotiLogByOrderNo(order, pg, { excludeLog: log, want: 'merchantId' });
+    if (sib) {
+      if (String(sib.merchantId || '').trim()) return String(sib.merchantId).trim();
+      const sibBody = parseNotiBody(sib);
+      const fromSib = String(
+        (sibBody &&
+          (sibBody.merchantId ||
+            sibBody.MerchantId ||
+            sibBody.compId ||
+            sibBody.CompId ||
+            sibBody['Comp-Id'])) ||
+          '',
+      ).trim();
+      if (fromSib) return fromSib;
+    }
+  }
+  return '';
 }
 
 function parseNotiBodyForDisplay(log) {
@@ -17221,15 +17614,17 @@ function transactionListColumnKey(col) {
   return keys[0] || 'body';
 }
 
-function transactionListColumnLabel(locale, col) {
+function transactionListColumnLabel(locale, col, txSource) {
   if (col.type === 'fixed') {
     const map = {
       no: t(locale, 'tx_th_no'),
       received_date: t(locale, 'cr_th_trade_date'),
       received_time: t(locale, 'cr_th_trade_time'),
       pg_acquirer: t(locale, 'tx_th_acquirer'),
-      merchant: t(locale, 'cr_th_merchant'),
-      route_no: 'Route',
+      merchant: isJpayOrElementPayPg(txSource)
+        ? t(locale, 'pg_logs_merchant_id_mid') || 'MID'
+        : t(locale, 'cr_th_merchant'),
+      route_no: routeOrResponseColumnLabel(locale, txSource, 'Route'),
       internal_amount: t(locale, 'tx_th_internal_amount'),
       status: t(locale, 'tx_th_status'),
       noti: t(locale, 'tx_th_noti'),
@@ -17250,7 +17645,7 @@ function transactionListColumnLabel(locale, col) {
 function getTransactionListColumnDefs(locale, txSource) {
   return getTransactionListColumns(txSource).map((col) => ({
     key: transactionListColumnKey(col),
-    label: transactionListColumnLabel(locale, col),
+    label: transactionListColumnLabel(locale, col, txSource),
   }));
 }
 
@@ -17258,8 +17653,11 @@ function getPgLogsListColumnDefs(locale, logPg) {
   const cols = [
     { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
     { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
-    { key: 'route', label: t(locale, 'pg_logs_route_key') },
-    { key: 'merchant_id', label: t(locale, 'pg_logs_merchant_id') },
+    {
+      key: 'route',
+      label: routeOrResponseColumnLabel(locale, logPg, t(locale, 'pg_logs_route_key')),
+    },
+    { key: 'merchant_id', label: merchantIdOrMidColumnLabel(locale, logPg) },
     { key: 'relay_status', label: t(locale, 'pg_logs_th_merchant_recv') },
     { key: 'callback_json', label: t(locale, 'pg_logs_json_callback') },
     { key: 'result_json', label: t(locale, 'pg_logs_json_result') },
@@ -17276,7 +17674,7 @@ function getCrCancelListColumnDefs(locale, pg) {
   const cols = [
     { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
     { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
-    { key: 'route', label: 'Route No.' },
+    { key: 'route', label: routeOrResponseColumnLabel(locale, pg, 'Route No.') },
     { key: 'merchant', label: t(locale, 'cr_th_merchant') },
     { key: 'transaction_id', label: 'TransactionId' },
     { key: 'order_no', label: 'OrderNo' },
@@ -17294,13 +17692,170 @@ function getCrCancelListColumnDefs(locale, pg) {
   return cols;
 }
 
+/** 피지·거래 목록 route 열: JPAY/EP는 대행사 접두사 제거 후 Response 값만 표시 */
+function formatLogsResultRouteDisplay(routeKey, logPg) {
+  const rk = String(routeKey || '').trim();
+  if (!rk) return '-';
+  const pg = String(logPg || '').toLowerCase();
+  if (pg === 'elementpay') {
+    const stripped = rk.replace(/^elementpay\//i, '').trim();
+    return stripped || rk;
+  }
+  if (pg === 'jpay') {
+    const stripped = rk.replace(/^jpay\//i, '').trim();
+    return stripped || rk;
+  }
+  const m = rk.match(/\/(\d+)$/);
+  return (m && m[1]) || rk;
+}
+
+function isJpayOrElementPayPg(pg) {
+  const p = String(pg || '').toLowerCase();
+  return p === 'jpay' || p === 'elementpay';
+}
+
+function routeOrResponseColumnLabel(locale, pg, chillLabel) {
+  if (isJpayOrElementPayPg(pg)) return t(locale, 'logs_result_th_response');
+  return chillLabel != null ? chillLabel : 'route';
+}
+
+/** 로그·결과 목록 merchant id 열: JPAY/ElementPay 는 MID */
+function merchantIdOrMidColumnLabel(locale, pg) {
+  if (isJpayOrElementPayPg(pg)) return t(locale, 'pg_logs_merchant_id_mid') || 'MID';
+  return t(locale, 'pg_logs_merchant_id') || 'merchantId';
+}
+
+/** EP 본문·data JSON 에서 Comp-Id / 업체코드 추출 */
+function extractElementPayCompIdFromBody(body) {
+  if (!body || typeof body !== 'object') return '';
+  const pick = (o) =>
+    String(
+      (o &&
+        (o.compId ||
+          o.CompId ||
+          o['Comp-Id'] ||
+          o.Comp_Id ||
+          o.merchantId ||
+          o.MerchantId ||
+          o.MID ||
+          o.mid ||
+          o.comp_id)) ||
+        '',
+    ).trim();
+  let id = pick(body);
+  if (id) return id;
+  if (body.data != null && String(body.data).trim()) {
+    try {
+      const rawData = typeof body.data === 'string' ? body.data : JSON.stringify(body.data);
+      let decoded = rawData;
+      try {
+        decoded = decodeURIComponent(String(rawData).replace(/\+/g, ' '));
+      } catch (_) {
+        decoded = String(rawData);
+      }
+      const dj = JSON.parse(decoded);
+      if (dj && typeof dj === 'object' && !Array.isArray(dj)) {
+        id = pick(dj);
+        if (id) return id;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  return '';
+}
+
+function stampElementPayCompIdOnBody(body, compId) {
+  const id = String(compId || '').trim();
+  if (!id || !body || typeof body !== 'object') return body;
+  if (!body.compId) body.compId = id;
+  if (!body.CompId) body.CompId = id;
+  if (!body['Comp-Id']) body['Comp-Id'] = id;
+  if (!body.merchantId) body.merchantId = id;
+  return body;
+}
+
+/**
+ * 동일 OrderNo의 다른 노티 로그에서 merchantId·통화 등 보강용.
+ * opts.excludeLog: 자기 자신 제외
+ * opts.want: 'currency' | 'merchantId' — 해당 값이 있는 형제 우선 (최신 빈 로그에 가로채이지 않도록)
+ */
+function findSiblingNotiLogByOrderNo(orderNo, preferPg, opts) {
+  const order = String(orderNo || '').trim();
+  if (!order || !Array.isArray(NOTI_LOGS) || NOTI_LOGS.length === 0) return null;
+  const prefer = preferPg ? String(preferPg).toLowerCase() : '';
+  const exclude = opts && opts.excludeLog;
+  const want = opts && opts.want ? String(opts.want) : '';
+  let fallback = null;
+  for (let i = NOTI_LOGS.length - 1; i >= 0; i--) {
+    const L = NOTI_LOGS[i];
+    if (!L || L === exclude) continue;
+    if (prefer && getNotiLogPgAcquirer(L) !== prefer) continue;
+    const b = parseNotiBody(L);
+    if (notifBodyOrderNo(b) !== order) continue;
+    if (want === 'currency') {
+      const cur =
+        b && (b.Currency != null && String(b.Currency).trim() !== ''
+          ? b.Currency
+          : b.currency != null && String(b.currency).trim() !== ''
+            ? b.currency
+            : '');
+      if (cur !== '' && cur != null) return L;
+      if (!fallback) fallback = L;
+      continue;
+    }
+    if (want === 'merchantId') {
+      if (String(L.merchantId || '').trim()) return L;
+      const fromB = String(
+        (b &&
+          (b.merchantId ||
+            b.MerchantId ||
+            b.compId ||
+            b.CompId ||
+            b['Comp-Id'] ||
+            b.MID ||
+            b.mid)) ||
+          '',
+      ).trim();
+      if (fromB) return L;
+      if (!fallback) fallback = L;
+      continue;
+    }
+    return L;
+  }
+  return fallback;
+}
+
+function resolveMerchantCurrencyHint(merchantId) {
+  const mid = String(merchantId || '').trim();
+  if (!mid || typeof MERCHANTS === 'undefined' || !MERCHANTS || !MERCHANTS.get) return '';
+  const m = MERCHANTS.get(mid);
+  if (!m) return '';
+  const tid = m.internalTargetId ? String(m.internalTargetId).trim() : '';
+  if (!tid || typeof INTERNAL_TARGETS === 'undefined' || !INTERNAL_TARGETS || !INTERNAL_TARGETS.get) return '';
+  const target = INTERNAL_TARGETS.get(tid);
+  if (!target) return inferInternalTargetCurrency(tid, tid) || '';
+  const explicit = String(target.currency || '').trim();
+  if (explicit) return formatCurrencyForDisplay(explicit) || explicit;
+  return inferInternalTargetCurrency(target.id || tid, target.name || '') || '';
+}
+
+function formatRouteCellForPgList(merchant, routeKey, pg) {
+  if (isJpayOrElementPayPg(pg)) return formatLogsResultRouteDisplay(routeKey, pg);
+  const v = getRouteNoDisplay(merchant, routeKey);
+  return v != null && String(v).trim() !== '' ? String(v).trim() : '-';
+}
+
 function getLogsResultListColumnDefs(locale, logPg) {
   const cols = [
     { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
     { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
-    { key: 'route', label: 'route' },
+    {
+      key: 'route',
+      label: routeOrResponseColumnLabel(locale, logPg, 'route'),
+    },
     { key: 'env', label: t(locale, 'common_env') },
-    { key: 'merchant_id', label: 'merchant id' },
+    { key: 'merchant_id', label: merchantIdOrMidColumnLabel(locale, logPg) },
     { key: 'transaction_id', label: 'TransactionId' },
     { key: 'order_no', label: 'OrderNo' },
     { key: 'amount', label: 'Amount' },
@@ -17334,7 +17889,7 @@ function getCrVoidListColumnDefs(locale, pg) {
     { key: 'received_time', label: t(locale, 'cr_th_received_time') },
     { key: 'sent_date', label: t(locale, 'cr_th_sent_date') },
     { key: 'sent_time', label: t(locale, 'cr_th_sent_time') },
-    { key: 'route', label: t(locale, 'cr_th_route_no') },
+    { key: 'route', label: routeOrResponseColumnLabel(locale, pg, t(locale, 'cr_th_route_no')) },
     { key: 'merchant', label: t(locale, 'cr_th_merchant') },
     { key: 'transaction_id', label: 'TransactionId' },
     { key: 'order_no', label: 'OrderNo' },
@@ -17356,7 +17911,7 @@ function getCrRefundListColumnDefs(locale, pg) {
     { key: 'received_time', label: t(locale, 'cr_th_received_time') },
     { key: 'sent_date', label: t(locale, 'cr_th_sent_date') },
     { key: 'sent_time', label: t(locale, 'cr_th_sent_time') },
-    { key: 'route', label: t(locale, 'cr_th_route_no') },
+    { key: 'route', label: routeOrResponseColumnLabel(locale, pg, t(locale, 'cr_th_route_no')) },
     { key: 'merchant', label: t(locale, 'cr_th_merchant') },
     { key: 'transaction_id', label: 'TransactionId' },
     { key: 'order_no', label: 'OrderNo' },
@@ -17372,7 +17927,7 @@ function getCrForceRefundListColumnDefs(locale, pg) {
   const cols = [
     { key: 'received_date', label: t(locale, 'cr_th_received_date') },
     { key: 'received_time', label: t(locale, 'cr_th_received_time') },
-    { key: 'route', label: t(locale, 'cr_th_route_no') },
+    { key: 'route', label: routeOrResponseColumnLabel(locale, pg, t(locale, 'cr_th_route_no')) },
     { key: 'merchant', label: t(locale, 'cr_th_merchant') },
     { key: 'transaction_id', label: t(locale, 'cr_th_transaction_id') },
     { key: 'order_no', label: t(locale, 'cr_th_order_no') },
@@ -17421,7 +17976,7 @@ function getCrJpayFollowupListColumnDefs(locale) {
   const cols = [
     { key: 'received_date', label: t(locale, 'cr_th_received_date') },
     { key: 'received_time', label: t(locale, 'cr_th_received_time') },
-    { key: 'route', label: t(locale, 'cr_th_route_no') },
+    { key: 'route', label: t(locale, 'logs_result_th_response') },
     { key: 'merchant', label: t(locale, 'cr_th_merchant') },
     { key: 'transaction_id', label: 'TransactionId' },
     { key: 'order_no', label: 'OrderNo' },
@@ -17490,16 +18045,16 @@ function getInternalLogsListColumnDefs(locale) {
   ];
 }
 
-function getInternalResultListColumnDefs(locale) {
+function getInternalResultListColumnDefs(locale, logPg) {
   return [
     { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
     { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
     { key: 'transaction_id', label: 'TransactionId' },
     { key: 'type', label: t(locale, 'cr_th_type') },
-    { key: 'route', label: 'route' },
+    { key: 'route', label: routeOrResponseColumnLabel(locale, logPg, 'route') },
     { key: 'internal_target', label: t(locale, 'cr_th_internal_target') },
     { key: 'env', label: t(locale, 'common_env') },
-    { key: 'merchant_id', label: 'merchant id' },
+    { key: 'merchant_id', label: merchantIdOrMidColumnLabel(locale, logPg) },
     { key: 'internal_delivery', label: t(locale, 'cr_th_internal_delivery') },
     { key: 'fail_reason', label: t(locale, 'cr_th_fail_reason') },
     { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
@@ -17520,13 +18075,13 @@ function getDevInternalLogsListColumnDefs(locale) {
   ];
 }
 
-function getDevInternalResultListColumnDefs(locale) {
+function getDevInternalResultListColumnDefs(locale, logPg) {
   return [
     { key: 'received_date', label: t(locale, 'pg_logs_th_received_date') },
     { key: 'received_time', label: t(locale, 'pg_logs_th_received_time') },
-    { key: 'route', label: 'route' },
+    { key: 'route', label: routeOrResponseColumnLabel(locale, logPg, 'route') },
     { key: 'env', label: t(locale, 'common_env') },
-    { key: 'merchant_id', label: 'merchant id' },
+    { key: 'merchant_id', label: merchantIdOrMidColumnLabel(locale, logPg) },
     { key: 'delivery', label: t(locale, 'dev_noti_th_delivery') },
     { key: 'upstream', label: t(locale, 'dev_internal_th_upstream') },
     { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
@@ -18055,7 +18610,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   const sortLinks = [
     { key: 'time', label: t(locale, 'tx_filter_time') },
     { key: 'date', label: t(locale, 'tx_filter_date') },
-    { key: 'route', label: 'Route' },
+    { key: 'route', label: routeOrResponseColumnLabel(locale, txSource, 'Route') },
     { key: 'currency', label: 'Currency' },
     { key: 'status', label: t(locale, 'tx_th_status') },
   ].map((o) => {
@@ -18256,7 +18811,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     txListColumns
       .map((col, i) => {
         const key = transactionListColumnKey(col);
-        const label = transactionListColumnLabel(locale, col);
+        const label = transactionListColumnLabel(locale, col, txSource);
         return (
           '<th data-col-key="' +
           esc(key) +
@@ -18325,16 +18880,17 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     const dt = formatNotiLogPaymentDateTimeTHJP(log, chillTz);
     const merchantIdDisp = resolveNotiLogMerchantId(log, body);
     const merchant = merchantIdDisp ? MERCHANTS.get(merchantIdDisp) : null;
-    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const pgAcq = getNotiLogPgAcquirer(log);
+    const routeNoDisplay = formatRouteCellForPgList(merchant, log.routeKey, pgAcq);
     const cells = [];
     for (const col of txListColumns) {
       if (col.type === 'fixed') {
         if (col.id === 'no') cells.push('<td class="col-no">' + esc(String((pageNum - 1) * perPage + index + 1)) + '</td>');
         else if (col.id === 'received_date') cells.push('<td class="col-date">' + esc(dt.date) + '</td>');
         else if (col.id === 'received_time') cells.push('<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>');
-        else if (col.id === 'route_no') cells.push('<td class="col-route">' + esc(routeNoDisplay) + '</td>');
+        else if (col.id === 'route_no') cells.push('<td class="col-route">' + esc(routeNoDisplay || '-') + '</td>');
         else if (col.id === 'pg_acquirer') cells.push('<td class="col-acquirer">' + esc(acquirerLabelFromLog(locale, log)) + '</td>');
-        else if (col.id === 'merchant') cells.push('<td class="col-merchant">' + esc(merchantIdDisp || '') + '</td>');
+        else if (col.id === 'merchant') cells.push('<td class="col-merchant">' + esc(merchantIdDisp || '-') + '</td>');
         else if (col.id === 'internal_amount') {
           const pgK = icopayAmountPgKeyFromLog(log);
           const amt = getNotiBodyAmountRawForIcopay(body, pgK);
@@ -18384,6 +18940,10 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
         if (isAmountCol && isVoidedOrRefunded) v = '-';
         else if (isAmountCol) v = formatAmountWithSeparator(v);
         else if (col.display === 'currency') v = formatCurrencyForDisplay(v) ?? v;
+        if (col.display === 'currency' && (v == null || v === '')) {
+          const midForCur = merchantIdDisp || resolveNotiLogMerchantId(log, body);
+          v = resolveMerchantCurrencyHint(midForCur) || '-';
+        }
         const keyName = col.keys && col.keys[0] ? col.keys[0] : 'body';
         const cellClass = 'col-' + (keyName === 'paymentDescription' || keyName === 'PaymentDescription' ? 'Description' : keyName);
         cells.push('<td class="' + cellClass + '" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + formatVal(v) + '</td>');
@@ -19246,10 +19806,10 @@ app.get('/admin/api/daily-noti-detail', requireAuth, requirePage('cr_transaction
       th: dt.timeTh,
       jp: dt.timeJp,
       txid,
-      mid: log.merchantId || '',
+      mid: resolveNotiLogMerchantId(log, body) || '',
       amt: rawAmt !== '' && rawAmt != null ? String(body.Amount ?? body.amount ?? rawAmt) : '-',
       ico,
-      ccy: formatCurrencyForDisplay(body.Currency || body.currency) || '-',
+      ccy: formatCurrencyForDisplay(body.Currency || body.currency) || resolveMerchantCurrencyHint(resolveNotiLogMerchantId(log, body)) || '-',
       st: kind,
     };
     if (txSourceDetail === 'jpay') {
@@ -20858,7 +21418,10 @@ function isLogSandbox(log) {
 }
 // 로그분석(PG 노티 로그)과 동일한 live 목록: env가 정확히 'sandbox'가 아닌 건 모두 표시 (성공 건이 노티거래내역에도 나오도록)
 function isLiveLog(log) {
-  return (log.env || '') !== 'sandbox';
+  const e = String((log && log.env) || '')
+    .toLowerCase()
+    .trim();
+  return e !== 'sandbox';
 }
 function getEnvFilteredLogs(req) {
   const showSandbox = getEnvFromReq(req) === 'sandbox';
@@ -21386,7 +21949,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       if (Number.isFinite(ic)) amtHuman = formatAmountWithSeparator(ic);
     }
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
-    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const routeNoDisplay = formatRouteCellForPgList(merchant, log.routeKey, getNotiLogPgAcquirer(log));
     const internalUrl = merchant && (merchant.internalTargetId ? findInternalTargetUrl(merchant.internalTargetId, 'callback') : null) || INTERNAL_NOTI_URL;
     const hasPgUrl = merchant && merchant.enableRelay !== false && (merchant.callbackUrl || merchant.resultUrl);
     const internalBtn = internalUrl
@@ -22352,7 +22915,7 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
       if (Number.isFinite(ic)) amountHuman = formatAmountWithSeparator(ic);
     }
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
-    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const routeNoDisplay = formatRouteCellForPgList(merchant, log.routeKey, getNotiLogPgAcquirer(log));
     const confirmVoid = (t(locale, 'cr_confirm_void') || '').replace(/'/g, "\\'");
     let confirmVoid2Msg = t(locale, 'cr_confirm_void_second');
     if (!confirmVoid2Msg || confirmVoid2Msg === 'cr_confirm_void_second') {
@@ -23236,7 +23799,7 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
       if (Number.isFinite(ic)) amountHuman = formatAmountWithSeparator(ic);
     }
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
-    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const routeNoDisplay = formatRouteCellForPgList(merchant, log.routeKey, getNotiLogPgAcquirer(log));
     const alreadyRefunded = !!refundSentMapFr[String(txId).trim()];
     const removeFromListLabelFr = (t(locale, 'cr_btn_remove_from_list') || '목록삭제').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const manageHtml =
@@ -24184,7 +24747,7 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
       if (Number.isFinite(ic)) amountHuman = formatAmountWithSeparator(ic);
     }
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
-    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const routeNoDisplay = formatRouteCellForPgList(merchant, log.routeKey, getNotiLogPgAcquirer(log));
     const confirmRefund = (t(locale, 'cr_confirm_refund') || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
     const confirmRefund2 = (t(locale, 'cr_confirm_refund_second') || '정말 승인(환불)하시겠습니까? 가맹점과 전산에 환불 노티가 전송됩니다.').replace(/'/g, "\\'").replace(/"/g, '&quot;');
     const nowIso = new Date().toISOString();
@@ -24657,7 +25220,7 @@ app.get('/admin/cancel-refund/jpay-followup', requireAuth, requirePage('cr_jpay_
       if (Number.isFinite(ic)) amountHuman = formatAmountWithSeparator(ic);
     }
     const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
-    const routeNoDisplay = getRouteNoDisplay(merchant, log.routeKey);
+    const routeNoDisplay = formatRouteCellForPgList(merchant, log.routeKey, getNotiLogPgAcquirer(log));
     const kind = getNotiTransactionFilterKind(log, voidRefundByTxJf, voidRefundByOrderJf);
     const txIdTrim = String(txId).trim();
     const hasVoid = !!(txIdTrim && hasVoidNotiSent(txIdTrim)) || kind === 'void_auto' || kind === 'void_manual' || kind === 'force_void';
@@ -25122,7 +25685,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       const realIndex = NOTI_LOGS.indexOf(log);
       const dt = formatDateAndTimeForLog(log);
       const envLabel = (log.env && String(log.env).toLowerCase()) === 'sandbox' ? 'sandbox' : 'live';
-      const routeNo = (log.routeKey && (log.routeKey.match(/\/(\d+)$/) || [null, log.routeKey])[1]) || log.routeKey || '-';
+      const routeNo = formatLogsResultRouteDisplay(log.routeKey, logPgResult);
       const relayStatus = log.relayStatus || '-';
       const formatUsed = log.relayFormatUsed || (log.relaySentAsJson === true ? 'json' : 'raw');
       const body = parseNotiBodyForDisplay(log);
@@ -25186,13 +25749,16 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       const orderNo = notifBodyOrderNo(body) || '-';
       const amtRaw = body.Amount != null ? body.Amount : body.amount != null ? body.amount : '';
       const amtDisplay = amtRaw !== '' && amtRaw != null ? formatAmountWithSeparator(amtRaw) : '-';
-      const currency = formatCurrencyForDisplay(body.Currency || body.currency) || '';
+      let currency = formatCurrencyForDisplay(body.Currency || body.currency) || '';
+      if (!currency) {
+        currency = resolveMerchantCurrencyHint(merchantIdDisp) || '';
+      }
       // ICOPAY 열: 시스템 환경설정 ICOPAY 금액 규칙(icopay-amount-settings.json, PG별)
       const pgK = logPgResult === 'jpay' || logPgResult === 'elementpay' ? 'jpay' : 'chillpay';
       const amtRawIcopay = getNotiBodyAmountRawForIcopay(body, pgK);
       let icopayCell = '-';
       if (amtRawIcopay !== '' && amtRawIcopay != null) {
-        const ic = computeIcopayAmount(amtRawIcopay, body.Currency ?? body.currency, pgK);
+        const ic = computeIcopayAmount(amtRawIcopay, body.Currency ?? body.currency ?? currency, pgK);
         if (Number.isFinite(ic)) icopayCell = formatAmountWithSeparator(ic);
       }
       const lrCells = {
@@ -28833,7 +29399,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
   const pageNumInternalResult = Math.min(page, totalPagesInternalResult);
   const pagedLogsInternal = isTodayOnly ? filteredForDateInternal : filteredForDateInternal.slice((pageNumInternalResult - 1) * perPage, pageNumInternalResult * perPage);
 
-  const intResColDefs = getInternalResultListColumnDefs(locale);
+  const intResColDefs = getInternalResultListColumnDefs(locale, logPgIntRes);
   const intResColFiltered = filterListColDefs(req.session.member, 'internal_result', logPgIntRes, intResColDefs);
   const intResColHello = buildListColHelloHtml(
     locale,
@@ -28875,7 +29441,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
           '<td>' + dualTimeCellInner(dt, esc, logSearchRawIntRes) + '</td>',
         transaction_id: '<td>' + highlightLogSearchHtml(String(txId), logSearchRawIntRes, esc) + '</td>',
         type: '<td>' + highlightLogSearchHtml(String(statusDesc), logSearchRawIntRes, esc) + '</td>',
-        route: '<td>' + highlightLogSearchHtml(String(log.routeNo || '-'), logSearchRawIntRes, esc) + '</td>',
+        route: '<td>' + highlightLogSearchHtml(formatLogsResultRouteDisplay(log.routeKey || log.routeNo || '', logPgIntRes), logSearchRawIntRes, esc) + '</td>',
         internal_target: '<td>' + highlightLogSearchHtml(internalTargetName, logSearchRawIntRes, esc) + '</td>',
         env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRawIntRes, esc) + '</td>',
         merchant_id: '<td>' + highlightLogSearchHtml(log.merchantId || '-', logSearchRawIntRes, esc) + '</td>',
@@ -28908,7 +29474,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
   <title>${t(locale, 'nav_internal_result')}</title>
   <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
-    table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; }
+    table { border-collapse: collapse; width: 100%; background:#fff; font-size: 11px; }
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
@@ -29924,7 +30490,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   const pageNumDevResult = Math.min(page, totalPagesDevResult);
   const pagedLogsDev = isTodayOnly ? filteredForDateDev : filteredForDateDev.slice((pageNumDevResult - 1) * perPage, pageNumDevResult * perPage);
 
-  const devResColDefs = getDevInternalResultListColumnDefs(locale);
+  const devResColDefs = getDevInternalResultListColumnDefs(locale, logPgDevRes);
   const devResColFiltered = filterListColDefs(req.session.member, 'dev_result', logPgDevRes, devResColDefs);
   const devResColHello = buildListColHelloHtml(
     locale,
@@ -29961,7 +30527,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
         received_date: '<td>' + highlightLogSearchHtml(dt.date, logSearchRawDevRes, esc) + '</td>',
         received_time:
           '<td>' + dualTimeCellInner(dt, esc, logSearchRawDevRes) + '</td>',
-        route: '<td>' + highlightLogSearchHtml(String(log.routeNo || '-'), logSearchRawDevRes, esc) + '</td>',
+        route: '<td>' + highlightLogSearchHtml(formatLogsResultRouteDisplay(log.routeKey || log.routeNo || '', logPgDevRes), logSearchRawDevRes, esc) + '</td>',
         env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRawDevRes, esc) + '</td>',
         merchant_id: '<td>' + highlightLogSearchHtml(log.merchantId || '-', logSearchRawDevRes, esc) + '</td>',
         delivery: '<td><span class="' + statusClass + '">' + highlightLogSearchHtml(label, logSearchRawDevRes, esc) + '</span></td>',
@@ -29993,7 +30559,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
   <title>${t(locale, 'nav_dev_result')}</title>
   <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
-    table { border-collapse: collapse; width: 100%; background:#fff; font-size: 13px; }
+    table { border-collapse: collapse; width: 100%; background:#fff; font-size: 11px; }
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
     th { background: #e5f0ff; }
     tr:nth-child(even) { background:#f9fafb; }
