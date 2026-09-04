@@ -174,16 +174,51 @@ const ADMIN_LAYOUT_SHELL_CSS = `
     .nav-group-summary { font-size:13px; font-weight:500; color:#d1d5db; padding:10px 12px; cursor:pointer; list-style:none; text-transform:none; letter-spacing:0; display:flex; align-items:center; gap:10px; border-radius:6px; line-height:1.35; }
     .nav-group-summary::-webkit-details-marker { display:none; }
     .nav-group-summary::marker { content:""; }
-    .nav-group-summary::after { content:"\\25BE"; font-size:11px; opacity:0.7; margin-left:auto; flex-shrink:0; }
-    .nav-group[open] .nav-group-summary::after { transform:none; content:"\\25B4"; }
+    /* PG left-side .menu-arrow: '>' + rotate(90deg) when open */
+    .nav-group-summary::after {
+      content: ">";
+      display: inline-block;
+      margin-left: auto;
+      flex-shrink: 0;
+      width: 1em;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      color: rgba(255,255,255,0.55);
+      opacity: 1;
+      transition: transform 0.2s ease;
+    }
+    .nav-group[open] .nav-group-summary::after { content: ">"; transform: rotate(90deg); }
     .nav-group-summary .nav-group-summary-link { flex:1; min-width:0; display:block; text-align:left; padding:0; margin:0; font:inherit; color:inherit; text-decoration:none; }
     .nav-group-summary:hover { background:rgba(255,255,255,0.06); color:#f9fafb; }
+    /* 펼쳐진 상위 메뉴: 희릿한 선택 배경 (첨부 이미지 / PG mm-active 톤) */
+    .nav-group[open] > .nav-group-summary {
+      background:#3a4149;
+      color:#f9fafb;
+    }
+    .nav-group[open] > .nav-group-summary:hover {
+      background:#424952;
+      color:#fff;
+    }
     .nav-ico { width:18px; height:18px; flex-shrink:0; opacity:0.95; stroke:currentColor; fill:none; stroke-width:1.75; }
-    .nav-group-items { padding:0 0 6px 4px; display:flex; flex-direction:column; gap:2px; }
-    .nav-group-items a { display:flex; align-items:center; gap:10px; padding:9px 12px; color:#c5cad3; text-decoration:none; font-size:13px; line-height:1.35; border-radius:6px; box-sizing:border-box; }
+    .nav-group-items { padding:0 0 6px 0; display:flex; flex-direction:column; gap:2px; }
     .nav a, .nav a:visited { display:flex; align-items:center; gap:10px; padding:10px 12px; margin-bottom:2px; color:#c5cad3; text-decoration:none; font-size:13px; border-radius:6px; line-height:1.35; }
+    /* 하위 메뉴: .nav a 보다 뒤에·더 구체적으로 — 상위 첫글자(12+18ico+10gap)와 정렬 */
+    .nav .nav-group-items a,
+    .nav .nav-group-items a:visited {
+      display:block;
+      padding:8px 12px 8px 40px;
+      margin-bottom:0;
+      color:#c5cad3;
+      text-decoration:none;
+      font-size:13px;
+      line-height:1.35;
+      border-radius:6px;
+      box-sizing:border-box;
+    }
     .nav a:hover, .nav a.active,
-    .nav-group-items a:hover, .nav-group-items a.active { background:rgba(59,130,246,0.28); color:#dbeafe; font-weight:500; }
+    .nav .nav-group-items a:hover, .nav .nav-group-items a.active { background:rgba(59,130,246,0.28); color:#dbeafe; font-weight:500; }
     .nav-github-style .nav-item-small { font-size:12px; white-space:nowrap; }
     .main { flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 24px; box-sizing:border-box; min-width:0; }
     .topbar { background:linear-gradient(180deg, #f8fafc 0%, #e0f2fe 100%); border-radius:10px; padding:10px 16px; font-size:13px; color:#1e293b; border:1px solid #bae6fd; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px 16px; box-shadow:0 1px 2px rgba(15,23,42,0.05); }
@@ -11908,12 +11943,6 @@ function buildAdminSidebarNavItems(h) {
     if (can('test_history')) testItems.push(link('/admin/test-logs', t(locale, 'nav_test_history')));
     nav.push(navGroup(t(locale, 'nav_test'), testPaths, testItems.join(''), 'test'));
   }
-  {
-    const manualActive = pathMatch('/admin/ops-manual');
-    nav.push(
-      `<a href="/admin/ops-manual"${manualActive ? ' class="active"' : ''}>${adminNavIcon('manual')}<span class="nav-label">${t(locale, 'nav_ops_manual')}</span></a>`,
-    );
-  }
   if (canSeeMembers || can('settings') || can('account') || can('account_reset') || can('advanced_system_monitor')) {
     const sysPaths = ['/admin/members', '/admin/account', '/admin/account-reset', '/admin/settings', '/admin/system-monitor'];
     const sysItems = [];
@@ -11923,6 +11952,12 @@ function buildAdminSidebarNavItems(h) {
     if (can('settings')) sysItems.push(link('/admin/settings', t(locale, 'nav_settings')));
     if (can('advanced_system_monitor')) sysItems.push(link('/admin/system-monitor', t(locale, 'nav_server_manage')));
     nav.push(navGroup(t(locale, 'nav_system'), sysPaths, sysItems.join(''), 'system'));
+  }
+  {
+    const manualActive = pathMatch('/admin/ops-manual');
+    nav.push(
+      `<a href="/admin/ops-manual"${manualActive ? ' class="active"' : ''}>${adminNavIcon('manual')}<span class="nav-label">${t(locale, 'nav_ops_manual')}</span></a>`,
+    );
   }
   return nav;
 }
