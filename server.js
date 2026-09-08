@@ -4550,78 +4550,112 @@ async function handleElementPayWebhook(req, res) {
   const ico = await forwardElementPayToIcopay(forwardBody, incomingContentType, 1);
   const compIdHdr = elementPayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-comp-id');
   const orderHdr = elementPayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-order-no');
-  // Header first; ICOPAY resend/mirror may put Comp-Id only in body; then order lookup / data JSON
-  let compId =
-    compIdHdr ||
-    String(body.compId || body.CompId || body.merchantId || body.MerchantId || body['Comp-Id'] || '').trim() ||
-    extractElementPayCompIdFromBody(body);
-  const orderForComp = orderHdr || order;
-  if (!compId && orderForComp) {
-    try {
-      compId = await lookupElementPayCompIdFromIcopay(orderForComp);
-    } catch (_) {
-      /* ignore */
-    }
-  }
-  if (!compId && orderForComp) {
-    const byLog = findElementPayMerchantByOrderFromLogs(orderForComp);
-    if (byLog && byLog.merchantId) compId = byLog.merchantId;
-  }
 
-  // Merchant notify after ICOPAY (pay / payment.*) — never block EP response body
-  if (elementPayNoti.elementPayShouldNotifyMerchant(method)) {
-    const match = findElementPayMerchantByCompId(compId);
-    if (!match) {
-      console.warn(
-        '[ElementPay] merchant notify skipped: no Comp-Id match',
-        'compId=',
-        compId || '(none)',
-        'order=',
-        orderHdr || order || '-',
-      );
-      const notifyBodyFail = stampElementPayCompIdOnBody(
-        elementPayNoti.mapElementPayToMerchantNotifyBody(body, method),
-        compId,
-      );
-      appendPgNotiLog({
-        routeKey: 'elementpay/webhook',
-        merchantId: compId || '',
-        kind: 'callback',
-        body: notifyBodyFail,
-        rawBody: forwardBody || undefined,
-        targetUrl: '',
-        contentType: incomingContentType,
-        env: 'live',
-        relayStatus: 'fail',
-        relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing X-Icopay-Comp-Id',
-        pgProvider: 'elementpay',
-      });
-    } else {
-      const notifyBody = stampElementPayCompIdOnBody(
-        elementPayNoti.mapElementPayToMerchantNotifyBody(body, method),
-        match.merchantId || compId,
-      );
-      try {
-        await relayElementPayMerchantNotify(
-          match.merchantId,
-          match.merchant,
-          notifyBody,
-          forwardBody,
-          incomingContentType,
-        );
-      } catch (e) {
-        console.error('[ElementPay] merchant relay error', e.message || e);
-      }
-    }
-  }
-
+  /*
+   * CRITICAL: EP check/pay must receive ICOPAY {response,hash} immediately.
+   * Comp-Id lookup + merchant relay must NEVER delay or rewrite the EP response —
+   * delayed 205 is a primary cause of Cabinet "disputable / reached limit of attempts for pay callback".
+   */
   const outStatus = ico.status && Number.isFinite(Number(ico.status)) ? Number(ico.status) : 502;
   const outCt =
     elementPayNoti.headerGetIgnoreCase(ico.headers, 'content-type') || 'application/json; charset=utf-8';
+  const outBody = ico.data != null ? ico.data : '';
+  let icoEpStatus = '';
+  try {
+    const parsed =
+      typeof outBody === 'string' && outBody.trim().startsWith('{') ? JSON.parse(outBody) : null;
+    if (parsed && parsed.response && parsed.response.status != null) {
+      icoEpStatus = String(parsed.response.status);
+    }
+  } catch (_) {
+    /* ignore parse */
+  }
+  console.log(
+    '[ElementPay] EP passthrough',
+    'method=',
+    method || '-',
+    'order=',
+    order || '-',
+    'http=',
+    outStatus,
+    'epStatus=',
+    icoEpStatus || '-',
+    'bytes=',
+    typeof outBody === 'string' ? outBody.length : 0,
+  );
   res.status(outStatus);
   res.set('Content-Type', outCt);
   // Pass-through body only — do not rewrite ElementPay {response,hash}
-  return res.send(ico.data != null ? ico.data : '');
+  res.send(outBody);
+
+  // Merchant notify AFTER EP ack (fire-and-forget); resolve Comp-Id here so EP path stays fast
+  if (elementPayNoti.elementPayShouldNotifyMerchant(method)) {
+    setImmediate(() => {
+      Promise.resolve()
+        .then(async () => {
+          let compId =
+            compIdHdr ||
+            String(body.compId || body.CompId || body.merchantId || body.MerchantId || body['Comp-Id'] || '').trim() ||
+            extractElementPayCompIdFromBody(body);
+          const orderForComp = orderHdr || order;
+          if (!compId && orderForComp) {
+            try {
+              compId = await lookupElementPayCompIdFromIcopay(orderForComp);
+            } catch (_) {
+              /* ignore */
+            }
+          }
+          if (!compId && orderForComp) {
+            const byLog = findElementPayMerchantByOrderFromLogs(orderForComp);
+            if (byLog && byLog.merchantId) compId = byLog.merchantId;
+          }
+          const match = findElementPayMerchantByCompId(compId);
+          if (!match) {
+            console.warn(
+              '[ElementPay] merchant notify skipped: no Comp-Id match',
+              'compId=',
+              compId || '(none)',
+              'order=',
+              orderHdr || order || '-',
+            );
+            const notifyBodyFail = stampElementPayCompIdOnBody(
+              elementPayNoti.mapElementPayToMerchantNotifyBody(body, method),
+              compId,
+            );
+            appendPgNotiLog({
+              routeKey: 'elementpay/webhook',
+              merchantId: compId || '',
+              kind: 'callback',
+              body: notifyBodyFail,
+              rawBody: forwardBody || undefined,
+              targetUrl: '',
+              contentType: incomingContentType,
+              env: 'live',
+              relayStatus: 'fail',
+              relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing X-Icopay-Comp-Id',
+              pgProvider: 'elementpay',
+            });
+            return;
+          }
+          const notifyBody = stampElementPayCompIdOnBody(
+            elementPayNoti.mapElementPayToMerchantNotifyBody(body, method),
+            match.merchantId || compId,
+          );
+          try {
+            await relayElementPayMerchantNotify(
+              match.merchantId,
+              match.merchant,
+              notifyBody,
+              forwardBody,
+              incomingContentType,
+            );
+          } catch (e) {
+            console.error('[ElementPay] merchant relay error', e.message || e);
+          }
+        })
+        .catch((e) => console.error('[ElementPay] merchant notify async error', e && e.message ? e.message : e));
+    });
+  }
 }
 
 /** 저장값이 없을 때만 사용: 환경변수 SYSTEM_MONITOR_MONTHLY_QUOTA_GB (기본 300GB) */
