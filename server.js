@@ -582,8 +582,92 @@ const JPAY_PROFILES_CONFIG_PATH = path.join(CONFIG_DIR, 'jpay-profiles.json');
 const ICOPAY_AMOUNT_SETTINGS_PATH = path.join(CONFIG_DIR, 'icopay-amount-settings.json');
 const NOTI_PROVISION_CONFIG_PATH = path.join(CONFIG_DIR, 'noti-provision.json');
 const ELEMENTPAY_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'elementpay-ingress.json');
+const TURNSTILE_CONFIG_PATH = path.join(CONFIG_DIR, 'turnstile.json');
+const TURNSTILE_SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const DEFAULT_SIDEBAR_TITLE = 'PG 노티 관리자';
 const DEFAULT_SIDEBAR_SUB = 'Webhooks & Internal Notices';
+
+function loadTurnstileSettings() {
+  try {
+    const raw = fs.readFileSync(TURNSTILE_CONFIG_PATH, 'utf8');
+    const o = JSON.parse(raw);
+    return {
+      enabled: !!(o && o.enabled === true),
+      siteKey: o && o.siteKey != null ? String(o.siteKey).trim() : '',
+      secretKey: o && o.secretKey != null ? String(o.secretKey).trim() : '',
+    };
+  } catch (_) {
+    return { enabled: false, siteKey: '', secretKey: '' };
+  }
+}
+
+function saveTurnstileSettings(o, opts) {
+  ensureConfigDir();
+  const cur = loadTurnstileSettings();
+  const keepSecret = !!(opts && opts.keepSecretIfBlank);
+  let secretKey = o && o.secretKey != null ? String(o.secretKey).trim() : cur.secretKey;
+  if (keepSecret && (!secretKey || secretKey === '********')) secretKey = cur.secretKey;
+  const toSave = {
+    enabled: !!(o && (o.enabled === true || o.enabled === '1' || o.enabled === 'on' || o.enabled === 'true')),
+    siteKey: o && o.siteKey != null ? String(o.siteKey).trim() : cur.siteKey,
+    secretKey,
+  };
+  fs.writeFileSync(TURNSTILE_CONFIG_PATH, JSON.stringify(toSave, null, 2));
+  return toSave;
+}
+
+function clientIpFromReq(req) {
+  const xf = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim();
+  return xf || req.ip || '';
+}
+
+/** Cloudflare Turnstile siteverify. enabled=false 이면 통과. 토큰/시크릿은 세션에 저장하지 않음. */
+async function verifyTurnstileToken(token, remoteip) {
+  const cfg = loadTurnstileSettings();
+  if (!cfg.enabled) return { ok: true, skipped: true };
+  if (!cfg.secretKey) return { ok: false, reason: 'not_configured' };
+  const tkn = String(token || '').trim();
+  if (!tkn) return { ok: false, reason: 'missing_token' };
+  try {
+    const params = new URLSearchParams();
+    params.set('secret', cfg.secretKey);
+    params.set('response', tkn);
+    if (remoteip) params.set('remoteip', String(remoteip));
+    const res = await axios.post(TURNSTILE_SITEVERIFY_URL, params.toString(), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 10000,
+      validateStatus: () => true,
+    });
+    const data = res.data && typeof res.data === 'object' ? res.data : {};
+    if (data.success === true) return { ok: true };
+    const codes = Array.isArray(data['error-codes']) ? data['error-codes'] : [];
+    console.warn('[Turnstile] siteverify failed', codes.join(',') || res.status);
+    return { ok: false, reason: 'verify_failed', codes };
+  } catch (e) {
+    console.warn('[Turnstile] siteverify error', e.message || e);
+    return { ok: false, reason: 'verify_error' };
+  }
+}
+
+/** 관리자 세션 완전 제거 (쿠키 포함). Turnstile/로그인 잔존 방지. */
+function destroyAdminSession(req, res, done) {
+  const finish = () => {
+    try {
+      res.clearCookie('connect.sid', { path: '/' });
+    } catch (_) {
+      /* ignore */
+    }
+    if (typeof done === 'function') done();
+  };
+  if (!req.session) return finish();
+  req.session.destroy(() => finish());
+}
+
+function setNoStoreHeaders(res) {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+}
 
 function loadSiteSettings() {
   try {
@@ -11664,8 +11748,10 @@ app.get('/jnoti/:kind/:token', (req, res) => {
 
 // 로그아웃
 app.get('/admin/logout', (req, res) => {
-  req.session.destroy(() => {});
-  res.redirect('/admin/login');
+  setNoStoreHeaders(res);
+  destroyAdminSession(req, res, () => {
+    res.redirect('/admin/login');
+  });
 });
 
 // 언어 변경 (쿠키 저장 후 리다이렉트)
@@ -12091,11 +12177,15 @@ function getAdminTopbar(locale, clientIp, nowDateOrLocal, _legacyNowTh, adminUse
   </div>`;
 }
 
-// 로그인 페이지 (다국어 + Google OTP 안내)
+// 로그인 페이지 (다국어 + Google OTP 안내 + 선택적 Cloudflare Turnstile)
 app.get('/admin/login', (req, res) => {
+  setNoStoreHeaders(res);
+  const renderLogin = () => {
   const locale = getLocale(req);
   const err = String((req.query || {}).err || '');
   const u = String((req.query || {}).u || '');
+  const turnstileCfg = loadTurnstileSettings();
+  const turnstileOn = !!(turnstileCfg.enabled && turnstileCfg.siteKey);
   const langLinks = SUPPORTED_LOCALES.map((l) => {
     const label = l === 'zh' ? 'CH' : l.toUpperCase();
     return `<a href="/admin/set-locale?lang=${l}&back=/admin/login" style="color:#93c5fd;margin:0 4px;">${label}</a>`;
@@ -12115,11 +12205,123 @@ app.get('/admin/login', (req, res) => {
   if (err === 'otp') errMsg = (t(locale, 'login_error_otp') || 'OTP 번호가 올바르지 않습니다.') + remainingText(remaining);
   if (err === 'otp_locked') errMsg = t(locale, 'login_error_otp_locked') || 'OTP가 5회 이상 틀려 초기화(잠금)되었습니다. 관리자에게 문의하세요.';
   if (err === 'cred') errMsg = t(locale, 'login_error_cred') || '아이디 또는 비밀번호가 올바르지 않습니다.';
+  if (err === 'turnstile') errMsg = t(locale, 'login_error_turnstile') || '보안 확인에 실패했습니다. 다시 시도해 주세요.';
+  if (err === 'turnstile_cfg') errMsg = t(locale, 'login_error_turnstile_cfg') || 'Turnstile이 활성화되었지만 키가 없습니다. 환경설정에서 키를 등록하세요.';
   const alertScript = errMsg ? `<script>window.alert('${escJs(errMsg)}');</script>` : '';
+  const turnstileLang =
+    locale === 'ja' ? 'ja' : locale === 'en' ? 'en' : locale === 'th' ? 'th' : locale === 'zh' ? 'zh-cn' : 'ko';
+  const turnstileWait = escAttr(t(locale, 'login_turnstile_wait') || '로봇 접근을 확인 중입니다. 잠시 대기해 주세요.');
+  const turnstileErrUi = escAttr(t(locale, 'login_turnstile_ui_err') || '확인에 실패했습니다. 화면을 새로고침한 뒤 다시 시도해 주세요.');
+  const turnstileBlock = turnstileOn
+    ? `
+        <div class="mb-3 is-wait" id="loginTurnstileWrap">
+          <p class="login-turnstile-banner login-turnstile-banner-wait" id="loginTurnstileWait">${turnstileWait}</p>
+          <p class="login-turnstile-banner is-err login-turnstile-banner-err" id="loginTurnstileErr">${turnstileErrUi}</p>
+          <div id="loginTurnstile" class="cf-turnstile" aria-hidden="true"></div>
+          <input type="hidden" name="cf-turnstile-response" id="cf-turnstile-response" value="" />
+        </div>`
+    : '';
+  const turnstileScript = turnstileOn
+    ? `
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=pgOnTurnstileLoad" async defer></script>
+  <script>
+    (function () {
+      var LOGIN_TURNSTILE_SITE_KEY = ${JSON.stringify(turnstileCfg.siteKey)};
+      var loginTurnstileWidgetId = null;
+      var loginTurnstileState = 'wait';
+      var turnstileLang = ${JSON.stringify(turnstileLang)};
+      function setLoginTurnstileState(state) {
+        loginTurnstileState = state || 'wait';
+        var wrap = document.getElementById('loginTurnstileWrap');
+        var btn = document.getElementById('admin-login-submit');
+        if (wrap) {
+          wrap.classList.remove('is-wait', 'is-ok', 'is-challenge', 'is-err');
+          wrap.classList.add('is-' + loginTurnstileState);
+        }
+        if (btn) btn.disabled = loginTurnstileState !== 'ok';
+        var hid = document.getElementById('cf-turnstile-response');
+        if (hid && loginTurnstileState !== 'ok') hid.value = '';
+      }
+      function getLoginTurnstileToken() {
+        try {
+          if (window.turnstile && loginTurnstileWidgetId != null) {
+            return String(window.turnstile.getResponse(loginTurnstileWidgetId) || '').trim();
+          }
+        } catch (eTok) {}
+        var hidden = document.getElementById('cf-turnstile-response');
+        return hidden ? String(hidden.value || '').trim() : '';
+      }
+      function syncHiddenToken() {
+        var hid = document.getElementById('cf-turnstile-response');
+        if (hid) hid.value = getLoginTurnstileToken();
+      }
+      function renderLoginTurnstile() {
+        var el = document.getElementById('loginTurnstile');
+        if (!el || !window.turnstile) return;
+        if (loginTurnstileWidgetId != null) return;
+        setLoginTurnstileState('wait');
+        try {
+          loginTurnstileWidgetId = window.turnstile.render(el, {
+            sitekey: LOGIN_TURNSTILE_SITE_KEY,
+            theme: 'dark',
+            appearance: 'interaction-only',
+            size: 'flexible',
+            retry: 'auto',
+            action: 'admin-login',
+            language: turnstileLang,
+            callback: function () {
+              syncHiddenToken();
+              setLoginTurnstileState('ok');
+            },
+            'expired-callback': function () { setLoginTurnstileState('wait'); },
+            'error-callback': function () { setLoginTurnstileState('err'); },
+            'timeout-callback': function () { setLoginTurnstileState('err'); },
+            'before-interactive-callback': function () { setLoginTurnstileState('challenge'); },
+            'after-interactive-callback': function () {
+              if (getLoginTurnstileToken()) {
+                syncHiddenToken();
+                setLoginTurnstileState('ok');
+              }
+            }
+          });
+        } catch (eRender) {
+          setLoginTurnstileState('err');
+        }
+      }
+      window.pgOnTurnstileLoad = renderLoginTurnstile;
+      if (window.turnstile) renderLoginTurnstile();
+      else {
+        var tsWait = 0;
+        var tsTimer = setInterval(function () {
+          tsWait += 1;
+          if (window.turnstile) {
+            clearInterval(tsTimer);
+            renderLoginTurnstile();
+          } else if (tsWait > 80) {
+            clearInterval(tsTimer);
+            if (loginTurnstileWidgetId == null) setLoginTurnstileState('err');
+          }
+        }, 100);
+      }
+      var form = document.getElementById('admin-login-form');
+      if (form) {
+        form.addEventListener('submit', function (ev) {
+          syncHiddenToken();
+          if (!getLoginTurnstileToken()) {
+            ev.preventDefault();
+            setLoginTurnstileState(loginTurnstileState === 'err' ? 'err' : 'wait');
+            return false;
+          }
+        });
+      }
+    })();
+  </script>`
+    : '';
   res.send(`<!DOCTYPE html>
 <html lang="${locale}">
 <head>
   <meta charset="UTF-8" />
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
   <title>${t(locale, 'login_title')}</title>
   <style>${ADMIN_PAGE_DESC_BOX_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#111827; color:#f9fafb; }
@@ -12131,11 +12333,19 @@ app.get('/admin/login', (req, res) => {
     input[type="text"]:focus, input[type="password"]:focus { outline:none; border-color:#60a5fa; box-shadow:0 0 0 1px #bfdbfe; }
     button { margin-top: 14px; padding: 8px 14px; background:#2563eb; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:14px; width:100%; }
     button:hover { background:#1d4ed8; }
+    button:disabled { opacity:0.55; cursor:not-allowed; background:#4b5563; }
     .hint { font-size:12px; color:#9ca3af; margin-top:6px; }
     .error { font-size:13px; color:#fca5a5; margin-bottom:6px; }
     .lang-bar { text-align:center; margin-bottom:12px; font-size:13px; color:#9ca3af; }
     .lang-bar a { text-decoration:none; }
-    .nav.nav-github-style .nav-item-small { font-size:12px; white-space:nowrap; }
+    #loginTurnstileWrap { margin: 10px 0 4px; min-height: 0; width: 100%; position: relative; }
+    .login-turnstile-banner { margin:0 0 8px; padding:8px 10px; border-radius:6px; font-size:12px; line-height:1.4; border:1px solid #374151; background:#1f2937; color:#d1d5db; }
+    .login-turnstile-banner.is-err { background:#450a0a; border-color:#7f1d1d; color:#fecaca; }
+    #loginTurnstileWrap.is-ok .login-turnstile-banner-wait,
+    #loginTurnstileWrap.is-err .login-turnstile-banner-wait { display:none; }
+    #loginTurnstileWrap:not(.is-err) .login-turnstile-banner-err { display:none; }
+    #loginTurnstile { position:absolute; left:-9999px; width:1px; height:1px; overflow:hidden; }
+    #loginTurnstileWrap.is-challenge #loginTurnstile { position:static; left:auto; width:100%; height:auto; overflow:visible; margin-top:6px; }
   </style>
 </head>
 <body>
@@ -12144,14 +12354,15 @@ app.get('/admin/login', (req, res) => {
     <div class="card">
       <h1>${t(locale, 'login_title')}</h1>
       ${errMsg ? `<div class="error">${escAttr(errMsg)}</div>` : ''}
-      <form id="admin-login-form" method="post" action="/admin/login">
+      <form id="admin-login-form" method="post" action="/admin/login" autocomplete="off">
         <label>${t(locale, 'login_username')}<input type="text" name="username" value="${escAttr(u)}" required autocomplete="username" /></label>
         <label>${t(locale, 'login_password')}<input type="password" name="password" required autocomplete="current-password" /></label>
         <label>${t(locale, 'login_otp')}<input id="admin-login-otp" type="text" name="otp" maxlength="6" placeholder="000000" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" /></label>
         <div class="hint">${t(locale, 'login_otp_hint')}</div>
-        <button type="submit">${t(locale, 'login_submit')}</button>
+        ${turnstileBlock}
+        <button type="submit" id="admin-login-submit"${turnstileOn ? ' disabled' : ''}>${t(locale, 'login_submit')}</button>
       </form>
-      <p style="margin-top:14px;font-size:13px;"><a href="/admin/forgot" style="color:#93c5fd;">${t(locale, 'forgot_title')}</a> &middot; <a href="/admin/forgot-id" style="color:#93c5fd;">${t(locale, 'forgot_id_title')}</a></p>
+      <p style="margin-top:14px;font-size:13px;text-align:center;"><a href="/admin/forgot" style="color:#93c5fd;">${t(locale, 'forgot_title')}</a> &middot; <a href="/admin/forgot-id" style="color:#93c5fd;">${t(locale, 'forgot_id_title')}</a></p>
     </div>
   </div>
   ${alertScript}
@@ -12161,8 +12372,16 @@ app.get('/admin/login', (req, res) => {
       var otpEl = document.getElementById('admin-login-otp');
       if (!form || !otpEl) return;
       var autoSubmitting = false;
+      var turnstileRequired = ${turnstileOn ? 'true' : 'false'};
       function digitsOnly(v) {
         return String(v || '').replace(/\\D/g, '');
+      }
+      function turnstileOk() {
+        if (!turnstileRequired) return true;
+        var btn = document.getElementById('admin-login-submit');
+        if (btn && btn.disabled) return false;
+        var hid = document.getElementById('cf-turnstile-response');
+        return !!(hid && String(hid.value || '').trim());
       }
       function tryAutoSubmit() {
         var d = digitsOnly(otpEl.value);
@@ -12170,6 +12389,7 @@ app.get('/admin/login', (req, res) => {
           autoSubmitting = false;
           return;
         }
+        if (!turnstileOk()) return;
         if (autoSubmitting) return;
         otpEl.value = d;
         if (!form.checkValidity()) {
@@ -12188,8 +12408,15 @@ app.get('/admin/login', (req, res) => {
       if (passEl) passEl.addEventListener('input', tryAutoSubmit);
     })();
   </script>
+  ${turnstileScript}
 </body>
 </html>`);
+  };
+  // 로그인 화면 진입 시 기존 관리자 세션을 반드시 제거 (미로그인인데 화면이 열리는 잔존 방지)
+  if (req.session && (req.session.member || req.session.adminUser)) {
+    return destroyAdminSession(req, res, renderLogin);
+  }
+  return renderLogin();
 });
 
 // 아이디 찾기 (성명, 이메일, 국가 일치 시 아이디 안내 — 이메일 발송은 스텁)
@@ -12229,12 +12456,28 @@ app.post('/admin/forgot-id', (req, res) => {
   return res.send((t(locale, 'forgot_id_sent') || '').replace(/\{\{id\}\}/g, (mem.userId || '').replace(/</g, '&lt;')) + ' <a href="/admin/login">' + t(locale, 'login_submit') + '</a>');
 });
 
-// 로그인 처리 (회원 기반: userId, password, OTP)
-app.post('/admin/login', (req, res) => {
+// 로그인 처리 (회원 기반: userId, password, OTP + 선택 Turnstile)
+// 주의: Turnstile 토큰/시크릿을 세션에 넣지 않음. 성공 시에만 session.regenerate 후 member 설정.
+app.post('/admin/login', async (req, res) => {
+  setNoStoreHeaders(res);
   const userId = (req.body.username || '').trim();
   const password = req.body.password || '';
   const otp = req.body.otp || '';
   const locale = getLocale(req);
+  const turnstileToken = String(
+    (req.body && (req.body['cf-turnstile-response'] || req.body.turnstileToken || req.body.cf_turnstile_response)) || '',
+  ).trim();
+
+  const tsCfg = loadTurnstileSettings();
+  if (tsCfg.enabled) {
+    if (!tsCfg.siteKey || !tsCfg.secretKey) {
+      return res.redirect('/admin/login?err=turnstile_cfg&u=' + encodeURIComponent(userId));
+    }
+    const ts = await verifyTurnstileToken(turnstileToken, clientIpFromReq(req));
+    if (!ts.ok) {
+      return res.redirect('/admin/login?err=turnstile&u=' + encodeURIComponent(userId));
+    }
+  }
 
   MEMBERS = loadMembers();
   const member = getMemberByUserId(userId);
@@ -12252,11 +12495,10 @@ app.post('/admin/login', (req, res) => {
     return res.redirect('/admin/login?err=otp_locked&u=' + encodeURIComponent(userId));
   }
 
-  if (member.otpRequired) {
-    // OTP 필수인데 아직 secret이 없으면 로그인은 허용하되, 계정 설정에서 OTP를 먼저 등록하도록 강제
-    if (!member.otpSecret) {
-      OPERATOR_PERMISSIONS = loadOperatorPermissions();
-      const permissions = member.role === ROLES.OPERATOR ? (OPERATOR_PERMISSIONS[member.userId] || []) : PAGE_KEYS;
+  const finishLoginSuccess = (mustSetupOtp) => {
+    OPERATOR_PERMISSIONS = loadOperatorPermissions();
+    const permissions = member.role === ROLES.OPERATOR ? (OPERATOR_PERMISSIONS[member.userId] || []) : PAGE_KEYS;
+    const go = () => {
       req.session.member = {
         id: member.id,
         role: member.role,
@@ -12267,9 +12509,38 @@ app.post('/admin/login', (req, res) => {
         internalTargetIds: member.internalTargetIds || [],
       };
       req.session.adminUser = member.userId;
-      req.session.mustSetupOtp = true;
+      if (member.mustChangePassword) req.session.mustChangePassword = true;
+      else delete req.session.mustChangePassword;
+      req.session.mustSetupOtp = !!mustSetupOtp;
+      // Turnstile 관련 필드가 세션에 남지 않도록 명시적으로 제거
+      delete req.session.turnstileToken;
+      delete req.session.cfTurnstile;
       setSessionPgSource(req, DEFAULT_PG_SOURCE);
-      return res.redirect('/admin/account?forceOtp=1');
+      syncSessionHealthAlertPending(req, getLocale(req));
+      req.session.save(() => {
+        if (mustSetupOtp) return res.redirect('/admin/account?forceOtp=1');
+        if (member.mustChangePassword) return res.redirect('/admin/change-password');
+        const redirectUrl = getPostAuthHomeRedirectUrl(req, req.session.member, permissions);
+        return res.redirect(redirectUrl);
+      });
+    };
+    // 세션 고정 공격 방지: 인증 성공 후에만 새 세션 ID 발급
+    if (typeof req.session.regenerate === 'function') {
+      req.session.regenerate((err) => {
+        if (err) {
+          console.warn('[login] session.regenerate failed', err.message || err);
+          return res.redirect('/admin/login?err=cred&u=' + encodeURIComponent(userId));
+        }
+        go();
+      });
+    } else {
+      go();
+    }
+  };
+
+  if (member.otpRequired) {
+    if (!member.otpSecret) {
+      return finishLoginSuccess(true);
     }
 
     if (!verifyOtp(member.otpSecret, otp)) {
@@ -12281,7 +12552,6 @@ app.post('/admin/login', (req, res) => {
           const left = Math.max(0, 5 - m.otpFailCount);
           if (m.otpFailCount >= 5) {
             m.otpLocked = true;
-            // 자동 초기화(잠금): 기존 OTP 무효화
             m.otpSecret = '';
           }
           const idx = MEMBERS.findIndex((x) => x.id === m.id);
@@ -12295,7 +12565,6 @@ app.post('/admin/login', (req, res) => {
     }
   }
 
-  // 로그인 성공 시 실패 카운트 초기화(슈퍼관리자 제외 규칙이지만, 슈퍼관리자는 별도 영향 없음)
   if (!isSuperAdmin && (member.otpFailCount || member.otpLocked)) {
     MEMBERS = loadMembers();
     const m = getMemberByUserId(userId);
@@ -12308,33 +12577,13 @@ app.post('/admin/login', (req, res) => {
     }
   }
 
-  OPERATOR_PERMISSIONS = loadOperatorPermissions();
-  const permissions = member.role === ROLES.OPERATOR ? (OPERATOR_PERMISSIONS[member.userId] || []) : PAGE_KEYS;
-  req.session.member = {
-    id: member.id,
-    role: member.role,
-    userId: member.userId,
-    name: member.name,
-    canAssignPermission: member.canAssignPermission === true,
-    permissions,
-    internalTargetIds: member.internalTargetIds || [],
-  };
-  req.session.adminUser = member.userId;
-  if (member.mustChangePassword) req.session.mustChangePassword = true;
-  req.session.mustSetupOtp = false;
-  setSessionPgSource(req, DEFAULT_PG_SOURCE);
-  syncSessionHealthAlertPending(req, getLocale(req));
-
-  if (member.mustChangePassword) {
-    return res.redirect('/admin/change-password');
-  }
-  const redirectUrl = getPostAuthHomeRedirectUrl(req, req.session.member, permissions);
-  return res.redirect(redirectUrl);
+  return finishLoginSuccess(false);
 });
 
 // 로그아웃
 app.post('/admin/logout', (req, res) => {
-  req.session.destroy(() => {
+  setNoStoreHeaders(res);
+  destroyAdminSession(req, res, () => {
     res.redirect('/admin/login');
   });
 });
@@ -12780,6 +13029,55 @@ function renderJpayEnvironmentCard(locale, query) {
   );
 }
 
+function renderTurnstileSettingsCard(locale, query) {
+  const esc = (s) =>
+    String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/"/g, '&quot;');
+  const cfg = loadTurnstileSettings();
+  const confirmSave = String(t(locale, 'merchants_confirm_save') || 'Save?').replace(/'/g, "\\'");
+  const secretPlaceholder = cfg.secretKey ? '********' : '';
+  return (
+    '<div class="card card-chillpay" style="margin-top:18px;border:1px solid #93c5fd;background:#eff6ff;">' +
+    '<h2 style="margin-top:0;color:#1e3a8a;">' +
+    esc(t(locale, 'settings_turnstile_title')) +
+    '</h2>' +
+    '<p class="admin-page-desc">' +
+    esc(t(locale, 'settings_turnstile_desc')) +
+    '</p>' +
+    '<form method="post" action="/admin/settings/turnstile" onsubmit="return confirm(\'' +
+    confirmSave +
+    '\');">' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;">' +
+    '<input type="checkbox" name="enabled" value="1"' +
+    (cfg.enabled ? ' checked' : '') +
+    ' />' +
+    '<span>' +
+    esc(t(locale, 'settings_turnstile_enabled')) +
+    '</span></label>' +
+    '<p class="hint">' +
+    esc(t(locale, 'settings_turnstile_enabled_hint')) +
+    '</p>' +
+    '<label>' +
+    esc(t(locale, 'settings_turnstile_site_key')) +
+    ' <input type="text" name="siteKey" value="' +
+    esc(cfg.siteKey) +
+    '" autocomplete="off" style="width:100%;max-width:520px;padding:8px 10px;margin-top:4px;box-sizing:border-box;" /></label>' +
+    '<label>' +
+    esc(t(locale, 'settings_turnstile_secret_key')) +
+    ' <input type="password" name="secretKey" value="" placeholder="' +
+    esc(secretPlaceholder || t(locale, 'settings_turnstile_secret_placeholder')) +
+    '" autocomplete="new-password" style="width:100%;max-width:520px;padding:8px 10px;margin-top:4px;box-sizing:border-box;" /></label>' +
+    '<p class="hint">' +
+    esc(t(locale, 'settings_turnstile_secret_hint')) +
+    '</p>' +
+    '<button type="submit">' +
+    esc(t(locale, 'common_save')) +
+    '</button></form></div>'
+  );
+}
+
 function renderElementPayIngressSettingsCard(locale, query) {
   const esc = (s) =>
     String(s ?? '')
@@ -13088,6 +13386,8 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
       '<div class="alert alert-ok">' +
       escQ(t(locale, 'settings_chillpay_redirect_routes_saved') || 'REDIRECT Route 번호를 저장했습니다.') +
       '</div>';
+  } else if (q.turnstileSaved === '1') {
+    alertHtml = '<div class="alert alert-ok">' + escQ(t(locale, 'settings_turnstile_saved')) + '</div>';
   }
   const titleVal = (site.sidebarTitle || '').replace(/"/g, '&quot;');
   const subVal = (site.sidebarSub || '').replace(/"/g, '&quot;');
@@ -13203,6 +13503,7 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
         </form>
       </div>
       ${renderIcopaySettingsCard(locale)}
+      ${renderTurnstileSettingsCard(locale, q)}
       ${renderNotiProvisionSettingsCard(locale, provisionUi)}
       ${(function() {
         const c = loadChillPayTransactionConfig();
@@ -13374,6 +13675,31 @@ function keepIfNotEmpty(currentVal, submittedVal) {
   const sub = submittedVal != null ? String(submittedVal).trim() : '';
   return sub === '' ? cur : sub;
 }
+
+app.post('/admin/settings/turnstile', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
+  const body = req.body || {};
+  const prev = loadTurnstileSettings();
+  const secretRaw = body.secretKey != null ? String(body.secretKey).trim() : '';
+  const keepSecret = !secretRaw || secretRaw === '********';
+  const saved = saveTurnstileSettings(
+    {
+      enabled: body.enabled === '1' || body.enabled === 'on' || body.enabled === true,
+      siteKey: body.siteKey,
+      secretKey: keepSecret ? prev.secretKey : secretRaw,
+    },
+    { keepSecretIfBlank: keepSecret },
+  );
+  if (typeof appendConfigChangeLog === 'function') {
+    appendConfigChangeLog({
+      type: 'turnstile_settings',
+      actor: (req.session && req.session.adminUser) || '',
+      enabled: saved.enabled,
+      siteKeySet: !!saved.siteKey,
+      secretKeySet: !!saved.secretKey,
+    });
+  }
+  return res.redirect('/admin/settings?turnstileSaved=1');
+});
 
 app.post('/admin/settings/elementpay-ingress', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
   const body = req.body || {};
