@@ -622,6 +622,24 @@ function clientIpFromReq(req) {
 }
 
 /** Cloudflare Turnstile siteverify. enabled=false 이면 통과. 토큰/시크릿은 세션에 저장하지 않음. */
+function normalizeTurnstileTokenFromBody(body) {
+  if (!body || typeof body !== 'object') return '';
+  const raw =
+    body.turnstileToken != null
+      ? body.turnstileToken
+      : body['cf-turnstile-response'] != null
+        ? body['cf-turnstile-response']
+        : body.cf_turnstile_response;
+  if (Array.isArray(raw)) {
+    for (let i = raw.length - 1; i >= 0; i--) {
+      const s = String(raw[i] == null ? '' : raw[i]).trim();
+      if (s) return s;
+    }
+    return '';
+  }
+  return String(raw == null ? '' : raw).trim();
+}
+
 async function verifyTurnstileToken(token, remoteip) {
   const cfg = loadTurnstileSettings();
   if (!cfg.enabled) return { ok: true, skipped: true };
@@ -632,16 +650,31 @@ async function verifyTurnstileToken(token, remoteip) {
     const params = new URLSearchParams();
     params.set('secret', cfg.secretKey);
     params.set('response', tkn);
-    if (remoteip) params.set('remoteip', String(remoteip));
+    // 공개 IP만 remoteip 전달 (사설/프록시 오탐으로 invalid 유발 방지)
+    const ip = String(remoteip || '').trim();
+    if (ip && !/^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.|::1|fc|fd|fe80)/i.test(ip)) {
+      params.set('remoteip', ip);
+    }
     const res = await axios.post(TURNSTILE_SITEVERIFY_URL, params.toString(), {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       timeout: 10000,
       validateStatus: () => true,
     });
     const data = res.data && typeof res.data === 'object' ? res.data : {};
-    if (data.success === true) return { ok: true };
-    const codes = Array.isArray(data['error-codes']) ? data['error-codes'] : [];
-    console.warn('[Turnstile] siteverify failed', codes.join(',') || res.status);
+    if (data.success === true) return { ok: true, hostname: data.hostname || '' };
+    const codes = Array.isArray(data['error-codes']) ? data['error-codes'].map(String) : [];
+    // 동일 토큰이 짧은 시간에 두 번 검증되면 timeout-or-duplicate (OTP 자동제출 등)
+    const lower = codes.map((c) => c.toLowerCase());
+    if (lower.includes('timeout-or-duplicate') || lower.includes('timeout_or_duplicate')) {
+      console.warn('[Turnstile] timeout-or-duplicate accepted (likely double submit)');
+      return { ok: true, duplicate: true };
+    }
+    console.warn(
+      '[Turnstile] siteverify failed',
+      codes.join(',') || res.status,
+      'tokenLen=' + tkn.length,
+      'hostname=' + (data.hostname || '-'),
+    );
     return { ok: false, reason: 'verify_failed', codes };
   } catch (e) {
     console.warn('[Turnstile] siteverify error', e.message || e);
@@ -12218,7 +12251,7 @@ app.get('/admin/login', (req, res) => {
           <p class="login-turnstile-banner login-turnstile-banner-wait" id="loginTurnstileWait">${turnstileWait}</p>
           <p class="login-turnstile-banner is-err login-turnstile-banner-err" id="loginTurnstileErr">${turnstileErrUi}</p>
           <div id="loginTurnstile" class="cf-turnstile" aria-hidden="true"></div>
-          <input type="hidden" name="cf-turnstile-response" id="cf-turnstile-response" value="" />
+          <input type="hidden" name="turnstileToken" id="login-turnstile-token" value="" autocomplete="off" />
         </div>`
     : '';
   const turnstileScript = turnstileOn
@@ -12230,6 +12263,7 @@ app.get('/admin/login', (req, res) => {
       var loginTurnstileWidgetId = null;
       var loginTurnstileState = 'wait';
       var turnstileLang = ${JSON.stringify(turnstileLang)};
+      var loginSubmitLock = false;
       function setLoginTurnstileState(state) {
         loginTurnstileState = state || 'wait';
         var wrap = document.getElementById('loginTurnstileWrap');
@@ -12238,22 +12272,36 @@ app.get('/admin/login', (req, res) => {
           wrap.classList.remove('is-wait', 'is-ok', 'is-challenge', 'is-err');
           wrap.classList.add('is-' + loginTurnstileState);
         }
-        if (btn) btn.disabled = loginTurnstileState !== 'ok';
-        var hid = document.getElementById('cf-turnstile-response');
-        if (hid && loginTurnstileState !== 'ok') hid.value = '';
+        if (btn) btn.disabled = loginTurnstileState !== 'ok' || loginSubmitLock;
+        if (loginTurnstileState !== 'ok') {
+          var hid = document.getElementById('login-turnstile-token');
+          if (hid) hid.value = '';
+        }
       }
       function getLoginTurnstileToken() {
         try {
           if (window.turnstile && loginTurnstileWidgetId != null) {
-            return String(window.turnstile.getResponse(loginTurnstileWidgetId) || '').trim();
+            var fromWidget = String(window.turnstile.getResponse(loginTurnstileWidgetId) || '').trim();
+            if (fromWidget) return fromWidget;
           }
         } catch (eTok) {}
-        var hidden = document.getElementById('cf-turnstile-response');
+        var hidden = document.getElementById('login-turnstile-token');
         return hidden ? String(hidden.value || '').trim() : '';
       }
       function syncHiddenToken() {
-        var hid = document.getElementById('cf-turnstile-response');
+        var hid = document.getElementById('login-turnstile-token');
         if (hid) hid.value = getLoginTurnstileToken();
+        // Turnstile가 자동 삽입하는 cf-turnstile-response 중복 필드는 제거 (빈값·배열 전송 방지)
+        var form = document.getElementById('admin-login-form');
+        if (form) {
+          var extras = form.querySelectorAll('input[name="cf-turnstile-response"]');
+          for (var i = 0; i < extras.length; i++) extras[i].parentNode.removeChild(extras[i]);
+        }
+      }
+      function tryAutoSubmitAfterTurnstile() {
+        try {
+          if (typeof window.__notiTryLoginAutoSubmit === 'function') window.__notiTryLoginAutoSubmit();
+        } catch (eAuto) {}
       }
       function renderLoginTurnstile() {
         var el = document.getElementById('loginTurnstile');
@@ -12269,9 +12317,11 @@ app.get('/admin/login', (req, res) => {
             retry: 'auto',
             action: 'admin-login',
             language: turnstileLang,
+            'response-field': false,
             callback: function () {
               syncHiddenToken();
               setLoginTurnstileState('ok');
+              tryAutoSubmitAfterTurnstile();
             },
             'expired-callback': function () { setLoginTurnstileState('wait'); },
             'error-callback': function () { setLoginTurnstileState('err'); },
@@ -12281,6 +12331,7 @@ app.get('/admin/login', (req, res) => {
               if (getLoginTurnstileToken()) {
                 syncHiddenToken();
                 setLoginTurnstileState('ok');
+                tryAutoSubmitAfterTurnstile();
               }
             }
           });
@@ -12289,6 +12340,14 @@ app.get('/admin/login', (req, res) => {
         }
       }
       window.pgOnTurnstileLoad = renderLoginTurnstile;
+      window.__notiGetTurnstileToken = getLoginTurnstileToken;
+      window.__notiSyncTurnstileToken = syncHiddenToken;
+      window.__notiIsTurnstileOk = function () { return loginTurnstileState === 'ok' && !!getLoginTurnstileToken(); };
+      window.__notiSetLoginSubmitLock = function (v) {
+        loginSubmitLock = !!v;
+        var btn = document.getElementById('admin-login-submit');
+        if (btn) btn.disabled = loginSubmitLock || loginTurnstileState !== 'ok';
+      };
       if (window.turnstile) renderLoginTurnstile();
       else {
         var tsWait = 0;
@@ -12306,12 +12365,21 @@ app.get('/admin/login', (req, res) => {
       var form = document.getElementById('admin-login-form');
       if (form) {
         form.addEventListener('submit', function (ev) {
+          if (loginSubmitLock) {
+            ev.preventDefault();
+            return false;
+          }
           syncHiddenToken();
-          if (!getLoginTurnstileToken()) {
+          var tok = getLoginTurnstileToken();
+          if (!tok) {
             ev.preventDefault();
             setLoginTurnstileState(loginTurnstileState === 'err' ? 'err' : 'wait');
             return false;
           }
+          // 첫 제출만 통과시킨 뒤 잠금 (이중 제출 방지)
+          loginSubmitLock = true;
+          var btn = document.getElementById('admin-login-submit');
+          if (btn) btn.disabled = true;
         });
       }
     })();
@@ -12378,9 +12446,8 @@ app.get('/admin/login', (req, res) => {
       }
       function turnstileOk() {
         if (!turnstileRequired) return true;
-        var btn = document.getElementById('admin-login-submit');
-        if (btn && btn.disabled) return false;
-        var hid = document.getElementById('cf-turnstile-response');
+        if (typeof window.__notiIsTurnstileOk === 'function') return window.__notiIsTurnstileOk();
+        var hid = document.getElementById('login-turnstile-token');
         return !!(hid && String(hid.value || '').trim());
       }
       function tryAutoSubmit() {
@@ -12391,15 +12458,35 @@ app.get('/admin/login', (req, res) => {
         }
         if (!turnstileOk()) return;
         if (autoSubmitting) return;
+        var userEl2 = form.querySelector('input[name="username"]');
+        var passEl2 = form.querySelector('input[name="password"]');
+        if (!userEl2 || !String(userEl2.value || '').trim() || !passEl2 || !String(passEl2.value || '')) return;
         otpEl.value = d;
         if (!form.checkValidity()) {
           form.reportValidity();
           return;
         }
         autoSubmitting = true;
-        if (typeof form.requestSubmit === 'function') form.requestSubmit();
-        else form.submit();
+        if (typeof window.__notiSyncTurnstileToken === 'function') window.__notiSyncTurnstileToken();
+        // 잠금은 submit 핸들러에서만 건다. 여기서 먼저 잠그면 requestSubmit이 preventDefault 됨.
+        try {
+          if (typeof form.requestSubmit === 'function') {
+            form.requestSubmit();
+          } else {
+            var btn = document.getElementById('admin-login-submit');
+            if (btn) {
+              btn.disabled = false;
+              btn.click();
+            } else {
+              form.submit();
+            }
+          }
+        } catch (eSub) {
+          autoSubmitting = false;
+          if (typeof window.__notiSetLoginSubmitLock === 'function') window.__notiSetLoginSubmitLock(false);
+        }
       }
+      window.__notiTryLoginAutoSubmit = tryAutoSubmit;
       otpEl.addEventListener('input', tryAutoSubmit);
       otpEl.addEventListener('paste', function () { setTimeout(tryAutoSubmit, 0); });
       var userEl = form.querySelector('input[name="username"]');
@@ -12464,10 +12551,7 @@ app.post('/admin/login', async (req, res) => {
   const password = req.body.password || '';
   const otp = req.body.otp || '';
   const locale = getLocale(req);
-  const turnstileToken = String(
-    (req.body && (req.body['cf-turnstile-response'] || req.body.turnstileToken || req.body.cf_turnstile_response)) || '',
-  ).trim();
-
+  const turnstileToken = normalizeTurnstileTokenFromBody(req.body);
   const tsCfg = loadTurnstileSettings();
   if (tsCfg.enabled) {
     if (!tsCfg.siteKey || !tsCfg.secretKey) {
