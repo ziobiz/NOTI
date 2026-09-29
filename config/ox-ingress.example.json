@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "icopayNotifyUrl": "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/OX",
+  "icopayOrderLookupUrl": "",
+  "timeoutMs": 25000,
+  "note": "ox Portal Webhooks → POST https://noti.icopay.net/noti/ox only. Browser Result → GET|POST https://noti.icopay.net/noti/result/ox (do not register merchant Result on ox). Optional icopayOrderLookupUrl may include {order} and return Comp-Id (JSON or X-Icopay-Comp-Id)."
+}

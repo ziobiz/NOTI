@@ -261,6 +261,12 @@ const messages = {
       'ElementPay는 PG Webhook·Result 입구가 본사 고정 1개입니다. EP Cabinet → Webhooks에는 Webhook URL만 등록하세요(가맹 Result URL 등록 금지). 가맹 Callback/Result·relayFormat만 설정합니다.',
     merchants_elementpay_result_hint:
       'ICOPAY 결제 _successUrl/_rejectUrl/_waitingUrl = Result URL. 브라우저 도착 후 가맹 resultUrl로 전달됩니다.',
+    merchants_nav_register_ox: 'OXPAY 등록',
+    merchants_ox_ingress_hint:
+      'OXPAY는 Webhook·Result 입구가 본사 고정 1개입니다. 가맹 Callback/Result·relayFormat만 설정합니다.',
+    merchants_ox_result_hint:
+      '브라우저 Result는 고정 Result URL로 들어오며, 가맹 resultUrl로 전달됩니다.',
+    merchants_pg_provider_ox: 'OXPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_nav_list_chillpay: 'CHILLPAY 등록',
     merchants_nav_list_jpay: 'JPAY 등록',
@@ -269,6 +275,7 @@ const messages = {
     merchants_empty_chillpay: '등록된 ChillPay 가맹점이 없습니다.',
     merchants_empty_jpay: '등록된 JPAY 가맹점이 없습니다.',
     merchants_empty_elementpay: '등록된 ElementPay 가맹점이 없습니다.',
+    merchants_empty_ox: '등록된 OXPAY 가맹점이 없습니다.',
     merchants_empty: '등록된 가맹점이 없습니다.',
     merchants_id: '가맹점 ID',
     merchants_route_callback: 'routeKey(callback)',
@@ -447,6 +454,10 @@ const messages = {
       'ElementPay는 본사 고정 Webhook·Result 입구를 사용하며 ChillPay Route / JPAY MID 슬롯이 없습니다. 여기 Callback/Result URL은 전산(ICOPAY pg-notify 등)이 받을 주소입니다. 가맹점 등록에서 이 전산 대상을 선택하세요.',
     internal_targets_elementpay_mid_hint:
       'ElementPay는 연결 MID를 쓰지 않습니다. 가맹 식별은 가맹점 ID(Comp-Id)로 하며, 전산 전송은 위 Callback/Result URL로 합니다.',
+    internal_targets_ox_fields_hint:
+      'OXPAY는 본사 고정 Webhook·Result 입구를 사용하며 ChillPay Route / JPAY MID 슬롯이 없습니다. 여기 Callback/Result URL은 전산(ICOPAY pg-notify 등)이 받을 주소입니다. 가맹점 등록에서 이 전산 대상을 선택하세요.',
+    internal_targets_ox_mid_hint:
+      'OXPAY는 연결 MID를 쓰지 않습니다. 가맹 식별은 가맹점 ID(Comp-Id)로 하며, 전산 전송은 위 Callback/Result URL로 합니다.',
     internal_targets_jpay_key_placeholder: '변경 시에만 입력 (비우면 유지)',
     internal_targets_jpay_mid: 'JPAY MID',
     internal_targets_jpay_key_col: 'JPAY Key',
@@ -456,6 +467,26 @@ const messages = {
     internal_targets_jpay_mid_no_profiles: '등록된 JPAY MID 없음 — 환경설정 → JPAY 환경 설정에서 MID를 입력하세요',
     internal_targets_err_unknown_jpay_mid: 'JPAY 환경 설정에 등록되지 않은 MID입니다.',
     internal_targets_err_unknown_merchant: '등록되지 않은 가맹점 ID입니다. 먼저 가맹점을 등록하세요.',
+    ox_settings_title: 'OXPAY 연동 설정',
+    ox_settings_desc:
+      'OXPAY Webhook은 고정 URL 하나입니다. NOTI는 수신 후 ICOPAY pg-notify(…/OX)로 전달하며, 가맹 Callback/Result는 가맹 설정으로 처리합니다. API Key·Sign Key는 ICOPAY에만 두고 NOTI에는 등록하지 않습니다.',
+    ox_settings_label_webhook: 'OXPAY Webhook URL (고정)',
+    ox_settings_label_result: '브라우저 Result URL (고정)',
+    ox_settings_hint:
+      '대행사에는 위 Webhook URL만 등록합니다. 가맹 Result URL은 대행사에 등록하지 않습니다.',
+    ox_settings_no_api_key_hint:
+      'Mid·API Key·Sign Key는 NOTI에 넣지 않습니다. 키와 서명은 ICOPAY에서 처리합니다.',
+    ox_settings_label_enabled: 'OXPAY 수신 활성화',
+    ox_settings_label_icopay_url: 'ICOPAY 수신 URL (pg-notify …/OX)',
+    ox_settings_icopay_url_hint:
+      'NOTI가 OXPAY 웹훅을 받은 뒤 전달할 ICOPAY URL입니다. 환경변수 OX_ICOPAY_NOTIFY_URL이 있으면 그쪽이 우선합니다.',
+    ox_settings_label_lookup_url: '주문 조회 URL (선택, Result용)',
+    ox_settings_lookup_url_hint:
+      'Result에서 가맹 매칭을 보강할 때 사용합니다. URL에 {order}를 넣을 수 있습니다. 비워 두면 생략합니다.',
+    ox_settings_label_timeout: 'ICOPAY 전달 타임아웃 (ms)',
+    ox_settings_env_url_override:
+      '환경변수 OX_ICOPAY_NOTIFY_URL이 설정되어 있어 URL 필드는 읽기 전용입니다.',
+    ox_settings_saved_ok: 'OXPAY 연동 설정을 저장했습니다.',
     elementpay_settings_title: 'ElementPay 연동 설정',
     elementpay_settings_desc:
       'EP Cabinet에는 고정 Webhook URL 하나만 등록합니다. NOTI는 수신 후 ICOPAY pg-notify로 전달하며, 가맹 Callback/Result는 가맹 설정으로 처리합니다. ElementPay Merchant Key·Secret은 ICOPAY(tb_pg_agency)에만 두고 NOTI에는 등록하지 않습니다.',
@@ -533,9 +564,11 @@ const messages = {
     pg_provider_chillpay: 'ChillPay',
     pg_provider_jpay: 'JPAY',
     pg_provider_elementpay: 'ElementPay',
+    pg_provider_ox: 'OXPAY',
     merchants_pg_provider_chillpay: 'CHILLPAY',
     merchants_pg_provider_jpay: 'JPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
+    merchants_pg_provider_ox: 'OXPAY',
     internal_noti_title: '전산 노티 설정',
     internal_noti_desc: '전산 노티·PG 노티 로그로 보낼 때 적용할 통화별 금액 가공 규칙을 설정합니다.',
     internal_noti_pg_select: 'PG (대행사)',
@@ -773,6 +806,7 @@ const messages = {
     cr_filter_pg_chillpay: 'CHILLPAY',
     cr_filter_pg_jpay: 'JPAY',
     cr_filter_pg_elementpay: 'ElementPay',
+    cr_filter_pg_ox: 'OXPAY',
     cr_type_void: '무효',
     cr_type_refund: '환불',
     cr_period_recent: '기간: 최근',
@@ -1694,6 +1728,12 @@ const messages = {
       'ElementPayはWebhook・Result入口が本社固定1件です。EP Cabinet → WebhooksにはWebhook URLのみ登録（加盟店Result URL登録禁止）。加盟店Callback/Result・relayFormatのみ設定します。',
     merchants_elementpay_result_hint:
       'ICOPAY決済の_successUrl/_rejectUrl/_waitingUrl = Result URL。ブラウザ到着後、加盟店resultUrlへ転送します。',
+    merchants_nav_register_ox: 'OXPAY 登録',
+    merchants_ox_ingress_hint:
+      'OXPAYはWebhook・Result入口が本社固定1件です。加盟店Callback/Result・relayFormatのみ設定します。',
+    merchants_ox_result_hint:
+      'ブラウザResultは固定Result URLに入り、加盟店resultUrlへ転送されます。',
+    merchants_empty_ox: '登録されたOXPAY加盟店はありません。',
     merchants_desc: '加盟店別の通知URL、基幹対象、リレー/基幹送信を設定します。',
     merchants_register: '登録/編集',
     merchants_list: '登録済み加盟店',
@@ -1872,6 +1912,10 @@ const messages = {
       'ElementPay は本社固定 Webhook・Result 入口を使い、ChillPay Route / JPAY MID スロットはありません。ここでの Callback/Result URL は基幹（ICOPAY pg-notify 等）の受信先です。加盟店登録でこの基幹対象を選択してください。',
     internal_targets_elementpay_mid_hint:
       'ElementPay は接続 MID を使いません。加盟店識別は加盟店 ID（Comp-Id）で、基幹送信は上記 Callback/Result URL です。',
+    internal_targets_ox_fields_hint:
+      'OXPAY は本社固定 Webhook・Result 入口を使い、ChillPay Route / JPAY MID スロットはありません。ここでの Callback/Result URL は基幹（ICOPAY pg-notify 等）の受信先です。加盟店登録でこの基幹対象を選択してください。',
+    internal_targets_ox_mid_hint:
+      'OXPAY は接続 MID を使いません。加盟店識別は加盟店 ID（Comp-Id）で、基幹送信は上記 Callback/Result URL です。',
     internal_targets_jpay_key_placeholder: '変更時のみ入力（空欄は維持）',
     internal_targets_jpay_mid: 'JPAY MID',
     internal_targets_jpay_key_col: 'JPAY Key',
@@ -1881,6 +1925,22 @@ const messages = {
     internal_targets_jpay_mid_no_profiles: '登録済み JPAY MID なし — 環境設定の JPAY 環境設定で MID を入力してください',
     internal_targets_err_unknown_jpay_mid: 'JPAY 環境設定に未登録の MID です。',
     internal_targets_err_unknown_merchant: '未登録の加盟店 ID です。先に加盟店を登録してください。',
+    ox_settings_title: 'OXPAY 連携設定',
+    ox_settings_desc:
+      'OXPAY の Webhook は固定 URL 1件です。NOTI は受信後 ICOPAY pg-notify（…/OX）へ転送し、加盟店 Callback/Result は加盟店設定で処理します。API Key・Sign Key は ICOPAY のみに置き、NOTI には登録しません。',
+    ox_settings_label_webhook: 'OXPAY Webhook URL（固定）',
+    ox_settings_label_result: 'ブラウザ Result URL（固定）',
+    ox_settings_hint: '代行会社には上記 Webhook URL のみ登録します。加盟店 Result URL は代行会社に登録しません。',
+    ox_settings_no_api_key_hint: 'Mid・API Key・Sign Key は NOTI に置きません。キーと署名は ICOPAY で処理します。',
+    ox_settings_label_enabled: 'OXPAY 受信を有効化',
+    ox_settings_label_icopay_url: 'ICOPAY 受信 URL（pg-notify …/OX）',
+    ox_settings_icopay_url_hint:
+      'NOTI が OXPAY Webhook 受信後に転送する ICOPAY URL です。環境変数 OX_ICOPAY_NOTIFY_URL があればそちらが優先されます。',
+    ox_settings_label_lookup_url: '注文照会 URL（任意・Result 用）',
+    ox_settings_lookup_url_hint: 'Result の加盟店マッチを補うときに使います。URL に {order} を置けます。空欄なら省略します。',
+    ox_settings_label_timeout: 'ICOPAY 転送タイムアウト (ms)',
+    ox_settings_env_url_override: '環境変数 OX_ICOPAY_NOTIFY_URL が設定されているため URL は読み取り専用です。',
+    ox_settings_saved_ok: 'OXPAY 連携設定を保存しました。',
     elementpay_settings_title: 'ElementPay 連携設定',
     elementpay_settings_desc:
       'EP Cabinet には固定 Webhook URL を1つだけ登録します。NOTI は受信後 ICOPAY pg-notify へ転送し、加盟店 Callback/Result は加盟店設定で処理します。ElementPay Merchant Key・Secret は ICOPAY（tb_pg_agency）のみに置き、NOTI には登録しません。',
@@ -1949,9 +2009,11 @@ const messages = {
     pg_provider_chillpay: 'ChillPay',
     pg_provider_jpay: 'JPAY',
     pg_provider_elementpay: 'ElementPay',
+    pg_provider_ox: 'OXPAY',
     merchants_pg_provider_chillpay: 'CHILLPAY',
     merchants_pg_provider_jpay: 'JPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
+    merchants_pg_provider_ox: 'OXPAY',
     internal_noti_title: '基幹通知設定',
     internal_noti_desc: '基幹通知・PG通知ログ送信時に適用する通貨別金額加工ルールを設定します。',
     internal_noti_pg_select: 'PG（決済代行）',
@@ -2187,6 +2249,7 @@ const messages = {
     cr_filter_pg_chillpay: 'CHILLPAY',
     cr_filter_pg_jpay: 'JPAY',
     cr_filter_pg_elementpay: 'ElementPay',
+    cr_filter_pg_ox: 'OXPAY',
     cr_type_void: '無効',
     cr_type_refund: '返金',
     cr_period_recent: '期間: 直近',
@@ -3087,6 +3150,12 @@ const messages = {
       'ElementPay uses one fixed company Webhook and Result ingress. Register only the Webhook URL in EP Cabinet → Webhooks (do not register merchant Result URLs). Configure merchant Callback/Result and relayFormat only.',
     merchants_elementpay_result_hint:
       'ICOPAY payment _successUrl/_rejectUrl/_waitingUrl = Result URL. After the browser lands here, NOTI forwards to the merchant resultUrl.',
+    merchants_nav_register_ox: 'OXPAY registration',
+    merchants_ox_ingress_hint:
+      'OXPAY uses one fixed company Webhook and Result ingress. Configure merchant Callback/Result and relayFormat only.',
+    merchants_ox_result_hint:
+      'The browser Result lands on the fixed Result URL, then NOTI forwards it to the merchant resultUrl.',
+    merchants_empty_ox: 'No OXPAY merchants are registered.',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_nav_list_chillpay: 'CHILLPAY Registration',
     merchants_nav_list_jpay: 'JPAY Registration',
@@ -3269,6 +3338,10 @@ const messages = {
       'ElementPay uses fixed company Webhook/Result ingress (no ChillPay Route / JPAY MID slots). Callback/Result URLs here are where your internal system (e.g. ICOPAY pg-notify) receives notifies. Select this target when registering the ElementPay merchant.',
     internal_targets_elementpay_mid_hint:
       'ElementPay does not use a linked MID. Merchants are identified by merchantId (Comp-Id); internal delivery uses the Callback/Result URLs above.',
+    internal_targets_ox_fields_hint:
+      'OXPAY uses fixed company Webhook/Result ingress (no ChillPay Route / JPAY MID slots). Callback/Result URLs here are where your internal system (e.g. ICOPAY pg-notify) receives notifies. Select this target when registering the OXPAY merchant.',
+    internal_targets_ox_mid_hint:
+      'OXPAY does not use a linked MID. Merchants are identified by merchantId (Comp-Id); internal delivery uses the Callback/Result URLs above.',
     internal_targets_jpay_key_placeholder: 'Enter only to change (leave blank to keep)',
     internal_targets_jpay_mid: 'JPAY MID',
     internal_targets_jpay_key_col: 'JPAY Key',
@@ -3278,6 +3351,22 @@ const messages = {
     internal_targets_jpay_mid_no_profiles: 'No JPAY MIDs — enter MID under Settings → JPAY environment settings first',
     internal_targets_err_unknown_jpay_mid: 'MID is not registered in JPAY environment settings.',
     internal_targets_err_unknown_merchant: 'Unknown merchant ID. Register the merchant first.',
+    ox_settings_title: 'OXPAY integration settings',
+    ox_settings_desc:
+      'OXPAY uses one fixed Webhook URL. NOTI forwards to ICOPAY pg-notify (…/OX); merchant Callback/Result use merchant settings. API Key and Sign Key stay on ICOPAY — do not store them on NOTI.',
+    ox_settings_label_webhook: 'OXPAY Webhook URL (fixed)',
+    ox_settings_label_result: 'Browser Result URL (fixed)',
+    ox_settings_hint: 'Register only the Webhook URL above with the acquirer. Do not register merchant Result URLs there.',
+    ox_settings_no_api_key_hint: 'Do not put Mid, API Key, or Sign Key on NOTI. Keys and signatures are handled by ICOPAY.',
+    ox_settings_label_enabled: 'Enable OXPAY receive',
+    ox_settings_label_icopay_url: 'ICOPAY notify URL (pg-notify …/OX)',
+    ox_settings_icopay_url_hint:
+      'ICOPAY URL NOTI calls after an OXPAY webhook. OX_ICOPAY_NOTIFY_URL overrides this field when set.',
+    ox_settings_label_lookup_url: 'Order lookup URL (optional, for Result)',
+    ox_settings_lookup_url_hint: 'Used to match a merchant on Result. {order} may appear in the URL. Leave blank to skip.',
+    ox_settings_label_timeout: 'ICOPAY forward timeout (ms)',
+    ox_settings_env_url_override: 'OX_ICOPAY_NOTIFY_URL is set, so the URL field is read-only.',
+    ox_settings_saved_ok: 'OXPAY integration settings saved.',
     elementpay_settings_title: 'ElementPay integration settings',
     elementpay_settings_desc:
       'Register only one fixed Webhook URL in the EP Cabinet. NOTI forwards to ICOPAY pg-notify; merchant Callback/Result use merchant settings. ElementPay Merchant Key/Secret stay on ICOPAY (tb_pg_agency) — do not store them on NOTI.',
@@ -3355,9 +3444,11 @@ const messages = {
     pg_provider_chillpay: 'ChillPay',
     pg_provider_jpay: 'JPAY',
     pg_provider_elementpay: 'ElementPay',
+    pg_provider_ox: 'OXPAY',
     merchants_pg_provider_chillpay: 'CHILLPAY',
     merchants_pg_provider_jpay: 'JPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
+    merchants_pg_provider_ox: 'OXPAY',
     internal_noti_title: 'Internal Noti Settings',
     internal_noti_desc: 'Set amount conversion rules per currency for internal/PG noti.',
     internal_noti_pg_select: 'PG (Acquirer)',
@@ -3586,6 +3677,7 @@ const messages = {
     cr_filter_pg_chillpay: 'CHILLPAY',
     cr_filter_pg_jpay: 'JPAY',
     cr_filter_pg_elementpay: 'ElementPay',
+    cr_filter_pg_ox: 'OXPAY',
     cr_type_void: 'Void',
     cr_type_refund: 'Refund',
     cr_period_recent: 'Period: Last',
@@ -4507,6 +4599,12 @@ const messages = {
       'ElementPay ใช้ Webhook และ Result บริษัทแบบคงที่ 1 URL ลงทะเบียนเฉพาะ Webhook ใน EP Cabinet → Webhooks (ห้ามลง Result ของร้าน) ตั้งค่า Callback/Result และ relayFormat ของร้านเท่านั้น',
     merchants_elementpay_result_hint:
       'ICOPAY _successUrl/_rejectUrl/_waitingUrl = Result URL หลังเบราว์เซอร์มาที่นี่ จะส่งต่อไปยัง resultUrl ของร้าน',
+    merchants_nav_register_ox: 'ลงทะเบียน OXPAY',
+    merchants_ox_ingress_hint:
+      'OXPAY ใช้ Webhook และ Result บริษัทแบบคงที่ 1 URL ตั้งค่า Callback/Result และ relayFormat ของร้านเท่านั้น',
+    merchants_ox_result_hint:
+      'Result ของเบราว์เซอร์เข้า URL คงที่ แล้วส่งต่อไปยัง resultUrl ของร้าน',
+    merchants_empty_ox: 'ยังไม่มีร้าน OXPAY ที่ลงทะเบียน',
     merchants_desc: 'ตั้งค่า URL แจ้งเตือน เป้าหมายภายใน และการส่งต่อต่อร้านค้า',
     merchants_register: 'ลงทะเบียน/แก้ไข',
     merchants_list: 'ร้านค้าที่ลงทะเบียน',
@@ -4685,6 +4783,10 @@ const messages = {
       'ElementPay ใช้ Webhook/Result บริษัทแบบคงที่ ไม่มีสล็อต ChillPay Route / JPAY MID Callback/Result URL ที่นี่คือที่ระบบภายใน (เช่น ICOPAY pg-notify) รับ เมื่อลงทะเบียนร้าน ElementPay ให้เลือกเป้าหมายนี้',
     internal_targets_elementpay_mid_hint:
       'ElementPay ไม่ใช้ MID ที่เชื่อมโยง ระบุร้านด้วย merchantId (Comp-Id) การส่งภายในใช้ Callback/Result URL ด้านบน',
+    internal_targets_ox_fields_hint:
+      'OXPAY ใช้ Webhook/Result บริษัทแบบคงที่ ไม่มีสล็อต ChillPay Route / JPAY MID Callback/Result URL ที่นี่คือที่ระบบภายใน (เช่น ICOPAY pg-notify) รับ เมื่อลงทะเบียนร้าน OXPAY ให้เลือกเป้าหมายนี้',
+    internal_targets_ox_mid_hint:
+      'OXPAY ไม่ใช้ MID ที่เชื่อมโยง ระบุร้านด้วย merchantId (Comp-Id) การส่งภายในใช้ Callback/Result URL ด้านบน',
     internal_targets_jpay_key_placeholder: 'กรอกเฉพาะเมื่อต้องการเปลี่ยน (เว้นว่างเพื่อคงค่าเดิม)',
     internal_targets_jpay_mid: 'JPAY MID',
     internal_targets_jpay_key_col: 'JPAY Key',
@@ -4694,6 +4796,21 @@ const messages = {
     internal_targets_jpay_mid_no_profiles: 'ยังไม่มี MID ของ JPAY — กรอก MID ในการตั้งค่าสภาพแวดล้อม JPAY ที่การตั้งค่า',
     internal_targets_err_unknown_jpay_mid: 'MID นี้ไม่ได้อยู่ในการตั้งค่าสภาพแวดล้อม JPAY',
     internal_targets_err_unknown_merchant: 'ไม่มีรหัสร้านค้านี้ โปรดลงทะเบียนร้านค้าก่อน',
+    ox_settings_title: 'การตั้งค่าการเชื่อมต่อ OXPAY',
+    ox_settings_desc:
+      'OXPAY ใช้ Webhook URL คงที่หนึ่งรายการ NOTI ส่งต่อไปยัง ICOPAY pg-notify (…/OX) Callback/Result ของร้านใช้การตั้งค่าร้าน API Key และ Sign Key อยู่ที่ ICOPAY เท่านั้น',
+    ox_settings_label_webhook: 'OXPAY Webhook URL (คงที่)',
+    ox_settings_label_result: 'Browser Result URL (คงที่)',
+    ox_settings_hint: 'ลงทะเบียนเฉพาะ Webhook URL ด้านบนกับผู้ให้บริการ อย่าลง Result URL ของร้านที่นั่น',
+    ox_settings_no_api_key_hint: 'อย่าใส่ Mid, API Key หรือ Sign Key บน NOTI คีย์และลายเซ็นจัดการที่ ICOPAY',
+    ox_settings_label_enabled: 'เปิดรับ OXPAY',
+    ox_settings_label_icopay_url: 'URL รับของ ICOPAY (pg-notify …/OX)',
+    ox_settings_icopay_url_hint: 'URL ที่ NOTI เรียกหลังได้รับ webhook ของ OXPAY ถ้ามี OX_ICOPAY_NOTIFY_URL จะใช้ค่านั้น',
+    ox_settings_label_lookup_url: 'URL ค้นหาออเดอร์ (ไม่บังคับ, สำหรับ Result)',
+    ox_settings_lookup_url_hint: 'ใช้จับคู่ร้านตอน Result ใส่ {order} ใน URL ได้ เว้นว่างเพื่อข้าม',
+    ox_settings_label_timeout: 'หมดเวลาส่งต่อ ICOPAY (ms)',
+    ox_settings_env_url_override: 'ตั้ง OX_ICOPAY_NOTIFY_URL แล้ว ช่อง URL เป็นแบบอ่านอย่างเดียว',
+    ox_settings_saved_ok: 'บันทึกการตั้งค่า OXPAY แล้ว',
     elementpay_settings_title: 'การตั้งค่าการเชื่อมต่อ ElementPay',
     elementpay_settings_desc:
       'ลงทะเบียน Webhook URL คงที่เพียงหนึ่งรายการใน EP Cabinet เท่านั้น NOTI จะส่งต่อไปยัง ICOPAY pg-notify ส่วน Callback/Result ของร้านค้าใช้การตั้งค่าร้านค้า ElementPay Merchant Key/Secret เก็บที่ ICOPAY (tb_pg_agency) เท่านั้น — ไม่ลงทะเบียนบน NOTI',
@@ -4762,9 +4879,11 @@ const messages = {
     pg_provider_chillpay: 'ChillPay',
     pg_provider_jpay: 'JPAY',
     pg_provider_elementpay: 'ElementPay',
+    pg_provider_ox: 'OXPAY',
     merchants_pg_provider_chillpay: 'CHILLPAY',
     merchants_pg_provider_jpay: 'JPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
+    merchants_pg_provider_ox: 'OXPAY',
     internal_noti_title: 'ตั้งค่า Noti ภายใน',
     internal_noti_desc: 'ตั้งค่ากฎแปลงจำนวนตามสกุลเงินสำหรับ Noti ภายใน/PG',
     internal_noti_pg_select: 'PG',
@@ -4994,6 +5113,7 @@ const messages = {
     cr_filter_pg_chillpay: 'CHILLPAY',
     cr_filter_pg_jpay: 'JPAY',
     cr_filter_pg_elementpay: 'ElementPay',
+    cr_filter_pg_ox: 'OXPAY',
     cr_type_void: 'โมฆะ',
     cr_type_refund: 'คืนเงิน',
     cr_period_recent: 'ระยะเวลา: ล่าสุด',
@@ -5883,6 +6003,12 @@ const messages = {
       'ElementPay 的 Webhook 与 Result 入口为本社固定各 1 个。EP Cabinet → Webhooks 仅注册 Webhook URL（禁止注册商户 Result）。仅配置商户 Callback/Result 与 relayFormat。',
     merchants_elementpay_result_hint:
       'ICOPAY 支付 _successUrl/_rejectUrl/_waitingUrl = Result URL。浏览器到达后转发至商户 resultUrl。',
+    merchants_nav_register_ox: 'OXPAY 注册',
+    merchants_ox_ingress_hint:
+      'OXPAY 的 Webhook 与 Result 入口为本社固定各 1 个。仅配置商户 Callback/Result 与 relayFormat。',
+    merchants_ox_result_hint:
+      '浏览器 Result 进入固定 Result URL 后，转发至商户 resultUrl。',
+    merchants_empty_ox: '暂无已注册的 OXPAY 商户。',
     merchants_desc: '按商户配置通知URL、内部对象及是否转送/内部发送。',
     merchants_register: '注册/修改',
     merchants_list: '已注册商户',
@@ -6061,6 +6187,10 @@ const messages = {
       'ElementPay 使用本社固定 Webhook/Result 入口，无 ChillPay Route / JPAY MID 槽位。此处 Callback/Result URL 为内部系统（如 ICOPAY pg-notify）接收地址。在 ElementPay 商户注册中选择此内部对象。',
     internal_targets_elementpay_mid_hint:
       'ElementPay 不使用关联 MID。商户以 merchantId（Comp-Id）识别，内部发送使用上方 Callback/Result URL。',
+    internal_targets_ox_fields_hint:
+      'OXPAY 使用本社固定 Webhook/Result 入口，无 ChillPay Route / JPAY MID 槽位。此处 Callback/Result URL 为内部系统（如 ICOPAY pg-notify）接收地址。在 OXPAY 商户注册中选择此内部对象。',
+    internal_targets_ox_mid_hint:
+      'OXPAY 不使用关联 MID。商户以 merchantId（Comp-Id）识别，内部发送使用上方 Callback/Result URL。',
     internal_targets_jpay_key_placeholder: '仅在修改时填写（留空则保持不变）',
     internal_targets_jpay_mid: 'JPAY MID',
     internal_targets_jpay_key_col: 'JPAY Key',
@@ -6070,6 +6200,21 @@ const messages = {
     internal_targets_jpay_mid_no_profiles: '尚无 JPAY MID — 请先在环境设置 → JPAY 环境设置中填写 MID',
     internal_targets_err_unknown_jpay_mid: '该 MID 未在 JPAY 环境设置中登记。',
     internal_targets_err_unknown_merchant: '商户 ID 未注册，请先添加商户。',
+    ox_settings_title: 'OXPAY 对接设置',
+    ox_settings_desc:
+      'OXPAY 使用一个固定 Webhook URL。NOTI 接收后转发到 ICOPAY pg-notify（…/OX）；商户 Callback/Result 按商户配置处理。API Key 与 Sign Key 只保存在 ICOPAY，不要登记到 NOTI。',
+    ox_settings_label_webhook: 'OXPAY Webhook URL（固定）',
+    ox_settings_label_result: '浏览器 Result URL（固定）',
+    ox_settings_hint: '只向上游登记上方 Webhook URL。不要在上游登记商户 Result URL。',
+    ox_settings_no_api_key_hint: '不要在 NOTI 填写 Mid、API Key 或 Sign Key。密钥与签名由 ICOPAY 处理。',
+    ox_settings_label_enabled: '启用 OXPAY 接收',
+    ox_settings_label_icopay_url: 'ICOPAY 接收 URL（pg-notify …/OX）',
+    ox_settings_icopay_url_hint: 'NOTI 收到 OXPAY Webhook 后转发的 ICOPAY 地址。若设置了 OX_ICOPAY_NOTIFY_URL，以环境变量为准。',
+    ox_settings_label_lookup_url: '订单查询 URL（可选，用于 Result）',
+    ox_settings_lookup_url_hint: '用于 Result 匹配商户。URL 中可含 {order}。留空则跳过。',
+    ox_settings_label_timeout: '转发 ICOPAY 超时（ms）',
+    ox_settings_env_url_override: '已设置 OX_ICOPAY_NOTIFY_URL，URL 字段为只读。',
+    ox_settings_saved_ok: '已保存 OXPAY 对接设置。',
     elementpay_settings_title: 'ElementPay 对接设置',
     elementpay_settings_desc:
       '在 EP Cabinet 仅注册一个固定 Webhook URL。NOTI 接收后转发到 ICOPAY pg-notify；商户 Callback/Result 按商户配置处理。ElementPay Merchant Key/Secret 只保存在 ICOPAY（tb_pg_agency），不要登记到 NOTI。',
@@ -6138,9 +6283,11 @@ const messages = {
     pg_provider_chillpay: 'ChillPay',
     pg_provider_jpay: 'JPAY',
     pg_provider_elementpay: 'ElementPay',
+    pg_provider_ox: 'OXPAY',
     merchants_pg_provider_chillpay: 'CHILLPAY',
     merchants_pg_provider_jpay: 'JPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
+    merchants_pg_provider_ox: 'OXPAY',
     internal_noti_title: '内部通知设置',
     internal_noti_desc: '设置向内部/PG通知发送时按币种适用的金额加工规则。',
     internal_noti_pg_select: 'PG（代行）',
@@ -6369,6 +6516,7 @@ const messages = {
     cr_filter_pg_chillpay: 'CHILLPAY',
     cr_filter_pg_jpay: 'JPAY',
     cr_filter_pg_elementpay: 'ElementPay',
+    cr_filter_pg_ox: 'OXPAY',
     cr_type_void: '无效',
     cr_type_refund: '退款',
     cr_period_recent: '期间：最近',

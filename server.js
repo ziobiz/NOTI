@@ -18,6 +18,7 @@ const nodemailer = require('nodemailer');
 const { t } = require('./locales');
 const pgNotifyDelivery = require('./lib/pgNotifyDelivery');
 const elementPayNoti = require('./lib/elementpayNoti');
+const oxNoti = require('./lib/oxNoti');
 const opsManual = require('./lib/opsManual');
 
 const app = express();
@@ -582,6 +583,7 @@ const JPAY_PROFILES_CONFIG_PATH = path.join(CONFIG_DIR, 'jpay-profiles.json');
 const ICOPAY_AMOUNT_SETTINGS_PATH = path.join(CONFIG_DIR, 'icopay-amount-settings.json');
 const NOTI_PROVISION_CONFIG_PATH = path.join(CONFIG_DIR, 'noti-provision.json');
 const ELEMENTPAY_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'elementpay-ingress.json');
+const OX_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'ox-ingress.json');
 const TURNSTILE_CONFIG_PATH = path.join(CONFIG_DIR, 'turnstile.json');
 const TURNSTILE_SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const DEFAULT_SIDEBAR_TITLE = 'PG 노티 관리자';
@@ -1921,6 +1923,7 @@ function normalizeInternalTargetPgProvider(raw) {
     .toLowerCase();
   if (p === 'jpay') return 'jpay';
   if (p === 'elementpay' || p === 'ep') return 'elementpay';
+  if (p === 'ox' || p === 'oxpay') return 'ox';
   return 'chillpay';
 }
 
@@ -2290,6 +2293,7 @@ function buildIcopayInternalTargetsCatalog(filterRaw) {
     .toLowerCase();
   let want = '';
   if (filter === 'jpay') want = 'jpay';
+  else if (filter === 'ox' || filter === 'oxpay') want = 'ox';
   else if (filter === 'elementpay' || filter === 'ep' || filter === 'element') want = 'elementpay';
   else if (filter === 'chillpay' || filter === 'chill') want = 'chillpay';
   const list = getInternalTargetsList();
@@ -2304,7 +2308,7 @@ function buildIcopayInternalTargetsCatalog(filterRaw) {
       id: String(t.id).trim(),
       name: String(t.name || t.id).trim(),
       pgProvider: pg,
-      label: [pg === 'elementpay' ? 'ElementPay' : pg === 'jpay' ? 'JPAY' : 'ChillPay', currency, t.id, t.name]
+      label: [pg === 'ox' ? 'OXPAY' : pg === 'elementpay' ? 'ElementPay' : pg === 'jpay' ? 'JPAY' : 'ChillPay', currency, t.id, t.name]
         .filter(Boolean)
         .join(' · '),
     };
@@ -2313,8 +2317,9 @@ function buildIcopayInternalTargetsCatalog(filterRaw) {
     out.push(row);
   }
   out.sort((a, b) => {
-    const pa = a.pgProvider === 'elementpay' ? 0 : a.pgProvider === 'jpay' ? 1 : 2;
-    const pb = b.pgProvider === 'elementpay' ? 0 : b.pgProvider === 'jpay' ? 1 : 2;
+    const rank = (p) => (p === 'ox' ? 0 : p === 'elementpay' ? 1 : p === 'jpay' ? 2 : 3);
+    const pa = rank(a.pgProvider);
+    const pb = rank(b.pgProvider);
     if (pa !== pb) return pa - pb;
     return String(a.id).localeCompare(String(b.id));
   });
@@ -4776,6 +4781,1021 @@ async function handleElementPayWebhook(req, res) {
 }
 
 /** 저장값이 없을 때만 사용: 환경변수 SYSTEM_MONITOR_MONTHLY_QUOTA_GB (기본 300GB) */
+// ========== ox (OxPay Financial) — fixed Webhook + Result + provision ==========
+function loadOxIngressConfig() {
+  const file = loadJsonConfig(OX_INGRESS_CONFIG_PATH, {});
+  const fromFile = file && typeof file === 'object' ? file : {};
+  const envUrl = String(process.env.OX_ICOPAY_NOTIFY_URL || '').trim();
+  const envLookup = String(process.env.OX_ICOPAY_ORDER_LOOKUP_URL || '').trim();
+  return {
+    enabled: fromFile.enabled !== false,
+    icopayNotifyUrl: envUrl || String(fromFile.icopayNotifyUrl || '').trim(),
+    icopayNotifyUrlFromEnv: !!envUrl,
+    /** Optional: GET/POST URL with `{order}` — response JSON/header Comp-Id for Result matching */
+    icopayOrderLookupUrl: envLookup || String(fromFile.icopayOrderLookupUrl || '').trim(),
+    icopayOrderLookupUrlFromEnv: !!envLookup,
+    timeoutMs: Math.max(
+      3000,
+      Math.min(120000, Number(fromFile.timeoutMs) || Number(process.env.OX_ICOPAY_TIMEOUT_MS) || 25000),
+    ),
+    note: String(fromFile.note || '').trim(),
+  };
+}
+
+function saveOxIngressConfig(patch) {
+  const cur = loadJsonConfig(OX_INGRESS_CONFIG_PATH, {}) || {};
+  const next = {
+    enabled: patch.enabled !== undefined ? !!patch.enabled : cur.enabled !== false,
+    icopayNotifyUrl:
+      patch.icopayNotifyUrl !== undefined
+        ? String(patch.icopayNotifyUrl || '').trim()
+        : String(cur.icopayNotifyUrl || '').trim(),
+    icopayOrderLookupUrl:
+      patch.icopayOrderLookupUrl !== undefined
+        ? String(patch.icopayOrderLookupUrl || '').trim()
+        : String(cur.icopayOrderLookupUrl || '').trim(),
+    timeoutMs: Math.max(
+      3000,
+      Math.min(
+        120000,
+        Number(patch.timeoutMs != null ? patch.timeoutMs : cur.timeoutMs) || 25000,
+      ),
+    ),
+    note:
+      patch.note !== undefined
+        ? String(patch.note || '').trim()
+        : String(cur.note || '').trim() ||
+          'OXPAY Portal Webhooks → POST https://noti.icopay.net/noti/ox . Merchant Key/Secret stay on ICOPAY.',
+  };
+  saveJsonConfig(OX_INGRESS_CONFIG_PATH, next);
+  return next;
+}
+
+/** Fixed public EP ingress URLs (Cabinet Webhook + browser Result). No per-merchant slots. */
+function getOxPublicIngressUrls() {
+  const base = 'https://noti.icopay.net';
+  return {
+    oxWebhookUrl: base + '/noti/ox',
+    oxResultUrl: base + '/noti/result/ox',
+  };
+}
+
+function buildOxMerchantObject(input) {
+  const {
+    merchantId,
+    callbackUrl,
+    resultUrl,
+    routeNo,
+    internalTargetId,
+    options,
+    prev,
+    icopayMeta,
+  } = input;
+  const opts = normalizeJpayProvisionOptions(options);
+  const out = {
+    ...(prev || {}),
+    merchantId,
+    routeCallbackKey: '',
+    routeResultKey: '',
+    callbackUrl: String(callbackUrl || '').trim(),
+    resultUrl: String(resultUrl || '').trim(),
+    routeNo: String(routeNo || '').trim(),
+    internalCustomerId: '',
+    internalTargetId: String(internalTargetId || '').trim(),
+    enableRelay: opts.enableRelay,
+    enableInternal: opts.enableInternal,
+    enableDevInternal: opts.enableDevInternal,
+    enableDealmaiWebhook: opts.enableDealmaiWebhook,
+    dealmaiPartnerCode: opts.dealmaiPartnerCode,
+    relayOffForwardTarget: opts.relayOffForwardTarget,
+    relayOffInternalCallbackUrl: opts.relayOffInternalCallbackUrl,
+    relayOffInternalResultUrl: opts.relayOffInternalResultUrl,
+    relayOffDevCallbackUrl: opts.relayOffDevCallbackUrl,
+    relayOffDevResultUrl: opts.relayOffDevResultUrl,
+    relayOffDevDedicatedUse: opts.relayOffDevDedicatedUse,
+    relayFormat: opts.relayFormat,
+    jpayRouteCallbackKey: '',
+    jpayRouteResultKey: '',
+    jpayCallbackUrl: '',
+    jpayResultUrl: '',
+    merchantPgKind: 'ox',
+    chillpayRecurring: 'N',
+    resultDeliveryMode: opts.resultDeliveryMode,
+    relayEnrichmentMode: 'plain',
+  };
+  const metaNorm = normalizeIcopayProvisionMeta(icopayMeta, merchantId);
+  if (metaNorm) {
+    out.icopayProvisionMeta = metaNorm;
+    if (metaNorm.compName) {
+      out.name = metaNorm.compName;
+      out.label = metaNorm.compName;
+    }
+  }
+  return out;
+}
+
+function merchantToOxProvisionApiData(merchant, extras) {
+  const m = merchant || {};
+  const meta =
+    m.icopayProvisionMeta && typeof m.icopayProvisionMeta === 'object' ? m.icopayProvisionMeta : null;
+  const compName = String(m.name || m.label || (meta && (meta.compName || meta.compNm)) || '').trim();
+  return {
+    merchantId: m.merchantId || '',
+    name: compName || undefined,
+    icopayMeta: meta
+      ? {
+          compId: String(meta.compId || m.merchantId || '').trim() || undefined,
+          compName: String(meta.compName || meta.compNm || compName || '').trim() || undefined,
+          orgUnitId: meta.orgUnitId,
+          provisionedBy: meta.provisionedBy,
+          integrationMode: meta.integrationMode,
+        }
+      : compName
+        ? { compId: String(m.merchantId || '').trim() || undefined, compName }
+        : undefined,
+    pgKind: 'ox',
+    slot: null,
+    routeNo: String(m.routeNo || '').trim(),
+    jpayRouteCallbackKey: '',
+    jpayRouteResultKey: '',
+    pgCallbackUrl: '',
+    pgResultUrl: '',
+    icopayJpayNotifyUrl: '',
+    icopayJpayCallbackUrl: '',
+    internalTargetId: String(m.internalTargetId || '').trim(),
+    callbackUrl: String(m.callbackUrl || '').trim(),
+    resultUrl: String(m.resultUrl || '').trim(),
+    enableRelay: m.enableRelay !== false,
+    enableInternal: !!m.enableInternal,
+    enableDevInternal: !!m.enableDevInternal,
+    enableDealmaiWebhook: !!m.enableDealmaiWebhook,
+    dealmaiPartnerCode: String(m.dealmaiPartnerCode || '').trim(),
+    relayOffForwardTarget: normalizeMerchantRelayOffForwardTarget(m.relayOffForwardTarget),
+    relayOffDevCallbackUrl: String(m.relayOffDevCallbackUrl || '').trim(),
+    relayOffDevResultUrl: String(m.relayOffDevResultUrl || '').trim(),
+    relayOffDevDedicatedUse: !!m.relayOffDevDedicatedUse,
+    resultDeliveryMode: String(m.resultDeliveryMode || 'auto').trim(),
+    relayFormat: String(m.relayFormat || 'raw').trim(),
+    ...getOxPublicIngressUrls(),
+    created: extras && extras.created === false ? false : true,
+    provisionRequestId: extras && extras.provisionRequestId ? String(extras.provisionRequestId) : undefined,
+  };
+}
+
+function oxMerchantProvisionSnapshot(rec) {
+  if (!rec || inferMerchantPgKind(rec) !== 'ox') return null;
+  return {
+    routeNo: String(rec.routeNo || '').trim(),
+    callbackUrl: String(rec.callbackUrl || '').trim(),
+    resultUrl: String(rec.resultUrl || '').trim(),
+    internalTargetId: String(rec.internalTargetId || '').trim(),
+    enableRelay: !!rec.enableRelay,
+    enableInternal: !!rec.enableInternal,
+    enableDevInternal: !!rec.enableDevInternal,
+    relayFormat: String(rec.relayFormat || 'raw').trim(),
+    resultDeliveryMode: String(rec.resultDeliveryMode || 'auto').trim(),
+    enableDealmaiWebhook: !!rec.enableDealmaiWebhook,
+    dealmaiPartnerCode: String(rec.dealmaiPartnerCode || '').trim(),
+    name: String(rec.name || rec.label || '').trim(),
+  };
+}
+
+function provisionOxMerchant(body, meta) {
+  const requestId = meta && meta.requestId ? String(meta.requestId).trim() : '';
+  const clientIp = (meta && meta.clientIp) || '';
+  const actor = (meta && meta.actor) || 'icopay-provision';
+  if (!body || typeof body !== 'object') {
+    return { ok: false, status: 400, errorCode: 'INVALID_REQUEST' };
+  }
+  const merchantId = normalizeProvisionMerchantId(body.merchantId);
+  if (!merchantId) {
+    return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  }
+  const pgKind = String(body.pgKind || '').toLowerCase().trim();
+  if (pgKind !== 'ox') {
+    return { ok: false, status: 400, errorCode: pgKind ? 'INVALID_PG_KIND' : 'INVALID_REQUEST' };
+  }
+  const internalTargetId = String(body.internalTargetId || '').trim();
+  if (!internalTargetId || !INTERNAL_TARGETS.has(internalTargetId)) {
+    return { ok: false, status: 400, errorCode: 'INVALID_INTERNAL_TARGET' };
+  }
+  const optionsIn = body.options && typeof body.options === 'object' ? { ...body.options } : {};
+  if (body.enableDealmaiWebhook != null && optionsIn.enableDealmaiWebhook == null) {
+    optionsIn.enableDealmaiWebhook = body.enableDealmaiWebhook;
+  }
+  if (body.dealmaiPartnerCode != null && !optionsIn.dealmaiPartnerCode) {
+    optionsIn.dealmaiPartnerCode = body.dealmaiPartnerCode;
+  }
+  const options = normalizeJpayProvisionOptions(optionsIn);
+  const callbackUrl = String(body.callbackUrl || '').trim();
+  const resultUrl = String(body.resultUrl || '').trim();
+  if (options.enableRelay && (!callbackUrl || !resultUrl)) {
+    return { ok: false, status: 400, errorCode: 'MERCHANT_URL_REQUIRED' };
+  }
+  const existing = MERCHANTS.get(merchantId) || null;
+  if (existing && inferMerchantPgKind(existing) !== 'ox') {
+    return { ok: false, status: 409, errorCode: 'MERCHANT_ALREADY_EXISTS' };
+  }
+  const desiredRecord = buildOxMerchantObject({
+    merchantId,
+    callbackUrl,
+    resultUrl,
+    routeNo: body.routeNo,
+    internalTargetId,
+    options,
+    prev: existing || {},
+    icopayMeta: resolveIcopayMetaFromProvisionBody(body, merchantId),
+  });
+  const desiredSnap = oxMerchantProvisionSnapshot(desiredRecord);
+  const existingSnap = oxMerchantProvisionSnapshot(existing);
+  if (existingSnap && JSON.stringify(existingSnap) === JSON.stringify(desiredSnap)) {
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        success: true,
+        data: merchantToOxProvisionApiData(existing, {
+          created: false,
+          provisionRequestId: requestId || undefined,
+        }),
+      },
+      idempotent: true,
+    };
+  }
+  MERCHANTS.set(merchantId, desiredRecord);
+  try {
+    saveMerchants();
+  } catch (e) {
+    MERCHANTS.delete(merchantId);
+    if (existing) MERCHANTS.set(merchantId, existing);
+    return {
+      ok: false,
+      status: 503,
+      errorCode: 'NOTI_CONFIG_LOCKED',
+      details: { message: (e && e.message) || String(e) },
+    };
+  }
+  appendConfigChangeLog({
+    type: existing ? 'merchant_update' : 'merchant_create',
+    source: 'icopay-provision',
+    actor,
+    clientIp,
+    merchantId,
+    before: existing,
+    after: MERCHANTS.get(merchantId),
+    provisionRequestId: requestId || undefined,
+    icopayMeta: MERCHANTS.get(merchantId) && MERCHANTS.get(merchantId).icopayProvisionMeta,
+  });
+  return {
+    ok: true,
+    status: existing ? 200 : 201,
+    body: {
+      success: true,
+      data: merchantToOxProvisionApiData(MERCHANTS.get(merchantId), {
+        created: !existing,
+        provisionRequestId: requestId || undefined,
+      }),
+    },
+  };
+}
+
+function getOxMerchantProvision(merchantId) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const m = MERCHANTS.get(id);
+  if (!m || inferMerchantPgKind(m) !== 'ox') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  return {
+    ok: true,
+    status: 200,
+    body: { success: true, data: merchantToOxProvisionApiData(m, { created: false }) },
+  };
+}
+
+function updateOxMerchantProvision(merchantId, body, meta) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const existing = MERCHANTS.get(id);
+  if (!existing || inferMerchantPgKind(existing) !== 'ox') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  const merged = { ...(body || {}), merchantId: id, pgKind: 'ox' };
+  if (merged.internalTargetId == null) merged.internalTargetId = existing.internalTargetId;
+  if (merged.callbackUrl == null) merged.callbackUrl = existing.callbackUrl;
+  if (merged.resultUrl == null) merged.resultUrl = existing.resultUrl;
+  if (!merged.options || typeof merged.options !== 'object') {
+    merged.options = {
+      enableRelay: existing.enableRelay !== false,
+      enableInternal: !!existing.enableInternal,
+      enableDevInternal: !!existing.enableDevInternal,
+      relayFormat: existing.relayFormat || 'raw',
+      resultDeliveryMode: existing.resultDeliveryMode || 'auto',
+      enableDealmaiWebhook: !!existing.enableDealmaiWebhook,
+      dealmaiPartnerCode: existing.dealmaiPartnerCode || '',
+    };
+  }
+  if (!merged.icopayMeta && existing.icopayProvisionMeta) {
+    merged.icopayMeta = existing.icopayProvisionMeta;
+  }
+  return provisionOxMerchant(merged, meta);
+}
+
+function deleteOxMerchantProvision(merchantId, force, meta) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const existing = MERCHANTS.get(id);
+  if (!existing || inferMerchantPgKind(existing) !== 'ox') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  MERCHANTS.delete(id);
+  try {
+    saveMerchants();
+  } catch (e) {
+    MERCHANTS.set(id, existing);
+    return {
+      ok: false,
+      status: 503,
+      errorCode: 'NOTI_CONFIG_LOCKED',
+      details: { message: (e && e.message) || String(e) },
+    };
+  }
+  appendConfigChangeLog({
+    type: 'merchant_delete',
+    source: 'icopay-provision',
+    actor: (meta && meta.actor) || 'icopay-provision',
+    clientIp: (meta && meta.clientIp) || '',
+    merchantId: id,
+    before: existing,
+    after: null,
+    force: !!force,
+  });
+  return {
+    ok: true,
+    status: 200,
+    body: { success: true, data: { deleted: true, merchantId: id, pgKind: 'ox' } },
+  };
+}
+
+function findOxMerchantByCompId(compId) {
+  const id = String(compId || '').trim();
+  if (!id) return null;
+  const direct = MERCHANTS.get(id);
+  if (direct && inferMerchantPgKind(direct) === 'ox') {
+    return { merchantId: id, merchant: direct };
+  }
+  for (const [mid, m] of MERCHANTS.entries()) {
+    if (inferMerchantPgKind(m) !== 'ox') continue;
+    const meta = m.icopayProvisionMeta && typeof m.icopayProvisionMeta === 'object' ? m.icopayProvisionMeta : {};
+    if (String(meta.compId || '').trim() === id) {
+      return { merchantId: mid, merchant: m };
+    }
+  }
+  return null;
+}
+
+function extractOxBrowserPayload(req) {
+  const incomingContentType =
+    (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
+  let body = req.body && typeof req.body === 'object' ? { ...req.body } : {};
+  if (Object.keys(body).length === 0 && req.rawBodyBuffer && req.rawBodyBuffer.length) {
+    const parsed = parseNotiRawBodyToObject(req.rawBodyBuffer, incomingContentType);
+    if (Object.keys(parsed).length) body = parsed;
+  }
+  if (req.query && typeof req.query === 'object') {
+    for (const [k, v] of Object.entries(req.query)) {
+      if (v === undefined || v === null || v === '') continue;
+      if (body[k] === undefined || body[k] === null || body[k] === '') {
+        body[k] = Array.isArray(v) ? v[0] : v;
+      }
+    }
+  }
+  const order = String(
+    body.order || body.orderNo || body.OrderNo || body.orderid || body.orderID || body.orderId || '',
+  ).trim();
+  const compId = String(
+    body.compId ||
+      body.CompId ||
+      body.merchantId ||
+      body.MerchantId ||
+      body.memberid ||
+      body.MID ||
+      '',
+  ).trim();
+  const method = oxNoti.normalizeOxMethod(
+    body.method || body.oxReturn || body.paymentStatus || body.status || '',
+  );
+  return { body, order, compId, method, incomingContentType };
+}
+
+/** Recent webhook logs: order → Ox merchant (Comp-Id path already logged as merchantId). */
+function findOxMerchantByOrderFromLogs(order) {
+  const o = String(order || '').trim();
+  if (!o) return null;
+  const logs = loadPgNotiLogsSafe();
+  const start = Math.max(0, logs.length - 8000);
+  for (let i = logs.length - 1; i >= start; i--) {
+    const L = logs[i];
+    if (!L || L.pgProvider !== 'ox') continue;
+    if (L.routeKey !== 'ox/webhook' && L.routeKey !== 'ox/result') continue;
+    const b = L.body && typeof L.body === 'object' ? L.body : {};
+    const orderInLog = String(
+      b.order || b.orderNo || b.OrderNo || b.orderid || b.orderID || b.OrderNo || '',
+    ).trim();
+    if (!orderInLog || orderInLog !== o) continue;
+    const mid = String(L.merchantId || '').trim();
+    if (!mid) continue;
+    const m = MERCHANTS.get(mid);
+    if (m && inferMerchantPgKind(m) === 'ox') {
+      return { merchantId: mid, merchant: m, via: 'log' };
+    }
+    const byComp = findOxMerchantByCompId(mid);
+    if (byComp) return { ...byComp, via: 'log' };
+  }
+  return null;
+}
+
+async function lookupOxCompIdFromIcopay(order) {
+  const cfg = loadOxIngressConfig();
+  const template = String(cfg.icopayOrderLookupUrl || '').trim();
+  if (!template || !order) return '';
+  const url = template.split('{order}').join(encodeURIComponent(String(order)));
+  try {
+    const res = await axios.get(url, {
+      timeout: Math.min(cfg.timeoutMs || 25000, 15000),
+      validateStatus: () => true,
+      headers: { Accept: 'application/json' },
+    });
+    const fromHdr = oxNoti.headerGetIgnoreCase(res.headers || {}, 'x-icopay-comp-id');
+    if (fromHdr) return fromHdr;
+    let data = res.data;
+    if (typeof data === 'string') {
+      try {
+        data = JSON.parse(data);
+      } catch (_) {
+        data = null;
+      }
+    }
+    if (data && typeof data === 'object') {
+      const nested = data.data && typeof data.data === 'object' ? data.data : data;
+      const id = String(
+        nested.compId || nested.CompId || nested.merchantId || nested.MerchantId || '',
+      ).trim();
+      if (id) return id;
+    }
+  } catch (e) {
+    console.warn('[ox] order lookup failed', e.message || e);
+  }
+  return '';
+}
+
+async function resolveOxMerchantForBrowserResult(payload) {
+  if (payload.compId) {
+    const byComp = findOxMerchantByCompId(payload.compId);
+    if (byComp) return { ...byComp, via: 'compId' };
+  }
+  if (payload.order) {
+    const lookedUp = await lookupOxCompIdFromIcopay(payload.order);
+    if (lookedUp) {
+      const byLookup = findOxMerchantByCompId(lookedUp);
+      if (byLookup) return { ...byLookup, via: 'icopayLookup' };
+    }
+    const byLog = findOxMerchantByOrderFromLogs(payload.order);
+    if (byLog) return byLog;
+  }
+  return null;
+}
+
+function sendOxResultFallbackPage(res, reason) {
+  const msg = String(reason || 'merchant_not_found');
+  const html = `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>Payment</title>
+<style>body{font-family:system-ui,sans-serif;max-width:420px;margin:48px auto;padding:0 16px;color:#111827;line-height:1.5}h1{font-size:1.25rem;margin:0 0 12px}p{margin:0 0 8px;color:#4b5563;font-size:14px}</style></head><body>
+<h1>결제 처리 안내</h1>
+<p>결제가 처리되었습니다. 가맹점 결과 페이지로 연결하지 못했습니다.</p>
+<p style="font-size:12px;color:#9ca3af;">ref: ${escapeHtmlAttr(msg)}</p>
+</body></html>`;
+  return res.status(200).type('html').send(html);
+}
+
+/**
+ * Browser Result ingress: EP → GET|POST /noti/result/ox → merchant resultUrl
+ * RESULT 전달 모드는 ChillPay/JPAY 와 동일:
+ * - GET: 브라우저 GET 복귀 — 302+GET (POST+302 이면 폼 POST). PG 서버 노티 경로와 동일 정책.
+ * - POST(브라우저): 가맹 resultUrl 서버 릴레이 후
+ *   AUTO/AUTOT → 302+GET, POST → JSON만, POST+302 → HTML 폼 POST
+ */
+async function handleOxBrowserResult(req, res) {
+  const payload = extractOxBrowserPayload(req);
+  const { body, order, method } = payload;
+  console.log(
+    '[ox] result',
+    'method=',
+    method || '-',
+    'order=',
+    order || '-',
+    'compId=',
+    payload.compId || '-',
+    'http=',
+    req.method,
+  );
+
+  const match = await resolveOxMerchantForBrowserResult(payload);
+  const notifyBody = stampOxCompIdOnBody(
+    oxNoti.mapOxToMerchantNotifyBody(body, method || 'pay'),
+    (match && match.merchantId) || payload.compId || '',
+  );
+
+  if (!match || !match.merchant) {
+    appendPgNotiLog({
+      routeKey: 'ox/result',
+      merchantId: String(payload.compId || '').trim(),
+      kind: 'result',
+      body: notifyBody,
+      rawBody: undefined,
+      targetUrl: '',
+      contentType: payload.incomingContentType || '',
+      env: APP_ENV === 'test' ? 'sandbox' : 'production',
+      pgProvider: 'ox',
+      relayStatus: 'fail',
+      relayFailReason: 'merchant_not_found',
+    });
+    return sendOxResultFallbackPage(res, order ? 'order_unmatched' : 'missing_order');
+  }
+
+  const { merchantId, merchant } = match;
+  const enableRelay = merchant.enableRelay !== false;
+  let targetUrl = resolveJpayResultBrowserForwardUrl(merchant, enableRelay) || String(merchant.resultUrl || '').trim();
+  const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
+  const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
+  if (targetUrl && isOurTestReturnUrl(targetUrl, reqHost)) {
+    targetUrl =
+      baseUrl + '/noti/test-result' + (targetUrl.includes('?') ? targetUrl.slice(targetUrl.indexOf('?')) : '');
+  }
+
+  if (!targetUrl) {
+    appendPgNotiLog({
+      routeKey: 'ox/result',
+      merchantId,
+      kind: 'result',
+      body: notifyBody,
+      targetUrl: '',
+      contentType: payload.incomingContentType || '',
+      env: APP_ENV === 'test' ? 'sandbox' : 'production',
+      pgProvider: 'ox',
+      relayStatus: 'fail',
+      relayFailReason: 'resultUrl_empty',
+    });
+    return sendOxResultFallbackPage(res, 'resultUrl_empty');
+  }
+
+  const isGet = String(req.method || 'GET').toUpperCase() === 'GET';
+  const apiKeyHeader =
+    (req.get && (req.get('Api-Key') || req.get('api-key') || req.get('X-Api-Key'))) ||
+    (req.headers && (req.headers['api-key'] || req.headers['x-api-key'])) ||
+    '';
+  function isLikelyBrowserResultReturnEp() {
+    if (apiKeyHeader && String(apiKeyHeader).trim().length > 0) return false;
+    const accept = (req.get && req.get('Accept')) || (req.headers && req.headers.accept) || '';
+    const ua = (req.get && req.get('User-Agent')) || (req.headers && req.headers['user-agent']) || '';
+    if (typeof accept === 'string' && accept.toLowerCase().includes('text/html')) return true;
+    const uaLower = String(ua).toLowerCase();
+    if (/mozilla|chrome|safari|msie|edge|opera|firefox/i.test(uaLower)) return true;
+    return false;
+  }
+
+  // —— GET: ChillPay/JPAY GET Result 와 동일 (서버 릴레이 없이 브라우저만 전달) ——
+  if (isGet) {
+    appendPgNotiLog({
+      routeKey: 'ox/result',
+      merchantId,
+      kind: 'result',
+      body: notifyBody,
+      targetUrl,
+      contentType: payload.incomingContentType || '',
+      env: APP_ENV === 'test' ? 'sandbox' : 'production',
+      pgProvider: 'ox',
+      relayStatus: 'ok',
+      relayFailReason: '',
+      relayFormatUsed: merchantForcesResultBrowserRedirect(merchant) ? 'browser_post' : 'browser_302',
+    });
+    if (merchantForcesResultBrowserRedirect(merchant)) {
+      return sendMerchantResultBrowserPostFormPage(res, targetUrl, notifyBody);
+    }
+    try {
+      const url = new URL(targetUrl.trim());
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+      }
+      return res.redirect(302, url.toString());
+    } catch (e) {
+      return res.redirect(302, targetUrl.trim());
+    }
+  }
+
+  // —— POST: ChillPay/JPAY RESULT(브라우저 POST) 와 동일 — 서버 릴레이 후 모드별 브라우저 전달 ——
+  const relayFormat =
+    merchant.relayFormat === 'json' || merchant.relayFormat === 'form' ? merchant.relayFormat : 'raw';
+  let relaySuccess = false;
+  let relayFailReason = '';
+  let relayOpts;
+  if (relayFormat === 'json') {
+    relayOpts = { contentType: 'application/json', rawBody: undefined };
+  } else if (relayFormat === 'form') {
+    relayOpts = { contentType: 'application/x-www-form-urlencoded', rawBody: undefined };
+  } else {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(notifyBody || {})) {
+      if (v === undefined || v === null) continue;
+      params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+    }
+    relayOpts = {
+      contentType: 'application/x-www-form-urlencoded',
+      rawBody: params.toString(),
+    };
+  }
+
+  if (enableRelay && targetUrl) {
+    try {
+      console.log(
+        '[ox][result] 가맹점 릴레이:',
+        merchantId,
+        targetUrl,
+        'relayFormat=',
+        relayFormat,
+      );
+      let relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+      relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+      if (!relaySuccess) {
+        relayFailReason =
+          `HTTP ${relayRes.status}` +
+          (relayRes.data && typeof relayRes.data === 'string'
+            ? ': ' + String(relayRes.data).slice(0, 200)
+            : '');
+        await new Promise((r) => setTimeout(r, 2000));
+        relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      }
+    } catch (err) {
+      relayFailReason = err.code || err.message || String(err);
+      try {
+        await new Promise((r) => setTimeout(r, 2000));
+        const retryRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = retryRes.status >= 200 && retryRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      } catch (err2) {
+        if (!relayFailReason) relayFailReason = err2.code || err2.message || String(err2);
+      }
+    }
+  } else if (enableRelay && !targetUrl) {
+    relayFailReason = '가맹점 URL 없음';
+  }
+
+  const formatUsed = relaySuccess ? relayFormat : undefined;
+  appendPgNotiLog({
+    routeKey: 'ox/result',
+    merchantId,
+    kind: 'result',
+    body: notifyBody,
+    targetUrl,
+    contentType: payload.incomingContentType || '',
+    env: APP_ENV === 'test' ? 'sandbox' : 'production',
+    pgProvider: 'ox',
+    relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
+    relayFailReason: enableRelay ? relayFailReason || '' : '',
+    relayFormatUsed: formatUsed,
+  });
+
+  const skipBrowser = merchantSkipsResultBrowserRedirect(merchant);
+  const forcePost = merchantForcesResultBrowserRedirect(merchant);
+  const browserLike = isLikelyBrowserResultReturnEp();
+  const shouldRedirectResultBrowser =
+    (forcePost || browserLike) && !skipBrowser;
+
+  if (shouldRedirectResultBrowser) {
+    if (forcePost) {
+      return sendMerchantResultBrowserPostFormPage(res, targetUrl, notifyBody);
+    }
+    try {
+      const url = new URL(targetUrl.trim());
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+      }
+      return res.redirect(302, url.toString());
+    } catch (e) {
+      return res.redirect(302, targetUrl.trim());
+    }
+  }
+
+  // POST 모드(no_browser_redirect): 릴레이만 하고 JSON 종료 — ChillPay/JPAY 동일
+  return res.status(200).json({ ok: true, relay: relaySuccess });
+}
+
+async function forwardOxToIcopay(rawBodyStr, contentType, attempt) {
+  const cfg = loadOxIngressConfig();
+  if (!cfg.enabled) {
+    return { ok: false, status: 503, data: 'Ox ingress disabled', headers: {} };
+  }
+  if (!cfg.icopayNotifyUrl) {
+    return { ok: false, status: 503, data: 'Ox ICOPAY notify URL not configured', headers: {} };
+  }
+  const headers = {
+    'Content-Type':
+      contentType && String(contentType).trim()
+        ? String(contentType).split(';')[0].trim() + '; charset=utf-8'
+        : 'application/x-www-form-urlencoded; charset=utf-8',
+  };
+  applyIcopayPgNotifyIngressHeaders(headers, cfg.icopayNotifyUrl, attempt || 1);
+  if (!headers['X-Icopay-Notify-Delivery']) {
+    headers['X-Icopay-Notify-Delivery'] = (attempt || 1) <= 1 ? 'LIVE' : 'RETRY';
+    headers['X-Noti-Attempt'] = String(Math.max(1, Math.floor(Number(attempt) || 1)));
+  }
+  try {
+    const res = await axios.post(cfg.icopayNotifyUrl, rawBodyStr || '', {
+      headers,
+      timeout: cfg.timeoutMs,
+      validateStatus: () => true,
+      responseType: 'text',
+      transformResponse: [(d) => d],
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+    return {
+      ok: res.status >= 200 && res.status < 300,
+      status: res.status,
+      data: res.data,
+      headers: res.headers || {},
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      status: 502,
+      data: (e && e.message) || String(e),
+      headers: {},
+      error: e,
+    };
+  }
+}
+
+async function relayOxMerchantNotify(merchantId, merchant, notifyBody, epRaw, incomingContentType) {
+  const enableRelay = merchant.enableRelay !== false;
+  const targetUrl = String(merchant.callbackUrl || '').trim();
+  const relayFormat =
+    merchant.relayFormat === 'json' || merchant.relayFormat === 'form' ? merchant.relayFormat : 'raw';
+  let relaySuccess = false;
+  let relayFailReason = '';
+  if (enableRelay && targetUrl) {
+    let relayOpts;
+    if (relayFormat === 'json') {
+      relayOpts = { contentType: 'application/json', rawBody: undefined };
+    } else if (relayFormat === 'form') {
+      relayOpts = { contentType: 'application/x-www-form-urlencoded', rawBody: undefined };
+    } else {
+      // raw: JPAY-compatible schema as form (do not dump EP-only original alone)
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v === undefined || v === null) continue;
+        params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      relayOpts = {
+        contentType: 'application/x-www-form-urlencoded',
+        rawBody: params.toString(),
+      };
+    }
+    try {
+      let relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+      relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+      if (!relaySuccess) {
+        relayFailReason =
+          `HTTP ${relayRes.status}` +
+          (relayRes.data && typeof relayRes.data === 'string' ? ': ' + String(relayRes.data).slice(0, 200) : '');
+        await new Promise((r) => setTimeout(r, 2000));
+        relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      }
+    } catch (err) {
+      relayFailReason = err.code || err.message || String(err);
+      try {
+        await new Promise((r) => setTimeout(r, 2000));
+        const retryRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = retryRes.status >= 200 && retryRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      } catch (err2) {
+        if (!relayFailReason) relayFailReason = err2.code || err2.message || String(err2);
+      }
+    }
+  } else if (enableRelay && !targetUrl) {
+    relayFailReason = '가맹점 URL 없음';
+  }
+
+  const pgLogEntry = {
+    routeKey: 'ox/webhook',
+    merchantId,
+    kind: 'callback',
+    body: notifyBody,
+    rawBody: epRaw || undefined,
+    targetUrl: enableRelay ? targetUrl || '' : '',
+    contentType: incomingContentType,
+    env: 'live',
+    relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
+    relayFailReason: relaySuccess ? '' : relayFailReason || '',
+    relayFormatUsed: enableRelay && relaySuccess ? relayFormat : undefined,
+    pgProvider: 'ox',
+  };
+  appendPgNotiLog(pgLogEntry);
+
+  // Internal / dev (same flags as JPAY)
+  if (merchant.enableInternal !== false) {
+    try {
+      const internalUrl = resolveJpayInternalNotiDeliveryUrl(
+        merchant,
+        enableRelay,
+        'callback',
+        normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget),
+      );
+      if (internalUrl) {
+        const pack = {
+          body: notifyBody,
+          contentType: 'application/x-www-form-urlencoded',
+          rawBody: undefined,
+        };
+        await relayJpayRawWithRetry(internalUrl, pack, merchant);
+      }
+    } catch (e) {
+      console.warn('[ox] internal notify failed', e.message || e);
+    }
+  }
+
+  // DEALMAI (same as JPAY): enableDealmaiWebhook on merchant + global webhook URL
+  let epWebhookResult = { skipped: true };
+  if (merchantShouldDeliverDealmaiWebhook(merchant)) {
+    try {
+      epWebhookResult = await dispatchDealmaiWebhookForNoti(merchant, {
+        body: notifyBody,
+        rawBody: epRaw || undefined,
+        contentType: incomingContentType,
+        pgProvider: 'ox',
+        merchantId,
+        kind: 'callback',
+        env: 'live',
+        routeKey: 'ox/webhook',
+      });
+    } catch (err) {
+      console.error('[ox] DEALMAI webhook failed', err.message || err);
+      epWebhookResult = { ok: false, skipped: false };
+    }
+  }
+  mergeDealmaiWebhookIntoPgNotiLog(pgLogEntry, merchant, epWebhookResult);
+
+  return { relaySuccess, relayFailReason, dealmai: epWebhookResult };
+}
+
+async function handleOxWebhook(req, res) {
+  const cfg = loadOxIngressConfig();
+  const rawBodyStr = req.rawBodyBuffer ? req.rawBodyBuffer.toString('utf8') : '';
+  const incomingContentType =
+    (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
+  let body = req.body;
+  if (!body || typeof body !== 'object') body = {};
+  if (Object.keys(body).length === 0 && req.rawBodyBuffer && req.rawBodyBuffer.length) {
+    const parsed = parseNotiRawBodyToObject(req.rawBodyBuffer, incomingContentType);
+    if (Object.keys(parsed).length) body = parsed;
+  }
+  const method = oxNoti.normalizeOxMethod(body.method);
+  const order = String(body.order || body.orderNo || '').trim();
+  console.log('[ox] webhook', 'method=', method || '-', 'order=', order || '-');
+
+  if (!cfg.enabled) {
+    return res.status(503).send('Ox ingress disabled');
+  }
+  if (!cfg.icopayNotifyUrl) {
+    console.error('[ox] icopayNotifyUrl not configured');
+    return res.status(503).send('Ox ICOPAY URL not configured');
+  }
+
+  const forwardBody =
+    rawBodyStr && String(rawBodyStr).trim()
+      ? rawBodyStr
+      : new URLSearchParams(
+          Object.entries(body).reduce((acc, [k, v]) => {
+            if (v != null && v !== '') acc[k] = String(v);
+            return acc;
+          }, {}),
+        ).toString();
+
+  const ico = await forwardOxToIcopay(forwardBody, incomingContentType, 1);
+  const compIdHdr = oxNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-comp-id');
+  const orderHdr = oxNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-order-no');
+
+  /*
+   * CRITICAL: EP check/pay must receive ICOPAY {response,hash} immediately.
+   * Comp-Id lookup + merchant relay must NEVER delay or rewrite the EP response —
+   * delayed 205 is a primary cause of Cabinet "disputable / reached limit of attempts for pay callback".
+   */
+  const outStatus = ico.status && Number.isFinite(Number(ico.status)) ? Number(ico.status) : 502;
+  const outCt =
+    oxNoti.headerGetIgnoreCase(ico.headers, 'content-type') || 'application/json; charset=utf-8';
+  const outBody = ico.data != null ? ico.data : '';
+  let icoEpStatus = '';
+  try {
+    const parsed =
+      typeof outBody === 'string' && outBody.trim().startsWith('{') ? JSON.parse(outBody) : null;
+    if (parsed && parsed.response && parsed.response.status != null) {
+      icoEpStatus = String(parsed.response.status);
+    }
+  } catch (_) {
+    /* ignore parse */
+  }
+  console.log(
+    '[ox] EP passthrough',
+    'method=',
+    method || '-',
+    'order=',
+    order || '-',
+    'http=',
+    outStatus,
+    'epStatus=',
+    icoEpStatus || '-',
+    'bytes=',
+    typeof outBody === 'string' ? outBody.length : 0,
+  );
+  res.status(outStatus);
+  res.set('Content-Type', outCt);
+  // Pass-through body only — do not rewrite Ox {response,hash}
+  res.send(outBody);
+
+  // Merchant notify AFTER EP ack (fire-and-forget); resolve Comp-Id here so EP path stays fast
+  if (oxNoti.oxShouldNotifyMerchant(method)) {
+    setImmediate(() => {
+      Promise.resolve()
+        .then(async () => {
+          let compId =
+            compIdHdr ||
+            String(body.compId || body.CompId || body.merchantId || body.MerchantId || body['Comp-Id'] || '').trim() ||
+            extractOxCompIdFromBody(body);
+          const orderForComp = orderHdr || order;
+          if (!compId && orderForComp) {
+            try {
+              compId = await lookupOxCompIdFromIcopay(orderForComp);
+            } catch (_) {
+              /* ignore */
+            }
+          }
+          if (!compId && orderForComp) {
+            const byLog = findOxMerchantByOrderFromLogs(orderForComp);
+            if (byLog && byLog.merchantId) compId = byLog.merchantId;
+          }
+          const match = findOxMerchantByCompId(compId);
+          if (!match) {
+            console.warn(
+              '[ox] merchant notify skipped: no Comp-Id match',
+              'compId=',
+              compId || '(none)',
+              'order=',
+              orderHdr || order || '-',
+            );
+            const notifyBodyFail = stampOxCompIdOnBody(
+              oxNoti.mapOxToMerchantNotifyBody(body, method),
+              compId,
+            );
+            appendPgNotiLog({
+              routeKey: 'ox/webhook',
+              merchantId: compId || '',
+              kind: 'callback',
+              body: notifyBodyFail,
+              rawBody: forwardBody || undefined,
+              targetUrl: '',
+              contentType: incomingContentType,
+              env: 'live',
+              relayStatus: 'fail',
+              relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing X-Icopay-Comp-Id',
+              pgProvider: 'ox',
+            });
+            return;
+          }
+          const notifyBody = stampOxCompIdOnBody(
+            oxNoti.mapOxToMerchantNotifyBody(body, method),
+            match.merchantId || compId,
+          );
+          try {
+            await relayOxMerchantNotify(
+              match.merchantId,
+              match.merchant,
+              notifyBody,
+              forwardBody,
+              incomingContentType,
+            );
+          } catch (e) {
+            console.error('[ox] merchant relay error', e.message || e);
+          }
+        })
+        .catch((e) => console.error('[ox] merchant notify async error', e && e.message ? e.message : e));
+    });
+  }
+}
+
+/** 저장값이 없을 때만 사용: 환경변수 SYSTEM_MONITOR_MONTHLY_QUOTA_GB (기본 300GB) */
 function systemMonitorDefaultQuotaGb() {
   const n = Number(process.env.SYSTEM_MONITOR_MONTHLY_QUOTA_GB);
   if (Number.isFinite(n) && n >= 1) return Math.min(1000000, Math.floor(n));
@@ -6123,25 +7143,28 @@ function appendPgNotiLog(entry) {
 /** 노티 로그 행의 PG(대행사): 명시 필드 또는 routeKey(jpay/… · elementpay/…) */
 function getNotiLogPgAcquirer(log) {
   const explicit = log && log.pgProvider != null ? String(log.pgProvider).toLowerCase().trim() : '';
+  if (explicit === 'ox' || explicit === 'oxpay') return 'ox';
   if (explicit === 'elementpay' || explicit === 'ep') return 'elementpay';
   if (explicit === 'jpay') return 'jpay';
   if (explicit === 'chillpay' || explicit === 'chill') return 'chillpay';
   const rk = log && log.routeKey != null ? String(log.routeKey) : '';
+  if (rk.startsWith('ox/') || rk === 'ox') return 'ox';
   if (rk.startsWith('elementpay/') || rk === 'elementpay') return 'elementpay';
   if (rk.startsWith('jpay/')) return 'jpay';
   return 'chillpay';
 }
 
-/** ICOPAY 금액 규칙 키: ElementPay는 JPAY 호환 스키마 → jpay 규칙 사용 */
+/** ICOPAY 금액 규칙 키: ElementPay·ox는 JPAY 호환 스키마 → jpay 규칙 사용 */
 function icopayAmountPgKeyFromLog(log) {
   const p = getNotiLogPgAcquirer(log);
-  return p === 'jpay' || p === 'elementpay' ? 'jpay' : 'chillpay';
+  return p === 'jpay' || p === 'elementpay' || p === 'ox' ? 'jpay' : 'chillpay';
 }
 
 function normalizeAdminPgSource(raw) {
   const p = String(raw || '')
     .toLowerCase()
     .trim();
+  if (p === 'ox' || p === 'oxpay') return 'ox';
   if (p === 'elementpay' || p === 'ep' || p === 'element') return 'elementpay';
   if (p === 'jpay') return 'jpay';
   if (p === 'chillpay' || p === 'chill') return 'chillpay';
@@ -6150,6 +7173,7 @@ function normalizeAdminPgSource(raw) {
 
 function acquirerLabelFromLog(locale, log) {
   const pg = getNotiLogPgAcquirer(log);
+  if (pg === 'ox') return t(locale, 'pg_provider_ox') || 'OXPAY';
   if (pg === 'elementpay') return t(locale, 'pg_provider_elementpay') || 'ElementPay';
   if (pg === 'jpay') return t(locale, 'pg_provider_jpay') || 'JPAY';
   return t(locale, 'pg_provider_chillpay') || 'ChillPay';
@@ -6158,10 +7182,12 @@ function acquirerLabelFromLog(locale, log) {
 /** 전산/개발 노티 로그 행의 PG: 저장된 pgProvider 또는 전산 대상 설정 */
 function getInternalLogPgAcquirer(log) {
   const explicit = log && log.pgProvider != null ? String(log.pgProvider).toLowerCase().trim() : '';
+  if (explicit === 'ox' || explicit === 'oxpay') return 'ox';
   if (explicit === 'elementpay' || explicit === 'ep') return 'elementpay';
   if (explicit === 'jpay') return 'jpay';
   // JPAY 노티 경로로 쌓인 로그( Soonpay 미러·가맹점 전산 POST ): 예전 행은 pgProvider 없이 저장됨 → JPAY 탭에서 안 보이던 문제 방지
   const rk = log && log.routeKey != null ? String(log.routeKey) : '';
+  if (rk.startsWith('ox/') || rk === 'ox') return 'ox';
   if (rk.startsWith('elementpay/') || rk === 'elementpay') return 'elementpay';
   if (rk.startsWith('jpay/')) return 'jpay';
   if (log && (log.jpayRawRelay || log.jpaySoonpayMirror)) return 'jpay';
@@ -6169,6 +7195,7 @@ function getInternalLogPgAcquirer(log) {
   if (tid && INTERNAL_TARGETS.has(tid)) {
     const it = INTERNAL_TARGETS.get(tid);
     const ip = it && String(it.pgProvider || '').toLowerCase();
+    if (ip === 'ox' || ip === 'oxpay') return 'ox';
     if (ip === 'elementpay' || ip === 'ep') return 'elementpay';
     if (ip === 'jpay') return 'jpay';
   }
@@ -6867,6 +7894,7 @@ function normalizeDealmaiPgProvider(raw) {
   const p = String(raw || '')
     .toLowerCase()
     .trim();
+  if (p === 'ox' || p === 'oxpay') return 'ox';
   if (p === 'elementpay' || p === 'ep' || p === 'element') return 'elementpay';
   if (p === 'jpay') return 'jpay';
   return 'chillpay';
@@ -6875,7 +7903,7 @@ function normalizeDealmaiPgProvider(raw) {
 function classifyDealmaiWebhookEvent(body, pgProvider) {
   if (!body || typeof body !== 'object') return 'unknown';
   // ElementPay merchant notify uses JPAY-compatible returncode schema
-  if (pgProvider === 'jpay' || pgProvider === 'elementpay') {
+  if (pgProvider === 'jpay' || pgProvider === 'elementpay' || pgProvider === 'ox') {
     const rc = String(body.returncode ?? body.returnCode ?? '').trim();
     if (rc === '00' || rc === '0') return 'paid';
     if (rc) return 'fail';
@@ -6926,7 +7954,7 @@ function countryFromDealmaiCurrency(currency) {
 }
 
 function pickDealmaiAmount(body, pgProvider) {
-  if (pgProvider === 'jpay' || pgProvider === 'elementpay') {
+  if (pgProvider === 'jpay' || pgProvider === 'elementpay' || pgProvider === 'ox') {
     const v = body.total_fee ?? body.amount ?? body.Amount;
     if (v != null && String(v).trim() !== '') {
       const n = Number(v);
@@ -6985,7 +8013,7 @@ function buildDealmaiWebhookPayload(merchant, opts) {
     String((merchant && merchant.dealmaiCountry) || '').trim() ||
     countryFromDealmaiCurrency(currency);
   const eventOverride = o.eventOverride ? String(o.eventOverride).trim().toLowerCase() : '';
-  const paygw = pgProvider === 'jpay' || pgProvider === 'elementpay' ? 'JPAY' : 'CHILLP';
+  const paygw = pgProvider === 'jpay' || pgProvider === 'elementpay' || pgProvider === 'ox' ? 'JPAY' : 'CHILLP';
   const outbound = {
     event: mapDealmaiOnthelineEvent(body, pgProvider, eventOverride),
     transaction_id: pickDealmaiTransactionId(body),
@@ -7274,7 +8302,7 @@ function appendConfigChangeLog(entry) {
   }
   try {
     const action = String((entry && entry.action) || 'settings');
-    if (/settings|chillpay|jpay|site_|provision|elementpay|internal_noti|dealmai|timezone|redirect/i.test(action)) {
+    if (/settings|chillpay|jpay|site_|provision|elementpay|ox|internal_noti|dealmai|timezone|redirect/i.test(action)) {
       opsManual.recordSettingsChange(OPS_MANUAL_VERSION_PATH, {
         action,
         detail: (entry && (entry.detail || entry.action)) || action,
@@ -7546,7 +8574,7 @@ function notiHaystackPgResultLog(log, locale, logPg) {
   const amtRaw = body.Amount != null ? body.Amount : body.amount != null ? body.amount : '';
   const amtDisplay = amtRaw !== '' && amtRaw != null ? String(formatAmountWithSeparator(amtRaw)) : '';
   const currency = String(formatCurrencyForDisplay(body.Currency || body.currency) || body.Currency || body.currency || '');
-  const pgK = logPg === 'jpay' || logPg === 'elementpay' ? 'jpay' : 'chillpay';
+  const pgK = logPg === 'jpay' || logPg === 'elementpay' || logPg === 'ox' ? 'jpay' : 'chillpay';
   const amtRawIcopay = getNotiBodyAmountRawForIcopay(body, pgK);
   let icopayStr = '';
   if (amtRawIcopay !== '' && amtRawIcopay != null) {
@@ -7555,7 +8583,7 @@ function notiHaystackPgResultLog(log, locale, logPg) {
   }
   const payOk = isSuccessPaymentBody(body);
   const outcomeLabel =
-    logPg === 'elementpay'
+    logPg === 'elementpay' || logPg === 'ox'
       ? payOk
         ? t(locale, 'status_ok')
         : t(locale, 'status_fail')
@@ -7566,10 +8594,11 @@ function notiHaystackPgResultLog(log, locale, logPg) {
           : relayStatus === 'skip'
             ? t(locale, 'status_skip')
             : relayStatus;
+  const payOutcomePg = logPg === 'elementpay' || logPg === 'ox';
   const failReason =
-    logPg === 'elementpay' && payOk
+    payOutcomePg && payOk
       ? ''
-      : logPg === 'elementpay' && !payOk
+      : payOutcomePg && !payOk
         ? String(body.status_message || body.statusMessage || log.relayFailReason || '').trim()
         : String(log.relayFailReason || '');
   const resendKindVal = isCancelNotiBody(body) ? 'cancel' : 'payment';
@@ -11540,6 +12569,41 @@ app.post('/noti/result/elementpay', async (req, res) => {
 
 // ========== POST /noti/:routeKey (기존 형태 유지) ==========
 // 예: /noti/rount_c1
+
+// ========== ox (OxPay) fixed Webhook + Result ==========
+app.post('/noti/ox', async (req, res) => {
+  try {
+    await handleOxWebhook(req, res);
+  } catch (e) {
+    console.error('[ox] webhook handler error', e.message || e);
+    if (!res.headersSent) return res.status(500).send('ox handler error');
+  }
+});
+app.post('/noti/webhook/ox', async (req, res) => {
+  try {
+    await handleOxWebhook(req, res);
+  } catch (e) {
+    console.error('[ox] webhook handler error', e.message || e);
+    if (!res.headersSent) return res.status(500).send('ox handler error');
+  }
+});
+app.get('/noti/result/ox', async (req, res) => {
+  try {
+    await handleOxBrowserResult(req, res);
+  } catch (e) {
+    console.error('[ox] result handler error', e.message || e);
+    if (!res.headersSent) return sendOxResultFallbackPage(res, 'handler_error');
+  }
+});
+app.post('/noti/result/ox', async (req, res) => {
+  try {
+    await handleOxBrowserResult(req, res);
+  } catch (e) {
+    console.error('[ox] result handler error', e.message || e);
+    if (!res.headersSent) return sendOxResultFallbackPage(res, 'handler_error');
+  }
+});
+
 app.post('/noti/:routeKey', async (req, res) => {
   const routeKey = req.params.routeKey;
   await handleNotiRequest(routeKey, req, res);
@@ -11927,7 +12991,7 @@ function createAdminSidebarNavHelpers(locale, currentPath, req, member) {
           k = new URLSearchParams(qs).get('kind') || 'chillpay';
         } catch (_) {}
       }
-      if (k !== 'jpay' && k !== 'elementpay') k = 'chillpay';
+      if (k !== 'jpay' && k !== 'elementpay' && k !== 'ox') k = 'chillpay';
       isActive = k === kind;
     }
     const clsAttr = isActive ? ' class="active"' : '';
@@ -11946,7 +13010,8 @@ function buildAdminSidebarNavItems(h) {
         ['/admin/merchants'],
         merchantsRegisterLink('chillpay', t(locale, 'merchants_nav_register_chillpay')) +
           merchantsRegisterLink('jpay', t(locale, 'merchants_nav_register_jpay')) +
-          merchantsRegisterLink('elementpay', t(locale, 'merchants_nav_register_elementpay')),
+          merchantsRegisterLink('elementpay', t(locale, 'merchants_nav_register_elementpay')) +
+          merchantsRegisterLink('ox', t(locale, 'merchants_nav_register_ox')),
         'merchants',
       ),
     );
@@ -12763,7 +13828,7 @@ function parseListColViewSaveBody(body) {
   const pageId = String((body && body.pageId) || '').trim();
   const pg = String((body && body.pg) || '').trim();
   if (!pageId) return null;
-  if (pg !== 'jpay' && pg !== 'chillpay' && pg !== 'elementpay' && pg !== 'none') return null;
+  if (pg !== 'jpay' && pg !== 'chillpay' && pg !== 'elementpay' && pg !== 'ox' && pg !== 'none') return null;
   let enabledKeys = null;
   if (body && body.enabledKeys != null) {
     if (Array.isArray(body.enabledKeys)) enabledKeys = body.enabledKeys.map((k) => String(k).trim()).filter(Boolean);
@@ -13223,6 +14288,67 @@ function renderElementPayIngressSettingsCard(locale, query) {
     </div>`;
 }
 
+function renderOxIngressSettingsCard(locale, query) {
+  const esc = (s) =>
+    String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/"/g, '&quot;');
+  const cfg = loadOxIngressConfig();
+  const urls = getOxPublicIngressUrls();
+  const q = query || {};
+  let inlineAlert = '';
+  if (q.oxIngressSaved === '1') {
+    inlineAlert = `<div class="alert alert-ok" style="margin-bottom:12px;">${esc(t(locale, 'ox_settings_saved_ok'))}</div>`;
+  }
+  const confirmSave = String(t(locale, 'merchants_confirm_save') || 'Save?').replace(/'/g, "\\'");
+  const envUrlNote = cfg.icopayNotifyUrlFromEnv
+    ? `<p class="admin-page-desc" style="color:#b45309;">${esc(t(locale, 'ox_settings_env_url_override'))}</p>`
+    : '';
+  return `<div class="card card-chillpay" style="margin-top:18px;border:1px solid #fed7aa;background:#fff7ed;">
+      <h2 style="margin-top:0;color:#9a3412;">${esc(t(locale, 'ox_settings_title'))}</h2>
+      <p class="admin-page-desc">${esc(t(locale, 'ox_settings_desc'))}</p>
+      ${inlineAlert}
+      <div style="margin:12px 0;padding:12px 14px;background:#ffedd5;border:1px solid #fdba74;border-radius:8px;font-size:13px;">
+        <div style="margin-bottom:8px;"><strong>${esc(t(locale, 'ox_settings_label_webhook'))}</strong>
+          <code style="display:block;margin-top:4px;word-break:break-all;background:#fff;padding:6px 8px;border-radius:6px;">${esc(urls.oxWebhookUrl)}</code>
+        </div>
+        <div><strong>${esc(t(locale, 'ox_settings_label_result'))}</strong>
+          <code style="display:block;margin-top:4px;word-break:break-all;background:#fff;padding:6px 8px;border-radius:6px;">${esc(urls.oxResultUrl)}</code>
+        </div>
+        <p class="admin-page-desc" style="margin:10px 0 0;">${esc(t(locale, 'ox_settings_hint'))}</p>
+      </div>
+      <p class="admin-page-desc">${esc(t(locale, 'ox_settings_no_api_key_hint'))}</p>
+      <form method="post" action="/admin/settings/ox-ingress" onsubmit="return confirm('${confirmSave}');">
+        <label style="display:flex;align-items:center;gap:8px;margin-top:12px;">
+          <input type="checkbox" name="enabled" value="on"${cfg.enabled ? ' checked' : ''} />
+          ${esc(t(locale, 'ox_settings_label_enabled'))}
+        </label>
+        <label style="margin-top:14px;display:block;font-size:14px;">
+          ${esc(t(locale, 'ox_settings_label_icopay_url'))}
+          <input type="url" name="icopayNotifyUrl" value="${esc(cfg.icopayNotifyUrl)}" ${cfg.icopayNotifyUrlFromEnv ? 'readonly' : ''}
+            style="width:100%;max-width:720px;margin-top:4px;padding:8px 10px;box-sizing:border-box;border-radius:6px;border:1px solid #d1d5db;font-family:monospace;font-size:12px;${cfg.icopayNotifyUrlFromEnv ? 'background:#f3f4f6;' : ''}"
+            placeholder="https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/{token}/OX" />
+        </label>
+        ${envUrlNote}
+        <p class="admin-page-desc">${esc(t(locale, 'ox_settings_icopay_url_hint'))}</p>
+        <label style="margin-top:12px;display:block;font-size:14px;">
+          ${esc(t(locale, 'ox_settings_label_lookup_url'))}
+          <input type="url" name="icopayOrderLookupUrl" value="${esc(cfg.icopayOrderLookupUrl)}" ${cfg.icopayOrderLookupUrlFromEnv ? 'readonly' : ''}
+            style="width:100%;max-width:720px;margin-top:4px;padding:8px 10px;box-sizing:border-box;border-radius:6px;border:1px solid #d1d5db;font-family:monospace;font-size:12px;"
+            placeholder="https://…/order-lookup?order={order}" />
+        </label>
+        <p class="admin-page-desc">${esc(t(locale, 'ox_settings_lookup_url_hint'))}</p>
+        <label style="margin-top:12px;display:block;font-size:14px;">
+          ${esc(t(locale, 'ox_settings_label_timeout'))}
+          <input type="number" name="timeoutMs" min="3000" max="120000" step="1000" value="${Number(cfg.timeoutMs) || 25000}"
+            style="width:140px;margin-top:4px;padding:8px 10px;box-sizing:border-box;border-radius:6px;border:1px solid #d1d5db;" />
+        </label>
+        <button type="submit" style="margin-top:16px;background:#9a3412;">${esc(t(locale, 'common_save'))}</button>
+      </form>
+    </div>`;
+}
+
 function renderIcopaySettingsCard(locale) {
   const q = (v) => (v != null && typeof v === 'string' ? String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '');
   const codes = ['392', '840', '410', '764'];
@@ -13635,6 +14761,7 @@ app.get('/admin/settings', requireAuth, requireSettingsOrRedirect, requirePage('
           '</button></div></form></div>'
           + renderJpayEnvironmentCard(locale, req.query || {})
           + renderElementPayIngressSettingsCard(locale, req.query || {})
+          + renderOxIngressSettingsCard(locale, req.query || {})
           + '<div class="card card-chillpay"><h2>' + t(locale, 'chillpay_time_title') + '</h2><p class="admin-page-desc">' + t(locale, 'chillpay_time_desc') + '</p>'
           + '<form method="post" action="/admin/settings/chillpay-time" onsubmit="return confirm(\'' + (t(locale, 'chillpay_time_confirm_save') || '').replace(/'/g, "\\'") + '\');">'
           + renderChillpayTimezoneSection(locale, c)
@@ -13801,6 +14928,23 @@ app.post('/admin/settings/elementpay-ingress', requireAuth, requireSettingsOrRed
   }
   saveElementPayIngressConfig(patch);
   return res.redirect('/admin/settings?epIngressSaved=1');
+});
+
+app.post('/admin/settings/ox-ingress', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
+  const body = req.body || {};
+  const enabled = body.enabled === 'on' || body.enabled === '1' || body.enabled === true;
+  const patch = {
+    enabled,
+    timeoutMs: Number(body.timeoutMs) || 25000,
+  };
+  if (!String(process.env.OX_ICOPAY_NOTIFY_URL || '').trim()) {
+    patch.icopayNotifyUrl = body.icopayNotifyUrl != null ? String(body.icopayNotifyUrl) : '';
+  }
+  if (!String(process.env.OX_ICOPAY_ORDER_LOOKUP_URL || '').trim()) {
+    patch.icopayOrderLookupUrl = body.icopayOrderLookupUrl != null ? String(body.icopayOrderLookupUrl) : '';
+  }
+  saveOxIngressConfig(patch);
+  return res.redirect('/admin/settings?oxIngressSaved=1');
 });
 
 app.post('/admin/settings/jpay-profiles/add', requireAuth, requireSettingsOrRedirect, requirePage('settings'), (req, res) => {
@@ -14937,9 +16081,12 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       ? t(locale, 'merchants_nav_register_jpay')
       : registerKind === 'elementpay'
         ? t(locale, 'merchants_nav_register_elementpay')
-        : t(locale, 'merchants_nav_register_chillpay');
+        : registerKind === 'ox'
+          ? t(locale, 'merchants_nav_register_ox')
+          : t(locale, 'merchants_nav_register_chillpay');
   const registerJpay = registerKind === 'jpay';
   const registerElementPay = registerKind === 'elementpay';
+  const registerOx = registerKind === 'ox';
 
   const sortType = (req.query.sort || 'recent').toString();
   const sortedEntries = getSortedMerchantEntries(sortType).filter(
@@ -14962,7 +16109,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       ? t(locale, 'merchants_empty_jpay') || t(locale, 'merchants_empty')
       : registerKind === 'elementpay'
         ? t(locale, 'merchants_empty_elementpay') || t(locale, 'merchants_empty')
-        : t(locale, 'merchants_empty_chillpay') || t(locale, 'merchants_empty');
+        : registerKind === 'ox'
+          ? t(locale, 'merchants_empty_ox') || t(locale, 'merchants_empty')
+          : t(locale, 'merchants_empty_chillpay') || t(locale, 'merchants_empty');
   const merchantsListQueryBase = `kind=${registerKind}`;
   const merchantsSortHref = (sort) => `/admin/merchants?${merchantsListQueryBase}&sort=${sort}`;
   const merchantsColResizeTitle = escAttr(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절');
@@ -15052,13 +16201,15 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <td>${m.internalCustomerId || ''}</td>
         <td>${internalTargetId}</td>
         <td class="cell-pg-acquirer" style="font-weight:600;color:${
-          listPg === 'jpay' ? '#7c3aed' : listPg === 'elementpay' ? '#0f766e' : '#0369a1'
+          listPg === 'jpay' ? '#7c3aed' : listPg === 'elementpay' ? '#0f766e' : listPg === 'ox' ? '#9a3412' : '#0369a1'
         };">${
           listPg === 'jpay'
             ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
             : listPg === 'elementpay'
               ? (t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay')
-              : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
+              : listPg === 'ox'
+                ? (t(locale, 'merchants_pg_provider_ox') || 'OXPAY')
+                : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
         }</td>
         <td class="cell-noti-mode">${merchantNotiStyleCellHtml(locale, m)}</td>
         <td>${String(merchantChillpayRecurringCell(m))
@@ -15241,13 +16392,19 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <p class="admin-page-desc">${t(locale, 'merchants_subscription_service_hint')}</p>
         </div>
         <input type="hidden" name="merchantPgKind" id="merchant-pg-kind-hidden" value="${registerKind}" />
+        <div id="merch-pg-ox-block" style="display:${registerOx ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;">
+          <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_ox_ingress_hint')}</p>
+          <div style="margin-top:8px;font-size:12px;color:#9a3412;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/ox</div>
+          <div style="margin-top:6px;font-size:12px;color:#9a3412;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/ox</div>
+          <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_ox_result_hint')}</p>
+        </div>
         <div id="merch-pg-elementpay-block" style="display:${registerElementPay ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;">
           <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_elementpay_ingress_hint')}</p>
           <div style="margin-top:8px;font-size:12px;color:#065f46;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/elementpay</div>
           <div style="margin-top:6px;font-size:12px;color:#065f46;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/elementpay</div>
           <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_elementpay_result_hint')}</p>
         </div>
-        <div id="merch-pg-chillpay-block" style="display:${registerJpay || registerElementPay ? 'none' : 'block'};">
+        <div id="merch-pg-chillpay-block" style="display:${registerJpay || registerElementPay || registerOx ? 'none' : 'block'};">
         <label>
           ${t(locale, 'merchants_label_chillpay_pg_slot_no')}
           <div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap;">
@@ -15499,6 +16656,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       var blockChill = document.getElementById('merch-pg-chillpay-block');
       var blockJpay = document.getElementById('merch-pg-jpay-block');
       var blockEp = document.getElementById('merch-pg-elementpay-block');
+      var blockOx = document.getElementById('merch-pg-ox-block');
       var cbPreview = document.getElementById('callback-url-preview');
       var rsPreview = document.getElementById('result-url-preview');
       var cbCopyBtn = document.getElementById('copy-callback-url');
@@ -15524,6 +16682,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       }
       function isMerchantElementPay() {
         return pgKindHidden && pgKindHidden.value === 'elementpay';
+      }
+      function isMerchantOx() {
+        return pgKindHidden && pgKindHidden.value === 'ox';
       }
       function merchantPgKindNow() {
         return (pgKindHidden && pgKindHidden.value) || 'chillpay';
@@ -15647,10 +16808,13 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var kind = merchantPgKindNow();
         var j = kind === 'jpay';
         var ep = kind === 'elementpay';
-        if (blockChill) blockChill.style.display = j || ep ? 'none' : 'block';
+        var ox = kind === 'ox';
+        var fixedIngress = ep || ox;
+        if (blockChill) blockChill.style.display = j || fixedIngress ? 'none' : 'block';
         if (blockJpay) blockJpay.style.display = j ? 'block' : 'none';
         if (blockEp) blockEp.style.display = ep ? 'block' : 'none';
-        if (chillSlotNo) chillSlotNo.disabled = !!(j || ep);
+        if (blockOx) blockOx.style.display = ox ? 'block' : 'none';
+        if (chillSlotNo) chillSlotNo.disabled = !!(j || fixedIngress);
         if (jpaySlotNo) jpaySlotNo.disabled = !j;
         var wrapRoute = document.getElementById('merch-chillpay-route-fields');
         var routeNoWrap = document.getElementById('merch-route-no-wrap');
@@ -15660,19 +16824,19 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var rn = document.getElementById('merchant-route-no');
         var cid = document.getElementById('merchant-internal-customer-id');
         var subWrap = document.getElementById('merch-subscription-service-wrap');
-        if (wrapRoute) wrapRoute.style.display = ep ? 'none' : 'block';
-        if (routeNoWrap) routeNoWrap.style.display = ep ? 'none' : 'block';
-        if (cidWrap) cidWrap.style.display = j || ep ? 'none' : 'block';
-        if (chillRouteHint) chillRouteHint.style.display = j || ep ? 'none' : 'block';
+        if (wrapRoute) wrapRoute.style.display = fixedIngress ? 'none' : 'block';
+        if (routeNoWrap) routeNoWrap.style.display = fixedIngress ? 'none' : 'block';
+        if (cidWrap) cidWrap.style.display = j || fixedIngress ? 'none' : 'block';
+        if (chillRouteHint) chillRouteHint.style.display = j || fixedIngress ? 'none' : 'block';
         if (jpayRouteHint) jpayRouteHint.style.display = j ? 'block' : 'none';
         if (rn) {
           rn.readOnly = true;
-          rn.disabled = !!ep;
+          rn.disabled = !!fixedIngress;
         }
-        if (cid) cid.disabled = !!(j || ep);
-        if (subWrap) subWrap.style.display = j || ep ? 'none' : 'block';
+        if (cid) cid.disabled = !!(j || fixedIngress);
+        if (subWrap) subWrap.style.display = j || fixedIngress ? 'none' : 'block';
         var enrichSelPg = document.getElementById('merchant-relay-enrichment');
-        if (enrichSelPg && (j || ep)) {
+        if (enrichSelPg && (j || fixedIngress)) {
           enrichSelPg.value = 'plain';
         }
         syncRouteNoAuto();
@@ -15816,7 +16980,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var internalCustomerInput = form.querySelector('input[name="internalCustomerId"]');
         var pgKindRaw = (button.dataset.merchantPgKind || 'chillpay').toLowerCase();
         var pgKind =
-          pgKindRaw === 'jpay' ? 'jpay' : pgKindRaw === 'elementpay' ? 'elementpay' : 'chillpay';
+          pgKindRaw === 'jpay' ? 'jpay' : pgKindRaw === 'elementpay' ? 'elementpay' : pgKindRaw === 'ox' || pgKindRaw === 'oxpay' ? 'ox' : 'chillpay';
         if (pgKindHidden) pgKindHidden.value = pgKind;
         var registerHeadingEl = document.getElementById('merchant-register-section');
         if (registerHeadingEl) {
@@ -15825,7 +16989,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
               ? '${(t(locale, 'merchants_nav_register_jpay') || 'JPAY 등록').replace(/'/g, "\\'")}'
               : pgKind === 'elementpay'
                 ? '${(t(locale, 'merchants_nav_register_elementpay') || 'ElementPay 등록').replace(/'/g, "\\'")}'
-                : '${(t(locale, 'merchants_nav_register_chillpay') || 'CHILLPAY 등록').replace(/'/g, "\\'")}';
+                : pgKind === 'ox'
+                  ? '${(t(locale, 'merchants_nav_register_ox') || 'OXPAY 등록').replace(/'/g, "\\'")}'
+                  : '${(t(locale, 'merchants_nav_register_chillpay') || 'CHILLPAY 등록').replace(/'/g, "\\'")}';
         }
         syncPgBlocks();
         var relayCheckbox = form.querySelector('input[name="enableRelay"]');
@@ -15934,6 +17100,7 @@ function parseMerchantsRegisterKind(req) {
   const raw = req && req.query && req.query.kind ? String(req.query.kind).toLowerCase().trim() : '';
   if (raw === 'jpay') return 'jpay';
   if (raw === 'elementpay' || raw === 'ep') return 'elementpay';
+  if (raw === 'ox' || raw === 'oxpay') return 'ox';
   return 'chillpay';
 }
 
@@ -15941,6 +17108,7 @@ function merchantsRegisterKindUrl(kind) {
   const k = String(kind || '').toLowerCase();
   if (k === 'jpay') return '/admin/merchants?kind=jpay';
   if (k === 'elementpay') return '/admin/merchants?kind=elementpay';
+  if (k === 'ox' || k === 'oxpay') return '/admin/merchants?kind=ox';
   return '/admin/merchants?kind=chillpay';
 }
 
@@ -15950,7 +17118,15 @@ function merchantsRegisterKindUrl(kind) {
 function inferMerchantPgKind(m) {
   if (!m || typeof m !== 'object') return 'chillpay';
   const saved = String(m.merchantPgKind || '').toLowerCase().trim();
-  if (saved === 'jpay' || saved === 'chillpay' || saved === 'elementpay') return saved;
+  if (
+    saved === 'jpay' ||
+    saved === 'chillpay' ||
+    saved === 'elementpay' ||
+    saved === 'ox' ||
+    saved === 'oxpay'
+  ) {
+    return saved === 'oxpay' ? 'ox' : saved;
+  }
   const jpayCb = String(m.jpayRouteCallbackKey || '').trim();
   const jpayRs = String(m.jpayRouteResultKey || '').trim();
   if (jpayCb || jpayRs) return 'jpay';
@@ -15959,14 +17135,17 @@ function inferMerchantPgKind(m) {
   if (chillCb || chillRs) return 'chillpay';
   const rn = String(m.routeNo || '').trim();
   if (/^j\d+$/i.test(rn)) return 'jpay';
+  if (rn.toLowerCase() === 'ox') return 'ox';
+  if (rn.toLowerCase() === 'elementpay') return 'elementpay';
   const tid = String(m.internalTargetId || '').trim();
   if (tid && INTERNAL_TARGETS.has(tid)) {
     const pg = String(INTERNAL_TARGETS.get(tid).pgProvider || '').toLowerCase().trim();
-    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay') return pg;
+    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay' || pg === 'ox' || pg === 'oxpay') {
+      return pg === 'oxpay' ? 'ox' : pg;
+    }
   }
   return 'chillpay';
 }
-
 function resolveMerchantListPgAcquirer(m) {
   return inferMerchantPgKind(m);
 }
@@ -15974,7 +17153,7 @@ function resolveMerchantListPgAcquirer(m) {
 /** 가맹점 목록: ChillPay 결제 방식(A/B). JPAY/ElementPay는 표시용 대시 */
 function merchantChillpayPayModeLabel(locale, m) {
   const pg = resolveMerchantListPgAcquirer(m);
-  if (pg === 'jpay' || pg === 'elementpay') return t(locale, 'merchants_mode_jpay_dash');
+  if (pg === 'jpay' || pg === 'elementpay' || pg === 'ox') return t(locale, 'merchants_mode_jpay_dash');
   const cb = String(m.routeCallbackKey || '').trim();
   if (isChillpayRedirectHostedPayment(cb)) return t(locale, 'merchants_mode_a_redirect');
   return t(locale, 'merchants_mode_b_inline');
@@ -15983,7 +17162,7 @@ function merchantChillpayPayModeLabel(locale, m) {
 /** 가맹점 목록: Recurring Y/N (ChillPay만; JPAY/EP는 —) */
 function merchantChillpayRecurringCell(m) {
   const pg = resolveMerchantListPgAcquirer(m);
-  if (pg === 'jpay' || pg === 'elementpay') return '—';
+  if (pg === 'jpay' || pg === 'elementpay' || pg === 'ox') return '—';
   return m.chillpayRecurring === 'Y' ? 'Y' : 'N';
 }
 
@@ -16213,12 +17392,18 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
   const origId = (originalMerchantId || '').trim();
   const pgKindRaw = String(rawPgKind || '').toLowerCase().trim();
   const pgKind =
-    pgKindRaw === 'jpay' ? 'jpay' : pgKindRaw === 'elementpay' ? 'elementpay' : 'chillpay';
+    pgKindRaw === 'jpay'
+      ? 'jpay'
+      : pgKindRaw === 'elementpay'
+        ? 'elementpay'
+        : pgKindRaw === 'ox' || pgKindRaw === 'oxpay'
+          ? 'ox'
+          : 'chillpay';
   let chillCb = '';
   let chillRs = '';
   let jpayCb = '';
   let jpayRs = '';
-  if (pgKind === 'elementpay') {
+  if (pgKind === 'elementpay' || pgKind === 'ox') {
     // EP: no PG slot URLs — merchant callback/result only
   } else if (pgKind === 'jpay') {
     const slot =
@@ -16297,13 +17482,15 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
       : null;
   const rnManual = String(routeNo || '').trim();
   const rnSaved =
-    pgKind === 'jpay'
-      ? rnManual || (jpaySlotSaved ? jpayRouteTokenForSlot(jpaySlotSaved) : '')
-      : rnManual || (chillCbN ? String(chillCbN) : '');
+    pgKind === 'ox'
+      ? rnManual || 'ox'
+      : pgKind === 'jpay'
+        ? rnManual || (jpaySlotSaved ? jpayRouteTokenForSlot(jpaySlotSaved) : '')
+        : rnManual || (chillCbN ? String(chillCbN) : '');
   const icSaved = pgKind === 'jpay' ? '' : String(internalCustomerId || '').trim();
   const recRaw = String(rawChillpayRecurring || '').trim().toUpperCase();
   const chillpayRecurringYn =
-    pgKind === 'jpay' || pgKind === 'elementpay' ? 'N' : recRaw === 'Y' ? 'Y' : 'N';
+    pgKind === 'jpay' || pgKind === 'elementpay' || pgKind === 'ox' ? 'N' : recRaw === 'Y' ? 'Y' : 'N';
   const relayOffForwardSaved = enableRelayOn
     ? ''
     : normalizeMerchantRelayOffForwardTarget(req.body && req.body.relayOffForwardTarget);
@@ -16325,7 +17512,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
       : '';
   const relayOffDevDedicatedSaved =
     !enableRelayOn && relayOffForwardSaved === 'dev_internal' && req.body && req.body.relayOffDevDedicatedUse === 'on';
-  if ((pgKind === 'jpay' || pgKind === 'elementpay') && relayOffDevDedicatedSaved) {
+  if ((pgKind === 'jpay' || pgKind === 'elementpay' || pgKind === 'ox') && relayOffDevDedicatedSaved) {
     const probeMerchant = {
       internalTargetId: internalTargetId || '',
       relayOffDevCallbackUrl: relayOffDevCbSaved,
@@ -16342,7 +17529,35 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
   }
   const enableDevInternalSaved = enableDevInternal === 'on' || relayOffDevDedicatedSaved;
   let merchantRecord;
-  if (pgKind === 'elementpay') {
+  if (pgKind === 'ox') {
+    merchantRecord = buildOxMerchantObject({
+      merchantId,
+      callbackUrl: cbSaved,
+      resultUrl: rsSaved,
+      routeNo: rnSaved,
+      internalTargetId,
+      options: {
+        enableRelay: enableRelayOn,
+        enableInternal: enableInternal === 'on',
+        enableDevInternal: enableDevInternalSaved,
+        relayFormat: fmt,
+        resultDeliveryMode: resultDeliveryModeSaved,
+        enableDealmaiWebhook: enableDealmaiWebhook === 'on',
+        dealmaiPartnerCode: String(rawDealmaiPartnerCode || '').trim(),
+        relayOffForwardTarget: relayOffForwardSaved,
+        relayOffInternalCallbackUrl: relayOffInternalCbSaved,
+        relayOffInternalResultUrl: relayOffInternalRsSaved,
+        relayOffDevCallbackUrl: relayOffDevCbSaved,
+        relayOffDevResultUrl: relayOffDevRsSaved,
+        relayOffDevDedicatedUse: relayOffDevDedicatedSaved,
+      },
+      prev,
+      icopayMeta: {
+        compId: merchantId,
+        compName: String((prev && (prev.name || prev.label)) || '').trim() || undefined,
+      },
+    });
+  } else if (pgKind === 'elementpay') {
     merchantRecord = buildElementPayMerchantObject({
       merchantId,
       callbackUrl: cbSaved,
@@ -16519,9 +17734,11 @@ app.post('/api/v1/icopay/merchants/provision', (req, res) => {
     actor: 'icopay-provision',
   };
   const result =
-    pgKindIn === 'elementpay'
-      ? provisionElementPayMerchant(req.body, provisionMeta)
-      : provisionJpayMerchant(req.body, provisionMeta);
+    pgKindIn === 'ox' || pgKindIn === 'oxpay'
+      ? provisionOxMerchant(req.body, provisionMeta)
+      : pgKindIn === 'elementpay'
+        ? provisionElementPayMerchant(req.body, provisionMeta)
+        : provisionJpayMerchant(req.body, provisionMeta);
   if (!result.ok) {
     return sendProvisionJson(
       res,
@@ -16543,13 +17760,15 @@ app.get('/api/v1/icopay/merchants/:merchantId', (req, res) => {
     return sendProvisionJson(res, auth.status, { success: false, errorCode: auth.errorCode }, locale);
   }
   const pgKind = String(req.query.pgKind || '').toLowerCase().trim();
-  if (pgKind !== 'jpay' && pgKind !== 'elementpay') {
+  if (pgKind !== 'jpay' && pgKind !== 'elementpay' && pgKind !== 'ox' && pgKind !== 'oxpay') {
     return sendProvisionJson(res, 400, { success: false, errorCode: pgKind ? 'INVALID_PG_KIND' : 'INVALID_REQUEST' }, locale);
   }
   const result =
-    pgKind === 'elementpay'
-      ? getElementPayMerchantProvision(req.params.merchantId)
-      : getJpayMerchantProvision(req.params.merchantId);
+    pgKind === 'ox' || pgKind === 'oxpay'
+      ? getOxMerchantProvision(req.params.merchantId)
+      : pgKind === 'elementpay'
+        ? getElementPayMerchantProvision(req.params.merchantId)
+        : getJpayMerchantProvision(req.params.merchantId);
   if (!result.ok) {
     return sendProvisionJson(res, result.status, { success: false, errorCode: result.errorCode }, locale);
   }
@@ -16572,9 +17791,11 @@ app.put('/api/v1/icopay/merchants/:merchantId', (req, res) => {
     actor: 'icopay-provision',
   };
   const result =
-    pgKindIn === 'elementpay'
-      ? updateElementPayMerchantProvision(req.params.merchantId, req.body, provisionMeta)
-      : updateJpayMerchantProvision(req.params.merchantId, req.body, provisionMeta);
+    pgKindIn === 'ox' || pgKindIn === 'oxpay'
+      ? updateOxMerchantProvision(req.params.merchantId, req.body, provisionMeta)
+      : pgKindIn === 'elementpay'
+        ? updateElementPayMerchantProvision(req.params.merchantId, req.body, provisionMeta)
+        : updateJpayMerchantProvision(req.params.merchantId, req.body, provisionMeta);
   if (!result.ok) {
     return sendProvisionJson(
       res,
@@ -16595,8 +17816,15 @@ app.delete('/api/v1/icopay/merchants/:merchantId', (req, res) => {
   const pgKind = String(req.query.pgKind || '').toLowerCase().trim();
   const force = req.query.force === '1' || req.query.force === 'true';
   const result =
-    pgKind === 'elementpay'
-      ? deleteElementPayMerchantProvision(req.params.merchantId, force, {
+    pgKind === 'ox' || pgKind === 'oxpay'
+      ? deleteOxMerchantProvision(req.params.merchantId, force, {
+          locale,
+          requestId: '',
+          clientIp: provisionClientIp(req),
+          actor: 'icopay-provision',
+        })
+      : pgKind === 'elementpay'
+        ? deleteElementPayMerchantProvision(req.params.merchantId, force, {
           clientIp: provisionClientIp(req),
           actor: 'icopay-provision',
         })
@@ -16933,7 +18161,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       <p class="admin-page-desc">${t(locale, 'pg_logs_desc_full')}</p>
       ${(() => {
         const fh =
-          (logPg === 'jpay' || logPg === 'elementpay' ? '<input type="hidden" name="source" value="' + logPg + '" />' : '') +
+          (logPg === 'jpay' || logPg === 'elementpay' || logPg === 'ox' ? '<input type="hidden" name="source" value="' + logPg + '" />' : '') +
           (logEnvCurrent === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : '') +
           '<input type="hidden" name="resendKind" value="' +
           esc(resendKind) +
@@ -17485,6 +18713,8 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#15803d;color:#fff;border:1px solid #166534;';
   const epOn =
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#0f766e;color:#fff;border:1px solid #115e59;';
+  const oxOn =
+    'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#9a3412;color:#fff;border:1px solid #9a3412;';
   const pillInactive =
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:600;font-size:13px;background:#f3f4f6;color:#6b7280;border:1px solid #d1d5db;';
   const withNavEnv = (path) => {
@@ -17494,8 +18724,14 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
   const pgCfg = c.pgSource || {};
   /** ChillPay (or unset): blue env active; JPAY: green; ElementPay: teal */
   const envTone =
-    pgCfg.active === 'jpay' ? 'jpay' : pgCfg.active === 'elementpay' ? 'elementpay' : 'chillpay';
-  const envOn = envTone === 'jpay' ? jpayOn : envTone === 'elementpay' ? epOn : chillOn;
+    pgCfg.active === 'jpay'
+      ? 'jpay'
+      : pgCfg.active === 'elementpay'
+        ? 'elementpay'
+        : pgCfg.active === 'ox'
+          ? 'ox'
+          : 'chillpay';
+  const envOn = envTone === 'jpay' ? jpayOn : envTone === 'elementpay' ? epOn : envTone === 'ox' ? oxOn : chillOn;
   const envOff = pillInactive;
   const envCfg = c.env || {};
   let envSeg = '';
@@ -17521,13 +18757,17 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
   if (pgCfg.show) {
     const hideJpay = !!pgCfg.hideJpay;
     const hideEp = !!pgCfg.hideElementpay;
+    const hideOx = !!pgCfg.hideOx;
     const chillActive = pgCfg.active === 'chillpay';
     const jpayActive = pgCfg.active === 'jpay';
     const epActive = pgCfg.active === 'elementpay';
+    const oxActive = pgCfg.active === 'ox';
     const chillHref = withNavEnv(pgCfg.chillpayUrl || '#');
     const jpayHref = withNavEnv(pgCfg.jpayUrl || '#');
     const epHref = withNavEnv(pgCfg.elementpayUrl || pgCfg.epUrl || '#');
+    const oxHref = withNavEnv(pgCfg.oxUrl || '#');
     const epLabel = esc(t(locale, 'pg_provider_elementpay') || 'ElementPay');
+    const oxLabel = esc(t(locale, 'pg_provider_ox') || 'OXPAY');
     if (hideJpay) {
       pgSeg =
         '<span style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
@@ -17561,6 +18801,17 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
           epLabel +
           '</a>';
       }
+      if (!hideOx && pgCfg.oxUrl) {
+        pgSeg +=
+          '<span style="color:#94a3b8;font-weight:500;">|</span>' +
+          '<a href="' +
+          esc(oxHref) +
+          '" style="' +
+          (oxActive ? oxOn : pillInactive) +
+          '">' +
+          oxLabel +
+          '</a>';
+      }
       pgSeg += '</span>';
     }
   }
@@ -17592,6 +18843,7 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
   const qChill = logPgQueryWithBase(q, 'chillpay', { page: 1 });
   const qJpay = logPgQueryWithBase(q, 'jpay', { page: 1 });
   const qEp = logPgQueryWithBase(q, 'elementpay', { page: 1 });
+  const qOx = logPgQueryWithBase(q, 'ox', { page: 1 });
   const envLive = logPgQueryWithBase(q, logPg, { env: 'live', page: 1 });
   const envSand = logPgQueryWithBase(q, logPg, { env: 'sandbox', page: 1 });
   const currentEnv = (o.getEnv && o.getEnv()) || 'live';
@@ -17613,6 +18865,7 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
       chillpayUrl: pathname + '?' + buildQueryString(qChill),
       jpayUrl: pathname + '?' + buildQueryString(qJpay),
       elementpayUrl: pathname + '?' + buildQueryString(qEp),
+      oxUrl: pathname + '?' + buildQueryString(qOx),
     },
   });
 }
@@ -18013,6 +19266,16 @@ function resolveNotiLogMerchantId(log, bodyOptional) {
   ).trim();
   if (fromBody) return fromBody;
   const pg = log ? getNotiLogPgAcquirer(log) : '';
+  if (pg === 'ox') {
+    const fromOx = String(
+      (body && (body.compId || body.CompId || body.merchantId || body['Comp-Id'])) || '',
+    ).trim();
+    if (fromOx) {
+      const byComp = findOxMerchantByCompId(fromOx);
+      if (byComp && byComp.merchantId) return byComp.merchantId;
+      return fromOx;
+    }
+  }
   if (pg === 'elementpay') {
     const fromEp = extractElementPayCompIdFromBody(body);
     if (fromEp) {
@@ -18023,6 +19286,10 @@ function resolveNotiLogMerchantId(log, bodyOptional) {
   }
   const order = notifBodyOrderNo(body);
   if (order) {
+    if (pg === 'ox') {
+      const byOrder = findOxMerchantByOrderFromLogs(order);
+      if (byOrder && byOrder.merchantId) return byOrder.merchantId;
+    }
     if (pg === 'elementpay') {
       const byOrder = findElementPayMerchantByOrderFromLogs(order);
       if (byOrder && byOrder.merchantId) return byOrder.merchantId;
@@ -18064,7 +19331,7 @@ const JPAY_TX_EXTRA_COLUMNS = [
 ];
 
 function getTransactionListColumns(txSource) {
-  if (txSource !== 'jpay' && txSource !== 'elementpay') return TRANSACTION_LIST_COLUMNS;
+  if (txSource !== 'jpay' && txSource !== 'elementpay' && txSource !== 'ox') return TRANSACTION_LIST_COLUMNS;
   const cols = [];
   for (const col of TRANSACTION_LIST_COLUMNS) {
     cols.push(col);
@@ -18143,7 +19410,7 @@ function getPgLogsListColumnDefs(locale, logPg) {
     { key: 'noti_state', label: t(locale, 'pg_logs_th_state') },
     { key: 'resend', label: t(locale, 'pg_logs_th_resend') },
   ];
-  if (logPg === 'jpay' || logPg === 'elementpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
+  if (logPg === 'jpay' || logPg === 'elementpay' || logPg === 'ox') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
   cols.push({ key: 'void_refund', label: t(locale, 'pg_logs_th_void_refund') });
   cols.push({ key: 'delete', label: t(locale, 'noti_log_th_delete') });
   return cols;
@@ -18176,6 +19443,10 @@ function formatLogsResultRouteDisplay(routeKey, logPg) {
   const rk = String(routeKey || '').trim();
   if (!rk) return '-';
   const pg = String(logPg || '').toLowerCase();
+  if (pg === 'ox') {
+    const stripped = rk.replace(/^ox\//i, '').trim();
+    return stripped || rk;
+  }
   if (pg === 'elementpay') {
     const stripped = rk.replace(/^elementpay\//i, '').trim();
     return stripped || rk;
@@ -18190,7 +19461,7 @@ function formatLogsResultRouteDisplay(routeKey, logPg) {
 
 function isJpayOrElementPayPg(pg) {
   const p = String(pg || '').toLowerCase();
-  return p === 'jpay' || p === 'elementpay';
+  return p === 'jpay' || p === 'elementpay' || p === 'ox';
 }
 
 function routeOrResponseColumnLabel(locale, pg, chillLabel) {
@@ -18242,6 +19513,10 @@ function extractElementPayCompIdFromBody(body) {
     }
   }
   return '';
+}
+
+function stampOxCompIdOnBody(body, compId) {
+  return stampElementPayCompIdOnBody(body, compId);
 }
 
 function stampElementPayCompIdOnBody(body, compId) {
@@ -18344,7 +19619,7 @@ function getLogsResultListColumnDefs(locale, logPg) {
     { key: 'fail_reason', label: t(locale, 'cr_th_fail_reason') },
     { key: 'noti_kind', label: t(locale, 'logs_result_th_noti_kind') },
   ];
-  if (logPg === 'jpay' || logPg === 'elementpay') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
+  if (logPg === 'jpay' || logPg === 'elementpay' || logPg === 'ox') cols.push({ key: 'webhook', label: t(locale, 'merchants_dealmai_webhook') || '웹훅' });
   cols.push({ key: 'resend', label: t(locale, 'pg_logs_th_resend') });
   cols.push({ key: 'delete', label: t(locale, 'noti_log_th_delete') });
   return cols;
@@ -18634,7 +19909,7 @@ function jpayCrExtraCellsHtml(log, esc) {
 
 function jpayWebhookCellHtml(locale, log, esc) {
   const pg = getNotiLogPgAcquirer(log);
-  if (pg !== 'jpay' && pg !== 'elementpay') {
+  if (pg !== 'jpay' && pg !== 'elementpay' && pg !== 'ox') {
     return '<td class="col-narrow">-</td>';
   }
   const merchant = log.merchantId ? MERCHANTS.get(log.merchantId) : null;
@@ -19074,6 +20349,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     if (o.source === 'chillpay') parts.push('source=' + encodeURIComponent('chillpay'));
     else if (o.source === 'jpay') parts.push('source=' + encodeURIComponent('jpay'));
     else if (o.source === 'elementpay') parts.push('source=' + encodeURIComponent('elementpay'));
+    else if (o.source === 'ox') parts.push('source=' + encodeURIComponent('ox'));
     if (o.env === 'sandbox') parts.push('env=' + encodeURIComponent('sandbox'));
     return parts.length ? '?' + parts.join('&') : '';
   };
@@ -19245,6 +20521,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       chillpayUrl: baseUrl + qs({ source: 'chillpay', page: 1 }),
       jpayUrl: baseUrl + qs({ source: 'jpay', page: 1 }),
       elementpayUrl: baseUrl + qs({ source: 'elementpay', page: 1 }),
+      oxUrl: baseUrl + qs({ source: 'ox', page: 1 }),
     },
   });
   const LEGEND_MAX_DESC = 80;
@@ -19962,6 +21239,7 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     if (o.source === 'chillpay') parts.push('source=' + encodeURIComponent('chillpay'));
     else if (o.source === 'jpay') parts.push('source=' + encodeURIComponent('jpay'));
     else if (o.source === 'elementpay') parts.push('source=' + encodeURIComponent('elementpay'));
+    else if (o.source === 'ox') parts.push('source=' + encodeURIComponent('ox'));
     return parts.length ? '?' + parts.join('&') : '';
   };
   const exportUrl = baseUrl + '/export' + qs();
@@ -20085,6 +21363,7 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
       chillpayUrl: baseUrl + qs({ source: 'chillpay' }),
       jpayUrl: baseUrl + qs({ source: 'jpay' }),
       elementpayUrl: baseUrl + qs({ source: 'elementpay' }),
+      oxUrl: baseUrl + qs({ source: 'ox' }),
     },
   });
   const thead =
@@ -21934,6 +23213,8 @@ function parseTxNotiKindFilter(req) {
 function inferTransactionNotiCallbackResultFromRouteKey(routeKey) {
   const rk = String(routeKey || '').trim();
   if (!rk) return '';
+  if (rk === 'ox/result' || rk.startsWith('ox/result')) return 'result';
+  if (rk === 'ox/webhook' || rk.startsWith('ox/webhook')) return 'callback';
   if (rk === 'elementpay/result' || rk.startsWith('elementpay/result')) return 'result';
   if (rk === 'elementpay/webhook' || rk.startsWith('elementpay/webhook')) return 'callback';
   if (rk.startsWith('jpay/result/')) return 'result';
@@ -21990,6 +23271,12 @@ function getTransactionListLogs(req) {
   if (src === 'elementpay') {
     return logs.filter((log) => {
       if (getNotiLogPgAcquirer(log) !== 'elementpay') return false;
+      return showSandbox ? isLogSandbox(log) : isLiveLog(log);
+    });
+  }
+  if (src === 'ox') {
+    return logs.filter((log) => {
+      if (getNotiLogPgAcquirer(log) !== 'ox') return false;
       return showSandbox ? isLogSandbox(log) : isLiveLog(log);
     });
   }
@@ -22390,6 +23677,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       chillpayUrl: withPgSourceInUrl('/admin/transactions', 'chillpay'),
       jpayUrl: withPgSourceInUrl('/admin/transactions', 'jpay'),
       elementpayUrl: withPgSourceInUrl('/admin/transactions', 'elementpay'),
+      oxUrl: withPgSourceInUrl('/admin/transactions', 'ox'),
     },
   });
   const cancelPg = getSessionPgSource(req);
@@ -22766,10 +24054,15 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
       const p = String(e.pgProvider || '').toLowerCase();
       return p === 'elementpay' || p === 'ep';
     });
+  } else if (pgFilter === 'ox' || pgFilter === 'oxpay') {
+    filtered = filtered.filter((e) => {
+      const p = String(e.pgProvider || '').toLowerCase();
+      return p === 'ox' || p === 'oxpay';
+    });
   } else if (pgFilter === 'chillpay') {
     filtered = filtered.filter((e) => {
       const p = String(e.pgProvider || 'chillpay').toLowerCase();
-      return p !== 'jpay' && p !== 'elementpay' && p !== 'ep';
+      return p !== 'jpay' && p !== 'elementpay' && p !== 'ep' && p !== 'ox' && p !== 'oxpay';
     });
   }
   const perPageNoti = Math.max(100, Math.min(CR_LIST_PER_PAGE_MAX, parseInt(q.perPage, 10) || CR_LIST_PER_PAGE_DEFAULT));
@@ -22819,7 +24112,15 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
   const rows = displayFilteredNoti.map((e) => {
     const dt = e.sentAtIso ? new Date(e.sentAtIso).toLocaleString('ko-KR', { hour12: false }) : '-';
     const typeLabel = e.type === 'void' ? t(locale, 'cr_type_void') : e.type === 'refund' ? t(locale, 'cr_type_refund') : e.type || '-';
-    const pgProvLabel = (e.pgProvider || 'chillpay') === 'jpay' ? t(locale, 'pg_provider_jpay') : t(locale, 'pg_provider_chillpay');
+    const pgProvRaw = String(e.pgProvider || 'chillpay').toLowerCase();
+    const pgProvLabel =
+      pgProvRaw === 'jpay'
+        ? t(locale, 'pg_provider_jpay')
+        : pgProvRaw === 'elementpay' || pgProvRaw === 'ep'
+          ? t(locale, 'pg_provider_elementpay') || 'ElementPay'
+          : pgProvRaw === 'ox' || pgProvRaw === 'oxpay'
+            ? t(locale, 'pg_provider_ox') || 'OXPAY'
+            : t(locale, 'pg_provider_chillpay');
     const notiMerchant = e.merchantId ? MERCHANTS.get(e.merchantId) : null;
     const internalTargetName = getInternalTargetName(notiMerchant && notiMerchant.internalTargetId);
     const resendForm =
@@ -22855,6 +24156,7 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
   const pgFilterChillLabel = t(locale, 'cr_filter_pg_chillpay') || 'CHILLPAY';
   const pgFilterJpayLabel = t(locale, 'cr_filter_pg_jpay') || 'JPAY';
   const pgFilterEpLabel = t(locale, 'cr_filter_pg_elementpay') || t(locale, 'pg_provider_elementpay') || 'ElementPay';
+  const pgFilterOxLabel = t(locale, 'cr_filter_pg_ox') || t(locale, 'pg_provider_ox') || 'OXPAY';
   const filterLinks = `<div style="margin-bottom:12px;font-size:12px;color:#374151;">
     <a href="/admin/cancel-refund/noti?type=all&days=${days}${envParam}${pgParam}" style="padding:6px 12px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${typeFilter === 'all' ? '#2563eb' : '#e5e7eb'};color:${typeFilter === 'all' ? '#fff' : '#374151'};">${t(locale, 'cr_filter_all')}</a>
     <a href="/admin/cancel-refund/noti?type=void&days=${days}${envParam}${pgParam}" style="padding:6px 12px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${typeFilter === 'void' ? '#2563eb' : '#e5e7eb'};color:${typeFilter === 'void' ? '#fff' : '#374151'};">${t(locale, 'cr_type_void')}</a>
@@ -22863,7 +24165,8 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}" style="padding:6px 10px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'all' ? '#1d4ed8' : '#e5e7eb'};color:${pgFilter === 'all' ? '#fff' : '#374151'};">${pgFilterAllLabel}</a>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=chillpay" style="padding:6px 10px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'chillpay' ? '#1d4ed8' : '#e5e7eb'};color:${pgFilter === 'chillpay' ? '#fff' : '#374151'};">${pgFilterChillLabel}</a>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=jpay" style="padding:6px 10px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'jpay' ? '#15803d' : '#e5e7eb'};color:${pgFilter === 'jpay' ? '#fff' : '#374151'};">${pgFilterJpayLabel}</a>
-    <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=elementpay" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'elementpay' || pgFilter === 'ep' ? '#0f766e' : '#e5e7eb'};color:${pgFilter === 'elementpay' || pgFilter === 'ep' ? '#fff' : '#374151'};">${pgFilterEpLabel}</a>
+    <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=elementpay" style="padding:6px 10px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'elementpay' || pgFilter === 'ep' ? '#0f766e' : '#e5e7eb'};color:${pgFilter === 'elementpay' || pgFilter === 'ep' ? '#fff' : '#374151'};">${pgFilterEpLabel}</a>
+    <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=ox" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'ox' || pgFilter === 'oxpay' ? '#9a3412' : '#e5e7eb'};color:${pgFilter === 'ox' || pgFilter === 'oxpay' ? '#fff' : '#374151'};">${pgFilterOxLabel}</a>
     <span style="margin:0 8px;color:#9ca3af;">|</span>
     <span>${t(locale, 'cr_period_recent_label')}</span>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=7${envParam}${pgParam}" style="margin-left:6px;font-size:12px;">7${t(locale, 'cr_days')}</a>
@@ -26174,7 +27477,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       let relayLabel;
       let relayClass;
       let failReason;
-      if (logPgResult === 'elementpay') {
+      if (logPgResult === 'elementpay' || logPgResult === 'ox') {
         if (payOk) {
           relayLabel = t(locale, 'status_ok');
           relayClass = 'status-ok';
@@ -26233,7 +27536,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
         currency = resolveMerchantCurrencyHint(merchantIdDisp) || '';
       }
       // ICOPAY 열: 시스템 환경설정 ICOPAY 금액 규칙(icopay-amount-settings.json, PG별)
-      const pgK = logPgResult === 'jpay' || logPgResult === 'elementpay' ? 'jpay' : 'chillpay';
+      const pgK = logPgResult === 'jpay' || logPgResult === 'elementpay' || logPgResult === 'ox' ? 'jpay' : 'chillpay';
       const amtRawIcopay = getNotiBodyAmountRawForIcopay(body, pgK);
       let icopayCell = '-';
       if (amtRawIcopay !== '' && amtRawIcopay != null) {
@@ -26358,7 +27661,7 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       <p class="admin-page-desc">${t(locale, 'noti_log_result_action_hint')}</p>
       ${(() => {
         const fh =
-          (logPgResult === 'jpay' || logPgResult === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgResult + '" />' : '') +
+          (logPgResult === 'jpay' || logPgResult === 'elementpay' || logPgResult === 'ox' ? '<input type="hidden" name="source" value="' + logPgResult + '" />' : '') +
           (logEnvResult === 'sandbox' ? '<input type="hidden" name="env" value="sandbox" />' : '') +
           '<input type="hidden" name="resendKind" value="' +
           esc(resendKind) +
@@ -26489,6 +27792,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
   const formDevResVal = editTarget ? escAttr(editTarget.devResultUrl || '') : '';
   const pgIsJpay = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'jpay');
   const pgIsElementPay = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'elementpay');
+  const pgIsOx = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'ox' || (editTarget.pgProvider || '').toLowerCase() === 'oxpay'));
   const formTzMode = editTarget ? normalizeInternalTargetTimezoneMode(editTarget.timezoneMode) : 'global';
   const formTzStd = editTarget ? (editTarget.standardTimezone || DEFAULT_CHILLPAY_TIMEZONE) : DEFAULT_CHILLPAY_TIMEZONE;
   const formTzOp = editTarget ? (editTarget.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE) : DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
@@ -26511,9 +27815,11 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
       const pgLabel =
         pg === 'jpay'
           ? t(locale, 'pg_provider_jpay') || 'JPAY'
-          : pg === 'elementpay'
+          :         pg === 'elementpay'
             ? t(locale, 'pg_provider_elementpay') || t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay'
-            : t(locale, 'pg_provider_chillpay') || 'ChillPay';
+            : pg === 'ox'
+              ? t(locale, 'pg_provider_ox') || 'OXPAY'
+              : t(locale, 'pg_provider_chillpay') || 'ChillPay';
       const linkCell =
         pg === 'chillpay'
           ? escCell(getChillpayProductionMidForInternalLinked())
@@ -26638,13 +27944,15 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         <label>${t(locale, 'internal_targets_name')}<input type="text" name="name" required value="${formNameVal}" /></label>
         <label>${t(locale, 'internal_targets_pg_provider')}
           <select name="pgProvider" id="internal-target-pg" style="width:100%;max-width:320px;padding:8px 10px;margin-top:4px;border-radius:6px;border:1px solid #d1d5db;">
-            <option value="chillpay"${!pgIsJpay && !pgIsElementPay ? ' selected' : ''}>${t(locale, 'pg_provider_chillpay') || 'ChillPay'}</option>
+            <option value="chillpay"${!pgIsJpay && !pgIsElementPay && !pgIsOx ? ' selected' : ''}>${t(locale, 'pg_provider_chillpay') || 'ChillPay'}</option>
             <option value="jpay"${pgIsJpay ? ' selected' : ''}>${t(locale, 'pg_provider_jpay') || 'JPAY'}</option>
             <option value="elementpay"${pgIsElementPay ? ' selected' : ''}>${t(locale, 'pg_provider_elementpay') || t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay'}</option>
+            <option value="ox"${pgIsOx ? ' selected' : ''}>${t(locale, 'pg_provider_ox') || 'OXPAY'}</option>
           </select>
         </label>
         <p class="admin-page-desc" id="internal-pg-hint-jpay" style="display:${pgIsJpay ? 'block' : 'none'};">${t(locale, 'internal_targets_jpay_fields_hint')}</p>
         <p class="admin-page-desc" id="internal-pg-hint-ep" style="display:${pgIsElementPay ? 'block' : 'none'};">${t(locale, 'internal_targets_elementpay_fields_hint')}</p>
+        <p class="admin-page-desc" id="internal-pg-hint-ox" style="display:${pgIsOx ? 'block' : 'none'};">${t(locale, 'internal_targets_ox_fields_hint')}</p>
         <div id="internal-mid-chillpay-wrap" style="margin-top:10px;">
           <div style="font-size:14px;color:#1e293b;"><strong>${t(locale, 'internal_targets_linked_mid')}</strong>:
             <code style="background:#f1f5f9;padding:4px 10px;border-radius:6px;font-size:13px;">${chillMidDisplay}</code>
@@ -26661,6 +27969,9 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         </div>
         <div id="internal-mid-ep-wrap" style="display:none;margin-top:10px;">
           <p class="admin-page-desc" style="margin:0;">${t(locale, 'internal_targets_elementpay_mid_hint')}</p>
+        </div>
+        <div id="internal-mid-ox-wrap" style="display:none;margin-top:10px;">
+          <p class="admin-page-desc" style="margin:0;">${t(locale, 'internal_targets_ox_mid_hint')}</p>
         </div>
         <p class="admin-page-desc" id="internal-linked-mid-hint">${t(locale, 'internal_targets_linked_mid_hint')}</p>
         <label>${t(locale, 'internal_targets_callback_url')}<input type="text" name="callbackUrl" required value="${formCbVal}" /></label>
@@ -26695,20 +28006,26 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         var wC = document.getElementById('internal-mid-chillpay-wrap');
         var wJ = document.getElementById('internal-mid-jpay-wrap');
         var wE = document.getElementById('internal-mid-ep-wrap');
+        var wO = document.getElementById('internal-mid-ox-wrap');
         var hintJ = document.getElementById('internal-pg-hint-jpay');
         var hintE = document.getElementById('internal-pg-hint-ep');
+        var hintO = document.getElementById('internal-pg-hint-ox');
         var midHint = document.getElementById('internal-linked-mid-hint');
         function syncPg() {
           if (!pg) return;
           var v = pg.value;
           var j = v === 'jpay';
           var ep = v === 'elementpay';
-          if (wC) wC.style.display = !j && !ep ? 'block' : 'none';
+          var ox = v === 'ox';
+          var fixed = ep || ox;
+          if (wC) wC.style.display = !j && !fixed ? 'block' : 'none';
           if (wJ) wJ.style.display = j ? 'block' : 'none';
           if (wE) wE.style.display = ep ? 'block' : 'none';
+          if (wO) wO.style.display = ox ? 'block' : 'none';
           if (hintJ) hintJ.style.display = j ? 'block' : 'none';
           if (hintE) hintE.style.display = ep ? 'block' : 'none';
-          if (midHint) midHint.style.display = ep ? 'none' : 'block';
+          if (hintO) hintO.style.display = ox ? 'block' : 'none';
+          if (midHint) midHint.style.display = fixed ? 'none' : 'block';
         }
         function syncTz() {
           var wrap = document.getElementById('internal-target-tz-custom-wrap');
@@ -29648,7 +30965,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       const internalResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
       const internalResendLabel = internalResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${internalResendKind}" />${logPgInternal === 'jpay' || logPgInternal === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgInternal + '" />' : ''}<button type="submit" class="btn-resend">${internalResendLabel}</button></form>`
+        ? `<form method="post" action="/admin/internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${internalResendKind}" />${logPgInternal === 'jpay' || logPgInternal === 'elementpay' || logPgInternal === 'ox' ? '<input type="hidden" name="source" value="' + logPgInternal + '" />' : ''}<button type="submit" class="btn-resend">${internalResendLabel}</button></form>`
         : '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawInternal, esc) + '</span>';
       const internalTargetName = getInternalTargetName(log.internalTargetId);
       const rowCellsInternal = {
@@ -29735,7 +31052,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       <p class="admin-page-desc">${t(locale, 'internal_logs_desc')}</p>
       ${(() => {
         const fh =
-          (logPgInternal === 'jpay' || logPgInternal === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgInternal + '" />' : '') +
+          (logPgInternal === 'jpay' || logPgInternal === 'elementpay' || logPgInternal === 'ox' ? '<input type="hidden" name="source" value="' + logPgInternal + '" />' : '') +
           '<input type="hidden" name="perPage" value="' +
           perPage +
           '" />' +
@@ -29908,7 +31225,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       const internalResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
       const internalResendLabel = internalResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="internal-result" /><input type="hidden" name="resendKind" value="${internalResendKind}" />${logPgIntRes === 'jpay' || logPgIntRes === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgIntRes + '" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${internalResendLabel}</button></form>`
+        ? `<form method="post" action="/admin/internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="internal-result" /><input type="hidden" name="resendKind" value="${internalResendKind}" />${logPgIntRes === 'jpay' || logPgIntRes === 'elementpay' || logPgIntRes === 'ox' ? '<input type="hidden" name="source" value="' + logPgIntRes + '" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${internalResendLabel}</button></form>`
         : '-';
       const txId = payload.TransactionId != null ? payload.TransactionId : (payload.transactionId != null ? payload.transactionId : '-');
       const payStatus = payload.PaymentStatus != null ? payload.PaymentStatus : '-';
@@ -30003,7 +31320,7 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
       <p class="admin-page-desc">${t(locale, 'noti_log_result_action_hint')}</p>
       ${(() => {
         const fh =
-          (logPgIntRes === 'jpay' || logPgIntRes === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgIntRes + '" />' : '') +
+          (logPgIntRes === 'jpay' || logPgIntRes === 'elementpay' || logPgIntRes === 'ox' ? '<input type="hidden" name="source" value="' + logPgIntRes + '" />' : '') +
           '<input type="hidden" name="resendKind" value="' +
           esc(resendKind) +
           '" />' +
@@ -30192,7 +31509,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       const devResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
       const devResendLabel = devResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDev === 'jpay' || logPgDev === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgDev + '" />' : ''}<button type="submit" class="btn-resend">${devResendLabel}</button></form>`
+        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDev === 'jpay' || logPgDev === 'elementpay' || logPgDev === 'ox' ? '<input type="hidden" name="source" value="' + logPgDev + '" />' : ''}<button type="submit" class="btn-resend">${devResendLabel}</button></form>`
         : '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawDev, esc) + '</span>';
       const upStr = devInternalUpstreamCellText(log);
       const rowCellsDevInt = {
@@ -30286,7 +31603,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       <p class="admin-page-desc">${t(locale, 'dev_internal_dedup_hint')}</p>
       ${(() => {
         const fh =
-          (logPgDev === 'jpay' || logPgDev === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgDev + '" />' : '') +
+          (logPgDev === 'jpay' || logPgDev === 'elementpay' || logPgDev === 'ox' ? '<input type="hidden" name="source" value="' + logPgDev + '" />' : '') +
           '<input type="hidden" name="perPage" value="' +
           perPageDev +
           '" />' +
@@ -30999,7 +32316,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       const devResendKind = isCancelNotiBody(payload) ? 'cancel' : 'payment';
       const devResendLabel = devResendKind === 'cancel' ? (t(locale, 'status_cancel') + ' ' + t(locale, 'pg_logs_th_resend')) : (t(locale, 'status_payment') + ' ' + t(locale, 'pg_logs_th_resend'));
       const resendBtn = canResend
-        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="dev-internal-result" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDevRes === 'jpay' || logPgDevRes === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgDevRes + '" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${devResendLabel}</button></form>`
+        ? `<form method="post" action="/admin/dev-internal/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="dev-internal-result" /><input type="hidden" name="resendKind" value="${devResendKind}" />${logPgDevRes === 'jpay' || logPgDevRes === 'elementpay' || logPgDevRes === 'ox' ? '<input type="hidden" name="source" value="' + logPgDevRes + '" />' : ''}<button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'dev_internal_resend_confirm') || '').replace(/'/g, "\\'")}');">${devResendLabel}</button></form>`
         : '-';
       const upStrRes = devInternalUpstreamCellText(log);
       const rowCellsDevRes = {
@@ -31092,7 +32409,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       <p class="admin-page-desc">${t(locale, 'dev_internal_logs_retry_hint')}</p>
       ${(() => {
         const fh =
-          (logPgDevRes === 'jpay' || logPgDevRes === 'elementpay' ? '<input type="hidden" name="source" value="' + logPgDevRes + '" />' : '') +
+          (logPgDevRes === 'jpay' || logPgDevRes === 'elementpay' || logPgDevRes === 'ox' ? '<input type="hidden" name="source" value="' + logPgDevRes + '" />' : '') +
           '<input type="hidden" name="resendKind" value="' +
           esc(resendKind) +
           '" />' +
