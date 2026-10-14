@@ -19,6 +19,7 @@ const { t } = require('./locales');
 const pgNotifyDelivery = require('./lib/pgNotifyDelivery');
 const elementPayNoti = require('./lib/elementpayNoti');
 const oxNoti = require('./lib/oxNoti');
+const cryptoNoti = require('./lib/cryptoNoti');
 const opsManual = require('./lib/opsManual');
 
 const app = express();
@@ -5796,6 +5797,363 @@ async function handleOxWebhook(req, res) {
 }
 
 /** 저장값이 없을 때만 사용: 환경변수 SYSTEM_MONITOR_MONTHLY_QUOTA_GB (기본 300GB) */
+// ========== CRYPTO (ICOPAY custody confirm → merchant Callback/Result) ==========
+function stampCryptoCompIdOnBody(body, compId) {
+  const out = body && typeof body === 'object' ? { ...body } : {};
+  const id = String(compId || '').trim();
+  if (id) {
+    out.compId = id;
+    out.CompId = id;
+    out['Comp-Id'] = id;
+    if (!out.merchantId) out.merchantId = id;
+  }
+  return out;
+}
+
+/** Match any NOTI merchant by Comp-Id so JPAY/EP/ox merchants keep existing Callback URLs for crypto. */
+function findMerchantByCompIdForCrypto(compId) {
+  const id = String(compId || '').trim();
+  if (!id) return null;
+  const direct = MERCHANTS.get(id);
+  if (direct && String(direct.callbackUrl || '').trim()) {
+    return { merchantId: id, merchant: direct, via: 'direct' };
+  }
+  let fallback = null;
+  for (const [mid, m] of MERCHANTS.entries()) {
+    if (!m) continue;
+    const meta = m.icopayProvisionMeta && typeof m.icopayProvisionMeta === 'object' ? m.icopayProvisionMeta : {};
+    const metaComp = String(meta.compId || '').trim();
+    if (mid !== id && metaComp !== id) continue;
+    if (String(m.callbackUrl || '').trim()) {
+      return { merchantId: mid, merchant: m, via: 'scan' };
+    }
+    if (!fallback) fallback = { merchantId: mid, merchant: m, via: 'scan-nocb' };
+  }
+  if (direct) return { merchantId: id, merchant: direct, via: 'direct-nocb' };
+  return fallback;
+}
+
+async function relayCryptoMerchantNotify(merchantId, merchant, notifyBody, rawBody, incomingContentType) {
+  const enableRelay = merchant.enableRelay !== false;
+  const targetUrl = String(merchant.callbackUrl || '').trim();
+  const relayFormat =
+    merchant.relayFormat === 'json' || merchant.relayFormat === 'form' ? merchant.relayFormat : 'raw';
+  let relaySuccess = false;
+  let relayFailReason = '';
+  if (enableRelay && targetUrl) {
+    let relayOpts;
+    if (relayFormat === 'json') {
+      relayOpts = { contentType: 'application/json', rawBody: undefined };
+    } else if (relayFormat === 'form') {
+      relayOpts = { contentType: 'application/x-www-form-urlencoded', rawBody: undefined };
+    } else {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v === undefined || v === null) continue;
+        params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      relayOpts = {
+        contentType: 'application/x-www-form-urlencoded',
+        rawBody: params.toString(),
+      };
+    }
+    try {
+      let relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+      relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+      if (!relaySuccess) {
+        relayFailReason =
+          `HTTP ${relayRes.status}` +
+          (relayRes.data && typeof relayRes.data === 'string' ? ': ' + String(relayRes.data).slice(0, 200) : '');
+        await new Promise((r) => setTimeout(r, 2000));
+        relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      }
+    } catch (err) {
+      relayFailReason = err.code || err.message || String(err);
+      try {
+        await new Promise((r) => setTimeout(r, 2000));
+        const retryRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = retryRes.status >= 200 && retryRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      } catch (err2) {
+        if (!relayFailReason) relayFailReason = err2.code || err2.message || String(err2);
+      }
+    }
+  } else if (enableRelay && !targetUrl) {
+    relayFailReason = '가맹점 URL 없음';
+  }
+
+  const pgLogEntry = {
+    routeKey: 'crypto/webhook',
+    merchantId,
+    kind: 'callback',
+    body: notifyBody,
+    rawBody: rawBody || undefined,
+    targetUrl: enableRelay ? targetUrl || '' : '',
+    contentType: incomingContentType,
+    env: 'live',
+    relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
+    relayFailReason: relaySuccess ? '' : relayFailReason || '',
+    relayFormatUsed: enableRelay && relaySuccess ? relayFormat : undefined,
+    pgProvider: 'crypto',
+  };
+  appendPgNotiLog(pgLogEntry);
+
+  if (merchant.enableInternal !== false) {
+    try {
+      const internalUrl = resolveJpayInternalNotiDeliveryUrl(
+        merchant,
+        enableRelay,
+        'callback',
+        normalizeMerchantRelayOffForwardTarget(merchant.relayOffForwardTarget),
+      );
+      if (internalUrl) {
+        const pack = {
+          body: notifyBody,
+          contentType: 'application/x-www-form-urlencoded',
+          rawBody: undefined,
+        };
+        await relayJpayRawWithRetry(internalUrl, pack, merchant);
+      }
+    } catch (err) {
+      console.warn('[crypto] internal notify failed', err.message || err);
+    }
+  }
+
+  let cryptoWebhookResult = { skipped: true };
+  if (merchantShouldDeliverDealmaiWebhook(merchant)) {
+    try {
+      cryptoWebhookResult = await dispatchDealmaiWebhookForNoti(merchant, {
+        body: notifyBody,
+        rawBody: rawBody || undefined,
+        contentType: incomingContentType,
+        pgProvider: 'crypto',
+        merchantId,
+        kind: 'callback',
+        env: 'live',
+        routeKey: 'crypto/webhook',
+      });
+    } catch (err) {
+      console.error('[crypto] DEALMAI webhook failed', err.message || err);
+      cryptoWebhookResult = { ok: false, skipped: false };
+    }
+  }
+  mergeDealmaiWebhookIntoPgNotiLog(pgLogEntry, merchant, cryptoWebhookResult);
+
+  return { relaySuccess, relayFailReason, dealmai: cryptoWebhookResult };
+}
+
+function extractCryptoPayload(req) {
+  const incomingContentType =
+    (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
+  let body = req.body && typeof req.body === 'object' ? { ...req.body } : {};
+  if (Object.keys(body).length === 0 && req.rawBodyBuffer && req.rawBodyBuffer.length) {
+    const parsed = parseNotiRawBodyToObject(req.rawBodyBuffer, incomingContentType);
+    if (Object.keys(parsed).length) body = parsed;
+  }
+  if (req.query && typeof req.query === 'object') {
+    for (const [k, v] of Object.entries(req.query)) {
+      if (v === undefined || v === null || v === '') continue;
+      if (body[k] === undefined || body[k] === null || body[k] === '') {
+        body[k] = Array.isArray(v) ? v[0] : v;
+      }
+    }
+  }
+  const order = String(
+    body.order || body.orderNo || body.OrderNo || body.orderid || body.orderID || '',
+  ).trim();
+  const compIdHdr = cryptoNoti.headerGetIgnoreCase(req.headers || {}, 'x-icopay-comp-id');
+  const compId = String(
+    compIdHdr ||
+      body.compId ||
+      body.CompId ||
+      body.merchantId ||
+      body.MerchantId ||
+      body.MID ||
+      '',
+  ).trim();
+  const method = cryptoNoti.normalizeCryptoMethod(
+    body.method || body.cryptoReturn || body.paymentStatus || body.status || 'confirm',
+  );
+  return { body, order, compId, method, incomingContentType };
+}
+
+/**
+ * ICOPAY → NOTI crypto confirm ingress.
+ * No NOTI→ICOPAY round-trip (source already confirmed on ICOPAY).
+ * Merchant Callback uses existing JPAY/EP/ox merchant.callbackUrl by Comp-Id.
+ */
+async function handleCryptoWebhook(req, res) {
+  const rawBodyStr = req.rawBodyBuffer ? req.rawBodyBuffer.toString('utf8') : '';
+  const payload = extractCryptoPayload(req);
+  const { body, order, method, incomingContentType } = payload;
+  let compId = payload.compId;
+  console.log('[crypto] webhook', 'method=', method || '-', 'order=', order || '-', 'compId=', compId || '-');
+
+  res.status(200).json({
+    success: true,
+    received: true,
+    pgKind: 'crypto',
+    order: order || null,
+    compId: compId || null,
+  });
+
+  if (!cryptoNoti.cryptoShouldNotifyMerchant(method)) {
+    return;
+  }
+
+  setImmediate(() => {
+    Promise.resolve()
+      .then(async () => {
+        if (!compId && order) {
+          const logs = loadPgNotiLogsSafe();
+          const start = Math.max(0, logs.length - 4000);
+          for (let i = logs.length - 1; i >= start; i--) {
+            const L = logs[i];
+            if (!L || L.pgProvider !== 'crypto') continue;
+            const b = L.body && typeof L.body === 'object' ? L.body : {};
+            const o = String(b.order || b.orderNo || b.orderid || '').trim();
+            if (o && o === order && L.merchantId) {
+              compId = String(L.merchantId).trim();
+              break;
+            }
+          }
+        }
+        const match = findMerchantByCompIdForCrypto(compId);
+        if (!match) {
+          console.warn(
+            '[crypto] merchant notify skipped: no Comp-Id match',
+            'compId=',
+            compId || '(none)',
+            'order=',
+            order || '-',
+          );
+          appendPgNotiLog({
+            routeKey: 'crypto/webhook',
+            merchantId: compId || '',
+            kind: 'callback',
+            body: stampCryptoCompIdOnBody(cryptoNoti.mapCryptoToMerchantNotifyBody(body, method), compId),
+            rawBody: rawBodyStr || undefined,
+            targetUrl: '',
+            contentType: incomingContentType,
+            env: 'live',
+            relayStatus: 'fail',
+            relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing Comp-Id',
+            pgProvider: 'crypto',
+          });
+          return;
+        }
+        const notifyBody = stampCryptoCompIdOnBody(
+          cryptoNoti.mapCryptoToMerchantNotifyBody(body, method),
+          match.merchantId || compId,
+        );
+        try {
+          await relayCryptoMerchantNotify(
+            match.merchantId,
+            match.merchant,
+            notifyBody,
+            rawBodyStr,
+            incomingContentType,
+          );
+        } catch (e) {
+          console.error('[crypto] merchant relay error', e.message || e);
+        }
+      })
+      .catch((e) => console.error('[crypto] merchant notify async error', e && e.message ? e.message : e));
+  });
+}
+
+function sendCryptoResultFallbackPage(res, reason) {
+  const msg = String(reason || 'unavailable');
+  res.status(200).type('html').send(
+    '<!DOCTYPE html><html><head><meta charset="utf-8"><title>CRYPTO Result</title></head>' +
+      '<body style="font-family:sans-serif;padding:24px"><h2>CRYPTO Result</h2>' +
+      '<p>Unable to forward to merchant Result URL (' +
+      msg +
+      ').</p>' +
+      '<p>Please check order status via Status API.</p></body></html>',
+  );
+}
+
+async function handleCryptoBrowserResult(req, res) {
+  const payload = extractCryptoPayload(req);
+  const { body, order, method } = payload;
+  console.log(
+    '[crypto] result',
+    'method=',
+    method || '-',
+    'order=',
+    order || '-',
+    'compId=',
+    payload.compId || '-',
+    'http=',
+    req.method,
+  );
+  const match = findMerchantByCompIdForCrypto(payload.compId);
+  const notifyBody = stampCryptoCompIdOnBody(
+    cryptoNoti.mapCryptoToMerchantNotifyBody(body, method || 'confirm'),
+    (match && match.merchantId) || payload.compId || '',
+  );
+  if (!match || !match.merchant) {
+    appendPgNotiLog({
+      routeKey: 'crypto/result',
+      merchantId: String(payload.compId || '').trim(),
+      kind: 'result',
+      body: notifyBody,
+      rawBody: undefined,
+      targetUrl: '',
+      contentType: payload.incomingContentType || '',
+      env: APP_ENV === 'test' ? 'sandbox' : 'production',
+      pgProvider: 'crypto',
+      relayStatus: 'fail',
+      relayFailReason: 'merchant_not_found',
+    });
+    return sendCryptoResultFallbackPage(res, order ? 'order_unmatched' : 'missing_compId');
+  }
+  const { merchantId, merchant } = match;
+  const enableRelay = merchant.enableRelay !== false;
+  let targetUrl =
+    resolveJpayResultBrowserForwardUrl(merchant, enableRelay) || String(merchant.resultUrl || '').trim();
+  const baseUrl = req.protocol + '://' + (req.get('host') || req.hostname || '');
+  const reqHost = (req.get && req.get('host')) || (req.headers && req.headers.host) || '';
+  if (targetUrl && isOurTestReturnUrl(targetUrl, reqHost)) {
+    targetUrl =
+      baseUrl + '/noti/test-result' + (targetUrl.includes('?') ? targetUrl.slice(targetUrl.indexOf('?')) : '');
+  }
+  if (!targetUrl) {
+    appendPgNotiLog({
+      routeKey: 'crypto/result',
+      merchantId,
+      kind: 'result',
+      body: notifyBody,
+      targetUrl: '',
+      contentType: payload.incomingContentType || '',
+      env: APP_ENV === 'test' ? 'sandbox' : 'production',
+      pgProvider: 'crypto',
+      relayStatus: 'fail',
+      relayFailReason: 'result_url_missing',
+    });
+    return sendCryptoResultFallbackPage(res, 'result_url_missing');
+  }
+  appendPgNotiLog({
+    routeKey: 'crypto/result',
+    merchantId,
+    kind: 'result',
+    body: notifyBody,
+    targetUrl,
+    contentType: payload.incomingContentType || '',
+    env: APP_ENV === 'test' ? 'sandbox' : 'production',
+    pgProvider: 'crypto',
+    relayStatus: 'ok',
+  });
+  if (merchantForcesResultBrowserRedirect(merchant)) {
+    return sendMerchantResultBrowserPostFormPage(res, targetUrl, notifyBody);
+  }
+  return redirectResultToUrlJpay(res, targetUrl, notifyBody);
+}
+
+
 function systemMonitorDefaultQuotaGb() {
   const n = Number(process.env.SYSTEM_MONITOR_MONTHLY_QUOTA_GB);
   if (Number.isFinite(n) && n >= 1) return Math.min(1000000, Math.floor(n));
@@ -12604,6 +12962,40 @@ app.post('/noti/result/ox', async (req, res) => {
   }
 });
 
+// ========== CRYPTO fixed ingress (ICOPAY confirm mirror) ==========
+app.post('/noti/crypto', async (req, res) => {
+  try {
+    await handleCryptoWebhook(req, res);
+  } catch (e) {
+    console.error('[crypto] webhook handler error', e.message || e);
+    if (!res.headersSent) return res.status(500).send('crypto handler error');
+  }
+});
+app.post('/noti/webhook/crypto', async (req, res) => {
+  try {
+    await handleCryptoWebhook(req, res);
+  } catch (e) {
+    console.error('[crypto] webhook handler error', e.message || e);
+    if (!res.headersSent) return res.status(500).send('crypto handler error');
+  }
+});
+app.get('/noti/result/crypto', async (req, res) => {
+  try {
+    await handleCryptoBrowserResult(req, res);
+  } catch (e) {
+    console.error('[crypto] result handler error', e.message || e);
+    if (!res.headersSent) return sendCryptoResultFallbackPage(res, 'handler_error');
+  }
+});
+app.post('/noti/result/crypto', async (req, res) => {
+  try {
+    await handleCryptoBrowserResult(req, res);
+  } catch (e) {
+    console.error('[crypto] result handler error', e.message || e);
+    if (!res.headersSent) return sendCryptoResultFallbackPage(res, 'handler_error');
+  }
+});
+
 app.post('/noti/:routeKey', async (req, res) => {
   const routeKey = req.params.routeKey;
   await handleNotiRequest(routeKey, req, res);
@@ -17123,7 +17515,8 @@ function inferMerchantPgKind(m) {
     saved === 'chillpay' ||
     saved === 'elementpay' ||
     saved === 'ox' ||
-    saved === 'oxpay'
+    saved === 'oxpay' ||
+    saved === 'crypto'
   ) {
     return saved === 'oxpay' ? 'ox' : saved;
   }
@@ -17137,10 +17530,11 @@ function inferMerchantPgKind(m) {
   if (/^j\d+$/i.test(rn)) return 'jpay';
   if (rn.toLowerCase() === 'ox') return 'ox';
   if (rn.toLowerCase() === 'elementpay') return 'elementpay';
+  if (rn.toLowerCase() === 'crypto') return 'crypto';
   const tid = String(m.internalTargetId || '').trim();
   if (tid && INTERNAL_TARGETS.has(tid)) {
     const pg = String(INTERNAL_TARGETS.get(tid).pgProvider || '').toLowerCase().trim();
-    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay' || pg === 'ox' || pg === 'oxpay') {
+    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay' || pg === 'ox' || pg === 'oxpay' || pg === 'crypto') {
       return pg === 'oxpay' ? 'ox' : pg;
     }
   }
