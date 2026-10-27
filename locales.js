@@ -267,6 +267,13 @@ const messages = {
     merchants_ox_result_hint:
       '브라우저 Result는 고정 Result URL로 들어오며, 가맹 resultUrl로 전달됩니다.',
     merchants_pg_provider_ox: 'OXPAY',
+    merchants_pg_provider_crypto: 'CRYPTO',
+    merchants_nav_register_crypto: 'CRYPTO 등록',
+    merchants_crypto_ingress_hint:
+      'CRYPTO는 ICOPAY 입금 확정 미러 입구가 본사 고정 1개입니다. 가맹 Callback/Result·relayFormat만 설정합니다.',
+    merchants_crypto_result_hint:
+      '브라우저 Result는 고정 Result URL로 들어오며, 가맹 resultUrl로 전달됩니다.',
+    merchants_pg_provider_crypto: 'CRYPTO',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_nav_list_chillpay: 'CHILLPAY 등록',
     merchants_nav_list_jpay: 'JPAY 등록',
@@ -276,6 +283,7 @@ const messages = {
     merchants_empty_jpay: '등록된 JPAY 가맹점이 없습니다.',
     merchants_empty_elementpay: '등록된 ElementPay 가맹점이 없습니다.',
     merchants_empty_ox: '등록된 OXPAY 가맹점이 없습니다.',
+    merchants_empty_crypto: '등록된 CRYPTO 가맹점이 없습니다.',
     merchants_empty: '등록된 가맹점이 없습니다.',
     merchants_id: '가맹점 ID',
     merchants_route_callback: 'routeKey(callback)',
@@ -487,6 +495,22 @@ const messages = {
     ox_settings_env_url_override:
       '환경변수 OX_ICOPAY_NOTIFY_URL이 설정되어 있어 URL 필드는 읽기 전용입니다.',
     ox_settings_saved_ok: 'OXPAY 연동 설정을 저장했습니다.',
+    ilk_settings_title: 'ILK(ILKPAY) 연동 설정',
+    ilk_settings_desc:
+      'ILK Back Noti는 고정 URL 하나입니다. NOTI는 수신 후 ICOPAY pg-notify(…/ILK)로 전달하고, Comp-Id로 기존 EP/JPAY 가맹 Callback에 릴레이합니다. 카드·QR(PayPay) 모두 동일 경로입니다.',
+    ilk_settings_label_webhook: 'ILK Back Noti Webhook URL (고정)',
+    ilk_settings_hint:
+      'ILK notifyUrl에는 위 URL만 등록합니다. QR(PayPay)도 별도 QR 입구 없이 이 URL을 씁니다.',
+    ilk_settings_comp_hint:
+      '가맹을 ILK 전용으로 새로 등록하지 않아도 됩니다. 이미 EP 등으로 등록된 Comp-Id·Callback을 그대로 사용합니다.',
+    ilk_settings_label_enabled: 'ILK 수신 활성화',
+    ilk_settings_label_icopay_url: 'ICOPAY 수신 URL (pg-notify …/ILK)',
+    ilk_settings_icopay_url_hint:
+      'NOTI가 ILK 웹훅을 받은 뒤 전달할 ICOPAY URL입니다. 환경변수 ILK_ICOPAY_NOTIFY_URL이 있으면 그쪽이 우선합니다.',
+    ilk_settings_label_timeout: 'ICOPAY 전달 타임아웃 (ms)',
+    ilk_settings_env_url_override:
+      '환경변수 ILK_ICOPAY_NOTIFY_URL이 설정되어 있어 URL 필드는 읽기 전용입니다.',
+    ilk_settings_saved_ok: 'ILK 연동 설정을 저장했습니다.',
     elementpay_settings_title: 'ElementPay 연동 설정',
     elementpay_settings_desc:
       'EP Cabinet에는 고정 Webhook URL 하나만 등록합니다. NOTI는 수신 후 ICOPAY pg-notify로 전달하며, 가맹 Callback/Result는 가맹 설정으로 처리합니다. ElementPay Merchant Key·Secret은 ICOPAY(tb_pg_agency)에만 두고 NOTI에는 등록하지 않습니다.',
@@ -507,6 +531,18 @@ const messages = {
     elementpay_settings_env_url_override:
       '환경변수 ELEMENTPAY_ICOPAY_NOTIFY_URL이 설정되어 있어 URL 필드는 읽기 전용입니다. 변경하려면 서버 환경변수를 수정하세요.',
     elementpay_settings_saved_ok: 'ElementPay 연동 설정을 저장했습니다.',
+    elementpay_settings_ip_title: '웹훅 IP 화이트리스트',
+    elementpay_settings_ip_desc:
+      'ElementPay가 요청한 대로 /noti/elementpay 수신은 허용 IP에서만 받습니다. Sandbox·Live IP를 설정에 두고 필요 시 추가 IP를 넣을 수 있습니다. 거절 시 403과 함께 data/elementpay-webhook-ip-reject.log에 기록됩니다.',
+    elementpay_settings_ip_enabled: '웹훅 IP 화이트리스트 사용',
+    elementpay_settings_ip_enabled_hint: '해제하면 IP 검사 없이 수신합니다(긴급용). 운영에서는 켜 두는 것을 권장합니다.',
+    elementpay_settings_ip_sandbox: 'Sandbox 허용 IP',
+    elementpay_settings_ip_live: 'Live 허용 IP',
+    elementpay_settings_ip_extra: '추가 허용 IP (선택)',
+    elementpay_settings_ip_list_hint: '줄바꿈 또는 쉼표로 여러 IP를 입력합니다. 동일 URL로 Sandbox·Live가 오므로 두 목록 모두 허용됩니다.',
+    elementpay_settings_ip_trusted_proxies: '신뢰 프록시 IP (Nginx 등)',
+    elementpay_settings_ip_trusted_hint:
+      '피어가 이 목록에 있을 때만 X-Real-IP / X-Forwarded-For를 원송신 IP로 사용합니다. 그 외에는 소켓 IP만 사용합니다(스푸핑 방지).',
     jpay_settings_title: 'JPAY 환경 설정',
     jpay_settings_desc: 'JPAY API에는 Route 파라미터가 없고 가맹점·거래 연동은 MID 기준입니다. 여기서는 환경(테스트/운영)별로 노티 수신 URL 슬롯(j1~j20)에 MID·API Key·명칭을 매핑합니다. 동일 jN URL로 노티가 오면 본문 MID로 운영/샌드 프로필을 구분합니다.',
     jpay_settings_add_section: '가맹점 추가',
@@ -565,10 +601,12 @@ const messages = {
     pg_provider_jpay: 'JPAY',
     pg_provider_elementpay: 'ElementPay',
     pg_provider_ox: 'OXPAY',
+    pg_provider_crypto: 'CRYPTO',
     merchants_pg_provider_chillpay: 'CHILLPAY',
     merchants_pg_provider_jpay: 'JPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_pg_provider_ox: 'OXPAY',
+    merchants_pg_provider_crypto: 'CRYPTO',
     internal_noti_title: '전산 노티 설정',
     internal_noti_desc: '전산 노티·PG 노티 로그로 보낼 때 적용할 통화별 금액 가공 규칙을 설정합니다.',
     internal_noti_pg_select: 'PG (대행사)',
@@ -807,6 +845,7 @@ const messages = {
     cr_filter_pg_jpay: 'JPAY',
     cr_filter_pg_elementpay: 'ElementPay',
     cr_filter_pg_ox: 'OXPAY',
+    cr_filter_pg_crypto: 'CRYPTO',
     cr_type_void: '무효',
     cr_type_refund: '환불',
     cr_period_recent: '기간: 최근',
@@ -1729,11 +1768,18 @@ const messages = {
     merchants_elementpay_result_hint:
       'ICOPAY決済の_successUrl/_rejectUrl/_waitingUrl = Result URL。ブラウザ到着後、加盟店resultUrlへ転送します。',
     merchants_nav_register_ox: 'OXPAY 登録',
+    merchants_nav_register_crypto: 'CRYPTO 登録',
+    merchants_crypto_ingress_hint:
+      'CRYPTOはICOPAY入金確定ミラー入口が本部固定1つです。加盟店Callback/Result・relayFormatのみ設定します。',
+    merchants_crypto_result_hint:
+      'ブラウザResultは固定Result URLで受信し、加盟店resultUrlへ転送します。',
+    merchants_pg_provider_crypto: 'CRYPTO',
     merchants_ox_ingress_hint:
       'OXPAYはWebhook・Result入口が本社固定1件です。加盟店Callback/Result・relayFormatのみ設定します。',
     merchants_ox_result_hint:
       'ブラウザResultは固定Result URLに入り、加盟店resultUrlへ転送されます。',
     merchants_empty_ox: '登録されたOXPAY加盟店はありません。',
+    merchants_empty_crypto: '登録されたCRYPTO加盟店はありません。',
     merchants_desc: '加盟店別の通知URL、基幹対象、リレー/基幹送信を設定します。',
     merchants_register: '登録/編集',
     merchants_list: '登録済み加盟店',
@@ -1941,6 +1987,22 @@ const messages = {
     ox_settings_label_timeout: 'ICOPAY 転送タイムアウト (ms)',
     ox_settings_env_url_override: '環境変数 OX_ICOPAY_NOTIFY_URL が設定されているため URL は読み取り専用です。',
     ox_settings_saved_ok: 'OXPAY 連携設定を保存しました。',
+    ilk_settings_title: 'ILK(ILKPAY) 連携設定',
+    ilk_settings_desc:
+      'ILK Back Noti は固定 URL 1 本です。NOTI は受信後 ICOPAY pg-notify(…/ILK) へ渡し、Comp-Id で既存 EP/JPAY 加盟 Callback にリレーします。カード・QR(PayPay) とも同一経路です。',
+    ilk_settings_label_webhook: 'ILK Back Noti Webhook URL（固定）',
+    ilk_settings_hint:
+      'ILK notifyUrl には上記 URL のみ登録します。QR(PayPay) も別 QR 入口なくこの URL を使います。',
+    ilk_settings_comp_hint:
+      '加盟を ILK 専用に新規登録する必要はありません。既に EP 等で登録した Comp-Id・Callback をそのまま使います。',
+    ilk_settings_label_enabled: 'ILK 受信を有効化',
+    ilk_settings_label_icopay_url: 'ICOPAY 受信 URL (pg-notify …/ILK)',
+    ilk_settings_icopay_url_hint:
+      'NOTI が ILK Webhook を受けた後に転送する ICOPAY URL です。環境変数 ILK_ICOPAY_NOTIFY_URL があればそちら優先です。',
+    ilk_settings_label_timeout: 'ICOPAY 転送タイムアウト (ms)',
+    ilk_settings_env_url_override:
+      '環境変数 ILK_ICOPAY_NOTIFY_URL が設定されているため URL 欄は読み取り専用です。',
+    ilk_settings_saved_ok: 'ILK 連携設定を保存しました。',
     elementpay_settings_title: 'ElementPay 連携設定',
     elementpay_settings_desc:
       'EP Cabinet には固定 Webhook URL を1つだけ登録します。NOTI は受信後 ICOPAY pg-notify へ転送し、加盟店 Callback/Result は加盟店設定で処理します。ElementPay Merchant Key・Secret は ICOPAY（tb_pg_agency）のみに置き、NOTI には登録しません。',
@@ -1961,6 +2023,18 @@ const messages = {
     elementpay_settings_env_url_override:
       '環境変数 ELEMENTPAY_ICOPAY_NOTIFY_URL が設定されているため URL 欄は読み取り専用です。変更する場合はサーバー環境変数を編集してください。',
     elementpay_settings_saved_ok: 'ElementPay 連携設定を保存しました。',
+    elementpay_settings_ip_title: 'Webhook IP ホワイトリスト',
+    elementpay_settings_ip_desc:
+      'ElementPayの要請どおり /noti/elementpay は許可IPからのみ受信します。Sandbox・Live IPを設定でき、必要なら追加IPも登録できます。拒否時は403と data/elementpay-webhook-ip-reject.log に記録します。',
+    elementpay_settings_ip_enabled: 'Webhook IP ホワイトリストを使用',
+    elementpay_settings_ip_enabled_hint: 'オフにするとIP検査なしで受信します（緊急用）。本番では有効を推奨します。',
+    elementpay_settings_ip_sandbox: 'Sandbox 許可 IP',
+    elementpay_settings_ip_live: 'Live 許可 IP',
+    elementpay_settings_ip_extra: '追加許可 IP（任意）',
+    elementpay_settings_ip_list_hint: '改行またはカンマで複数IPを入力。同一URLに Sandbox・Live が来るため両リストを許可します。',
+    elementpay_settings_ip_trusted_proxies: '信頼プロキシ IP（Nginx 等）',
+    elementpay_settings_ip_trusted_hint:
+      'ピアがこの一覧にある場合のみ X-Real-IP / X-Forwarded-For を送信元IPとして使います。それ以外はソケットIPのみ（スプーフィング防止）。',
     jpay_settings_title: 'JPAY 環境設定',
     jpay_settings_desc: 'JPAY API には Route パラメータはなく、加盟店・取引の識別は MID です。ここでは環境（テスト/本番）ごとに通知受信 URL スロット（j1~j20）へ MID・API キー・名称を割り当てます。同一 jN URL の通知は本文 MID で本番/サンドボックス行を判別します。',
     jpay_settings_add_section: '加盟店追加',
@@ -2010,10 +2084,12 @@ const messages = {
     pg_provider_jpay: 'JPAY',
     pg_provider_elementpay: 'ElementPay',
     pg_provider_ox: 'OXPAY',
+    pg_provider_crypto: 'CRYPTO',
     merchants_pg_provider_chillpay: 'CHILLPAY',
     merchants_pg_provider_jpay: 'JPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_pg_provider_ox: 'OXPAY',
+    merchants_pg_provider_crypto: 'CRYPTO',
     internal_noti_title: '基幹通知設定',
     internal_noti_desc: '基幹通知・PG通知ログ送信時に適用する通貨別金額加工ルールを設定します。',
     internal_noti_pg_select: 'PG（決済代行）',
@@ -2250,6 +2326,7 @@ const messages = {
     cr_filter_pg_jpay: 'JPAY',
     cr_filter_pg_elementpay: 'ElementPay',
     cr_filter_pg_ox: 'OXPAY',
+    cr_filter_pg_crypto: 'CRYPTO',
     cr_type_void: '無効',
     cr_type_refund: '返金',
     cr_period_recent: '期間: 直近',
@@ -3151,11 +3228,18 @@ const messages = {
     merchants_elementpay_result_hint:
       'ICOPAY payment _successUrl/_rejectUrl/_waitingUrl = Result URL. After the browser lands here, NOTI forwards to the merchant resultUrl.',
     merchants_nav_register_ox: 'OXPAY registration',
+    merchants_nav_register_crypto: 'CRYPTO registration',
+    merchants_crypto_ingress_hint:
+      'CRYPTO uses one HQ-fixed ICOPAY deposit-confirm mirror ingress. Configure merchant Callback/Result and relayFormat only.',
+    merchants_crypto_result_hint:
+      'Browser Result arrives on the fixed Result URL and is forwarded to the merchant resultUrl.',
+    merchants_pg_provider_crypto: 'CRYPTO',
     merchants_ox_ingress_hint:
       'OXPAY uses one fixed company Webhook and Result ingress. Configure merchant Callback/Result and relayFormat only.',
     merchants_ox_result_hint:
       'The browser Result lands on the fixed Result URL, then NOTI forwards it to the merchant resultUrl.',
     merchants_empty_ox: 'No OXPAY merchants are registered.',
+    merchants_empty_crypto: 'No CRYPTO merchants are registered.',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_nav_list_chillpay: 'CHILLPAY Registration',
     merchants_nav_list_jpay: 'JPAY Registration',
@@ -3367,6 +3451,22 @@ const messages = {
     ox_settings_label_timeout: 'ICOPAY forward timeout (ms)',
     ox_settings_env_url_override: 'OX_ICOPAY_NOTIFY_URL is set, so the URL field is read-only.',
     ox_settings_saved_ok: 'OXPAY integration settings saved.',
+    ilk_settings_title: 'ILK (ILKPAY) integration settings',
+    ilk_settings_desc:
+      'ILK Back Noti uses one fixed URL. NOTI forwards to ICOPAY pg-notify (…/ILK), then relays to the merchant Callback matched by Comp-Id (existing EP/JPAY slot). Card and QR (PayPay) share the same path.',
+    ilk_settings_label_webhook: 'ILK Back Noti Webhook URL (fixed)',
+    ilk_settings_hint:
+      'Register only this URL as ILK notifyUrl. QR (PayPay) also uses this URL — no separate QR ingress.',
+    ilk_settings_comp_hint:
+      'No separate ILK merchant registration is required. Reuse the Comp-Id and Callback already registered for EP (etc.).',
+    ilk_settings_label_enabled: 'Enable ILK ingress',
+    ilk_settings_label_icopay_url: 'ICOPAY notify URL (pg-notify …/ILK)',
+    ilk_settings_icopay_url_hint:
+      'URL NOTI posts to after receiving the ILK webhook. Env ILK_ICOPAY_NOTIFY_URL overrides the field when set.',
+    ilk_settings_label_timeout: 'ICOPAY forward timeout (ms)',
+    ilk_settings_env_url_override:
+      'ILK_ICOPAY_NOTIFY_URL is set; the URL field is read-only.',
+    ilk_settings_saved_ok: 'ILK integration settings saved.',
     elementpay_settings_title: 'ElementPay integration settings',
     elementpay_settings_desc:
       'Register only one fixed Webhook URL in the EP Cabinet. NOTI forwards to ICOPAY pg-notify; merchant Callback/Result use merchant settings. ElementPay Merchant Key/Secret stay on ICOPAY (tb_pg_agency) — do not store them on NOTI.',
@@ -3387,6 +3487,18 @@ const messages = {
     elementpay_settings_env_url_override:
       'ELEMENTPAY_ICOPAY_NOTIFY_URL is set, so this URL field is read-only. Change the server environment variable to update it.',
     elementpay_settings_saved_ok: 'ElementPay integration settings saved.',
+    elementpay_settings_ip_title: 'Webhook IP allowlist',
+    elementpay_settings_ip_desc:
+      'As requested by ElementPay, /noti/elementpay accepts only listed source IPs. Configure Sandbox and Live IPs (and optional extras). Rejected calls return 403 and are logged to data/elementpay-webhook-ip-reject.log.',
+    elementpay_settings_ip_enabled: 'Enable webhook IP allowlist',
+    elementpay_settings_ip_enabled_hint: 'When off, IP checks are skipped (emergency only). Keep enabled in production.',
+    elementpay_settings_ip_sandbox: 'Sandbox allowed IPs',
+    elementpay_settings_ip_live: 'Live allowed IPs',
+    elementpay_settings_ip_extra: 'Extra allowed IPs (optional)',
+    elementpay_settings_ip_list_hint: 'Enter one IP per line or comma-separated. Sandbox and Live share the same URL, so both lists are allowed.',
+    elementpay_settings_ip_trusted_proxies: 'Trusted proxy IPs (e.g. Nginx)',
+    elementpay_settings_ip_trusted_hint:
+      'X-Real-IP / X-Forwarded-For are used only when the TCP peer is in this list; otherwise the socket IP is used (anti-spoofing).',
     jpay_settings_title: 'JPAY environment settings',
     jpay_settings_desc: 'JPAY has no Route parameter; merchants and traffic are keyed by MID. Here you map MID, API key, and label to noti receive URL slots (j1–j20) per environment (sandbox/production). For the same jN URL, the notify body MID picks the correct profile row.',
     jpay_settings_add_section: 'Add merchant',
@@ -3445,10 +3557,12 @@ const messages = {
     pg_provider_jpay: 'JPAY',
     pg_provider_elementpay: 'ElementPay',
     pg_provider_ox: 'OXPAY',
+    pg_provider_crypto: 'CRYPTO',
     merchants_pg_provider_chillpay: 'CHILLPAY',
     merchants_pg_provider_jpay: 'JPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_pg_provider_ox: 'OXPAY',
+    merchants_pg_provider_crypto: 'CRYPTO',
     internal_noti_title: 'Internal Noti Settings',
     internal_noti_desc: 'Set amount conversion rules per currency for internal/PG noti.',
     internal_noti_pg_select: 'PG (Acquirer)',
@@ -3678,6 +3792,7 @@ const messages = {
     cr_filter_pg_jpay: 'JPAY',
     cr_filter_pg_elementpay: 'ElementPay',
     cr_filter_pg_ox: 'OXPAY',
+    cr_filter_pg_crypto: 'CRYPTO',
     cr_type_void: 'Void',
     cr_type_refund: 'Refund',
     cr_period_recent: 'Period: Last',
@@ -4600,11 +4715,18 @@ const messages = {
     merchants_elementpay_result_hint:
       'ICOPAY _successUrl/_rejectUrl/_waitingUrl = Result URL หลังเบราว์เซอร์มาที่นี่ จะส่งต่อไปยัง resultUrl ของร้าน',
     merchants_nav_register_ox: 'ลงทะเบียน OXPAY',
+    merchants_nav_register_crypto: 'ลงทะเบียน CRYPTO',
+    merchants_crypto_ingress_hint:
+      'CRYPTO ใช้ทางเข้ามิเรอร์ยืนยันฝาก ICOPAY คงที่ของสำนักงานใหญ่ 1 จุด ตั้งค่าเฉพาะ Callback/Result และ relayFormat ของร้าน',
+    merchants_crypto_result_hint:
+      'Result จากเบราว์เซอร์เข้าที่ Result URL คงที่แล้วส่งต่อไปยัง resultUrl ของร้าน',
+    merchants_pg_provider_crypto: 'CRYPTO',
     merchants_ox_ingress_hint:
       'OXPAY ใช้ Webhook และ Result บริษัทแบบคงที่ 1 URL ตั้งค่า Callback/Result และ relayFormat ของร้านเท่านั้น',
     merchants_ox_result_hint:
       'Result ของเบราว์เซอร์เข้า URL คงที่ แล้วส่งต่อไปยัง resultUrl ของร้าน',
     merchants_empty_ox: 'ยังไม่มีร้าน OXPAY ที่ลงทะเบียน',
+    merchants_empty_crypto: 'ยังไม่มีร้าน CRYPTO ที่ลงทะเบียน',
     merchants_desc: 'ตั้งค่า URL แจ้งเตือน เป้าหมายภายใน และการส่งต่อต่อร้านค้า',
     merchants_register: 'ลงทะเบียน/แก้ไข',
     merchants_list: 'ร้านค้าที่ลงทะเบียน',
@@ -4811,6 +4933,22 @@ const messages = {
     ox_settings_label_timeout: 'หมดเวลาส่งต่อ ICOPAY (ms)',
     ox_settings_env_url_override: 'ตั้ง OX_ICOPAY_NOTIFY_URL แล้ว ช่อง URL เป็นแบบอ่านอย่างเดียว',
     ox_settings_saved_ok: 'บันทึกการตั้งค่า OXPAY แล้ว',
+    ilk_settings_title: 'การตั้งค่าการเชื่อมต่อ ILK (ILKPAY)',
+    ilk_settings_desc:
+      'ILK Back Noti ใช้ URL คงที่หนึ่งเส้น NOTI ส่งต่อไปยัง ICOPAY pg-notify (…/ILK) แล้วรีเลย์ไป Callback ของร้านที่จับคู่ด้วย Comp-Id (ช่อง EP/JPAY เดิม) บัตรและ QR (PayPay) ใช้เส้นทางเดียวกัน',
+    ilk_settings_label_webhook: 'ILK Back Noti Webhook URL (คงที่)',
+    ilk_settings_hint:
+      'ลงทะเบียนเฉพาะ URL นี้เป็น ILK notifyUrl QR (PayPay) ก็ใช้ URL นี้ — ไม่มีทางเข้า QR แยก',
+    ilk_settings_comp_hint:
+      'ไม่ต้องลงทะเบียนร้าน ILK แยก ใช้ Comp-Id และ Callback ที่ลงทะเบียนกับ EP แล้วได้เลย',
+    ilk_settings_label_enabled: 'เปิดรับ ILK',
+    ilk_settings_label_icopay_url: 'URL รับของ ICOPAY (pg-notify …/ILK)',
+    ilk_settings_icopay_url_hint:
+      'URL ที่ NOTI ส่งต่อหลังรับ webhook ของ ILK ถ้ามี ILK_ICOPAY_NOTIFY_URL จะใช้ค่านั้นก่อน',
+    ilk_settings_label_timeout: 'หมดเวลาส่งต่อ ICOPAY (ms)',
+    ilk_settings_env_url_override:
+      'ตั้ง ILK_ICOPAY_NOTIFY_URL ไว้แล้ว ช่อง URL เป็นแบบอ่านอย่างเดียว',
+    ilk_settings_saved_ok: 'บันทึกการตั้งค่า ILK แล้ว',
     elementpay_settings_title: 'การตั้งค่าการเชื่อมต่อ ElementPay',
     elementpay_settings_desc:
       'ลงทะเบียน Webhook URL คงที่เพียงหนึ่งรายการใน EP Cabinet เท่านั้น NOTI จะส่งต่อไปยัง ICOPAY pg-notify ส่วน Callback/Result ของร้านค้าใช้การตั้งค่าร้านค้า ElementPay Merchant Key/Secret เก็บที่ ICOPAY (tb_pg_agency) เท่านั้น — ไม่ลงทะเบียนบน NOTI',
@@ -4831,6 +4969,18 @@ const messages = {
     elementpay_settings_env_url_override:
       'ตั้งค่า ELEMENTPAY_ICOPAY_NOTIFY_URL แล้ว ช่อง URL เป็นแบบอ่านอย่างเดียว เปลี่ยนที่ตัวแปรสภาพแวดล้อมของเซิร์ฟเวอร์',
     elementpay_settings_saved_ok: 'บันทึกการตั้งค่า ElementPay แล้ว',
+    elementpay_settings_ip_title: 'รายการอนุญาต IP ของ Webhook',
+    elementpay_settings_ip_desc:
+      'ตามที่ ElementPay ขอ /noti/elementpay รับเฉพาะ IP ที่อนุญาต ตั้งค่า Sandbox/Live และ IP เพิ่มได้ เมื่อปฏิเสธจะได้ 403 และบันทึกใน data/elementpay-webhook-ip-reject.log',
+    elementpay_settings_ip_enabled: 'ใช้รายการอนุญาต IP ของ Webhook',
+    elementpay_settings_ip_enabled_hint: 'ปิดแล้วจะไม่ตรวจ IP (ใช้ฉุกเฉิน) แนะนำให้เปิดในระบบจริง',
+    elementpay_settings_ip_sandbox: 'IP ที่อนุญาต (Sandbox)',
+    elementpay_settings_ip_live: 'IP ที่อนุญาต (Live)',
+    elementpay_settings_ip_extra: 'IP เพิ่มเติม (ไม่บังคับ)',
+    elementpay_settings_ip_list_hint: 'ใส่หลาย IP คั่นด้วยขึ้นบรรทัดใหม่หรือจุลภาค Sandbox กับ Live ใช้ URL เดียวกัน จึงอนุญาตทั้งสองรายการ',
+    elementpay_settings_ip_trusted_proxies: 'IP พร็อกซีที่เชื่อถือ (เช่น Nginx)',
+    elementpay_settings_ip_trusted_hint:
+      'ใช้ X-Real-IP / X-Forwarded-For เป็น IP ต้นทางเฉพาะเมื่อ peer อยู่ในรายการนี้ ไม่เช่นนั้นใช้ socket IP (กันปลอมแปลง)',
     jpay_settings_title: 'การตั้งค่าสภาพแวดล้อม JPAY',
     jpay_settings_desc: 'JPAY API ไม่มีพารามิเตอร์ Route การเชื่อมโยงใช้ MID ที่นี่แมป MID·API Key·ชื่อไปยังช่อง URL รับแจ้ง j1–j20 ต่อสภาพแวดล้อม แจ้งเตือน jN เดียวกันใช้ MID ในเนื้อหาแยกแถว',
     jpay_settings_add_section: 'เพิ่มร้านค้า',
@@ -4880,10 +5030,12 @@ const messages = {
     pg_provider_jpay: 'JPAY',
     pg_provider_elementpay: 'ElementPay',
     pg_provider_ox: 'OXPAY',
+    pg_provider_crypto: 'CRYPTO',
     merchants_pg_provider_chillpay: 'CHILLPAY',
     merchants_pg_provider_jpay: 'JPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_pg_provider_ox: 'OXPAY',
+    merchants_pg_provider_crypto: 'CRYPTO',
     internal_noti_title: 'ตั้งค่า Noti ภายใน',
     internal_noti_desc: 'ตั้งค่ากฎแปลงจำนวนตามสกุลเงินสำหรับ Noti ภายใน/PG',
     internal_noti_pg_select: 'PG',
@@ -5114,6 +5266,7 @@ const messages = {
     cr_filter_pg_jpay: 'JPAY',
     cr_filter_pg_elementpay: 'ElementPay',
     cr_filter_pg_ox: 'OXPAY',
+    cr_filter_pg_crypto: 'CRYPTO',
     cr_type_void: 'โมฆะ',
     cr_type_refund: 'คืนเงิน',
     cr_period_recent: 'ระยะเวลา: ล่าสุด',
@@ -6004,11 +6157,18 @@ const messages = {
     merchants_elementpay_result_hint:
       'ICOPAY 支付 _successUrl/_rejectUrl/_waitingUrl = Result URL。浏览器到达后转发至商户 resultUrl。',
     merchants_nav_register_ox: 'OXPAY 注册',
+    merchants_nav_register_crypto: 'CRYPTO 注册',
+    merchants_crypto_ingress_hint:
+      'CRYPTO 使用总部固定的 ICOPAY 入金确认镜像入口。仅配置商户 Callback/Result 与 relayFormat。',
+    merchants_crypto_result_hint:
+      '浏览器 Result 进入固定 Result URL，并转发至商户 resultUrl。',
+    merchants_pg_provider_crypto: 'CRYPTO',
     merchants_ox_ingress_hint:
       'OXPAY 的 Webhook 与 Result 入口为本社固定各 1 个。仅配置商户 Callback/Result 与 relayFormat。',
     merchants_ox_result_hint:
       '浏览器 Result 进入固定 Result URL 后，转发至商户 resultUrl。',
     merchants_empty_ox: '暂无已注册的 OXPAY 商户。',
+    merchants_empty_crypto: '暂无已注册的 CRYPTO 商户。',
     merchants_desc: '按商户配置通知URL、内部对象及是否转送/内部发送。',
     merchants_register: '注册/修改',
     merchants_list: '已注册商户',
@@ -6215,6 +6375,22 @@ const messages = {
     ox_settings_label_timeout: '转发 ICOPAY 超时（ms）',
     ox_settings_env_url_override: '已设置 OX_ICOPAY_NOTIFY_URL，URL 字段为只读。',
     ox_settings_saved_ok: '已保存 OXPAY 对接设置。',
+    ilk_settings_title: 'ILK（ILKPAY）对接设置',
+    ilk_settings_desc:
+      'ILK Back Noti 使用一个固定 URL。NOTI 接收后转发到 ICOPAY pg-notify（…/ILK），再按 Comp-Id 匹配已有 EP/JPAY 商户 Callback 进行中继。银行卡与 QR（PayPay）同一路径。',
+    ilk_settings_label_webhook: 'ILK Back Noti Webhook URL（固定）',
+    ilk_settings_hint:
+      'ILK notifyUrl 只注册上述 URL。QR（PayPay）也使用该 URL，无单独 QR 入口。',
+    ilk_settings_comp_hint:
+      '无需单独注册 ILK 商户。复用已在 EP 等注册的 Comp-Id 与 Callback。',
+    ilk_settings_label_enabled: '启用 ILK 接收',
+    ilk_settings_label_icopay_url: 'ICOPAY 接收 URL（pg-notify …/ILK）',
+    ilk_settings_icopay_url_hint:
+      'NOTI 收到 ILK Webhook 后转发的 ICOPAY URL。若设置环境变量 ILK_ICOPAY_NOTIFY_URL 则优先使用。',
+    ilk_settings_label_timeout: 'ICOPAY 转发超时（ms）',
+    ilk_settings_env_url_override:
+      '已设置环境变量 ILK_ICOPAY_NOTIFY_URL，URL 字段为只读。',
+    ilk_settings_saved_ok: '已保存 ILK 对接设置。',
     elementpay_settings_title: 'ElementPay 对接设置',
     elementpay_settings_desc:
       '在 EP Cabinet 仅注册一个固定 Webhook URL。NOTI 接收后转发到 ICOPAY pg-notify；商户 Callback/Result 按商户配置处理。ElementPay Merchant Key/Secret 只保存在 ICOPAY（tb_pg_agency），不要登记到 NOTI。',
@@ -6235,6 +6411,18 @@ const messages = {
     elementpay_settings_env_url_override:
       '已设置环境变量 ELEMENTPAY_ICOPAY_NOTIFY_URL，URL 字段为只读。请修改服务器环境变量。',
     elementpay_settings_saved_ok: '已保存 ElementPay 对接设置。',
+    elementpay_settings_ip_title: 'Webhook IP 白名单',
+    elementpay_settings_ip_desc:
+      '按 ElementPay 要求，/noti/elementpay 仅接受白名单来源 IP。可配置 Sandbox、Live 及额外 IP。拒绝时返回 403，并写入 data/elementpay-webhook-ip-reject.log。',
+    elementpay_settings_ip_enabled: '启用 Webhook IP 白名单',
+    elementpay_settings_ip_enabled_hint: '关闭后不做 IP 检查（仅紧急用）。生产环境建议保持开启。',
+    elementpay_settings_ip_sandbox: 'Sandbox 允许 IP',
+    elementpay_settings_ip_live: 'Live 允许 IP',
+    elementpay_settings_ip_extra: '额外允许 IP（可选）',
+    elementpay_settings_ip_list_hint: '每行一个 IP，或用逗号分隔。Sandbox 与 Live 共用同一 URL，故两份列表均放行。',
+    elementpay_settings_ip_trusted_proxies: '可信代理 IP（如 Nginx）',
+    elementpay_settings_ip_trusted_hint:
+      '仅当 TCP 对端在此列表中时才采用 X-Real-IP / X-Forwarded-For；否则只用套接字 IP（防伪造）。',
     jpay_settings_title: 'JPAY 环境设置',
     jpay_settings_desc: 'JPAY API 无 Route 参数，商户与交易以 MID 标识。此处按环境将 MID、API Key、名称映射到通知接收 URL 槽位（j1~j20）。同一 jN URL 的通知依正文 MID 匹配对应行。',
     jpay_settings_add_section: '商户添加',
@@ -6284,10 +6472,12 @@ const messages = {
     pg_provider_jpay: 'JPAY',
     pg_provider_elementpay: 'ElementPay',
     pg_provider_ox: 'OXPAY',
+    pg_provider_crypto: 'CRYPTO',
     merchants_pg_provider_chillpay: 'CHILLPAY',
     merchants_pg_provider_jpay: 'JPAY',
     merchants_pg_provider_elementpay: 'ElementPay',
     merchants_pg_provider_ox: 'OXPAY',
+    merchants_pg_provider_crypto: 'CRYPTO',
     internal_noti_title: '内部通知设置',
     internal_noti_desc: '设置向内部/PG通知发送时按币种适用的金额加工规则。',
     internal_noti_pg_select: 'PG（代行）',
@@ -6517,6 +6707,7 @@ const messages = {
     cr_filter_pg_jpay: 'JPAY',
     cr_filter_pg_elementpay: 'ElementPay',
     cr_filter_pg_ox: 'OXPAY',
+    cr_filter_pg_crypto: 'CRYPTO',
     cr_type_void: '无效',
     cr_type_refund: '退款',
     cr_period_recent: '期间：最近',
