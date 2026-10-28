@@ -21,6 +21,8 @@ const elementPayNoti = require('./lib/elementpayNoti');
 const elementPayWebhookIp = require('./lib/elementpayWebhookIp');
 const oxNoti = require('./lib/oxNoti');
 const ilkNoti = require('./lib/ilkNoti');
+const qxipayNoti = require('./lib/qxipayNoti');
+const omspayNoti = require('./lib/omspayNoti');
 const cryptoNoti = require('./lib/cryptoNoti');
 const opsManual = require('./lib/opsManual');
 
@@ -588,6 +590,8 @@ const NOTI_PROVISION_CONFIG_PATH = path.join(CONFIG_DIR, 'noti-provision.json');
 const ELEMENTPAY_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'elementpay-ingress.json');
 const OX_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'ox-ingress.json');
 const ILK_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'ilk-ingress.json');
+const QXIPAY_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'qxipay-ingress.json');
+const OMSPAY_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'omspay-ingress.json');
 const TURNSTILE_CONFIG_PATH = path.join(CONFIG_DIR, 'turnstile.json');
 const TURNSTILE_SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const DEFAULT_SIDEBAR_TITLE = 'PG 노티 관리자';
@@ -1795,7 +1799,7 @@ function trySaveJsonConfigOrWarn(filePath, value, context) {
 }
 
 // ========== 전산 노티 대상 설정 (internal targets) ==========
-// id -> { id, name, callbackUrl, resultUrl, devCallbackUrl?, devResultUrl?, pgProvider?: chillpay|jpay|elementpay, linkedMid?: string }
+// id -> { id, name, callbackUrl, resultUrl, opsUrlsUnused?, devCallbackUrl?, devResultUrl?, devUrlsUnused?, pgProvider?: chillpay|jpay|elementpay, linkedMid?: string }
 /** ChillPay 전산 연결 MID 기본값(설정 Production Mid 가 없을 때) */
 const CHILLPAY_INTERNAL_LINKED_MID = 'M035594';
 
@@ -1929,7 +1933,73 @@ function normalizeInternalTargetPgProvider(raw) {
   if (p === 'elementpay' || p === 'ep') return 'elementpay';
   if (p === 'crypto') return 'crypto';
   if (p === 'ox' || p === 'oxpay') return 'ox';
+  if (p === 'ilk' || p === 'ilkpay') return 'ilk';
+  if (p === 'qxipay' || p === 'qxpay') return 'qxipay';
+  if (p === 'omspay' || p === 'oms' || p === 'waylar') return 'omspay';
   return 'chillpay';
+}
+
+function loadInternalTargetTimestampsFromChangeLog() {
+  const out = new Map();
+  try {
+    const logPath = path.join(__dirname, 'data', 'config-change.log');
+    if (!fs.existsSync(logPath)) return out;
+    const lines = fs.readFileSync(logPath, 'utf8').split(/\r?\n/);
+    for (const line of lines) {
+      if (!line || !line.trim()) continue;
+      let j;
+      try {
+        j = JSON.parse(line);
+      } catch (_) {
+        continue;
+      }
+      const type = String((j && j.type) || '');
+      if (type !== 'internal_target_update' && type !== 'internal_target_create') continue;
+      const id = String((j && j.targetId) || '').trim();
+      const at = String((j && j.at) || '').trim();
+      if (!id || !at) continue;
+      const cur = out.get(id) || {};
+      if (type === 'internal_target_create' || !cur.createdAt) cur.createdAt = cur.createdAt || at;
+      if (type === 'internal_target_create') cur.createdAt = at;
+      cur.updatedAt = at;
+      out.set(id, cur);
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return out;
+}
+
+/** Fill missing createdAt/updatedAt so 「최신 등록순」 works; persist when dirty. */
+function backfillInternalTargetTimestamps(map) {
+  if (!map || typeof map.forEach !== 'function') return false;
+  let dirty = false;
+  const fromLog = loadInternalTargetTimestampsFromChangeLog();
+  const keys = Array.from(map.keys());
+  keys.forEach((id, i) => {
+    const e = map.get(id);
+    if (!e || typeof e !== 'object') return;
+    const log = fromLog.get(id);
+    if (!e.createdAt && log && log.createdAt) {
+      e.createdAt = log.createdAt;
+      dirty = true;
+    }
+    if (!e.updatedAt && log && log.updatedAt) {
+      e.updatedAt = log.updatedAt;
+      dirty = true;
+    }
+    if (!e.createdAt) {
+      // File key order ≈ insert order: later keys treated as newer registrations.
+      e.createdAt = new Date(Date.UTC(2020, 0, 1, 0, 0, i)).toISOString();
+      dirty = true;
+    }
+    if (!e.updatedAt) {
+      e.updatedAt = e.createdAt;
+      dirty = true;
+    }
+    map.set(id, e);
+  });
+  return dirty;
 }
 
 function loadInternalTargets() {
@@ -1950,10 +2020,14 @@ function loadInternalTargets() {
         name: v.name || '',
         callbackUrl: v.callbackUrl || '',
         resultUrl: v.resultUrl || '',
+        opsUrlsUnused: !!(v.opsUrlsUnused === true || v.opsUrlsUnused === 1 || String(v.opsUrlsUnused || '').toLowerCase() === 'true'),
         devCallbackUrl: String(v.devCallbackUrl || '').trim(),
         devResultUrl: String(v.devResultUrl || '').trim(),
+        devUrlsUnused: !!(v.devUrlsUnused === true || v.devUrlsUnused === 1 || String(v.devUrlsUnused || '').toLowerCase() === 'true'),
         pgProvider: pg,
         linkedMid,
+        createdAt: String(v.createdAt || '').trim() || undefined,
+        updatedAt: String(v.updatedAt || '').trim() || undefined,
         ...internalTargetTimezoneFieldsFromRaw(v),
       };
       map.set(id, entry);
@@ -2025,6 +2099,88 @@ function loadInternalTargets() {
 }
 
 const INTERNAL_TARGETS = loadInternalTargets();
+try {
+  if (backfillInternalTargetTimestamps(INTERNAL_TARGETS)) {
+    saveInternalTargets();
+    console.log('[internal-targets] backfilled createdAt/updatedAt for sort/display');
+  }
+} catch (e) {
+  console.warn('[internal-targets] timestamp backfill skipped', e && e.message ? e.message : e);
+}
+
+function stampInternalTargetTimestamps(existing, next) {
+  const now = new Date().toISOString();
+  const createdAt =
+    (existing && String(existing.createdAt || '').trim()) ||
+    String((next && next.createdAt) || '').trim() ||
+    now;
+  return {
+    ...(next || {}),
+    createdAt,
+    updatedAt: now,
+  };
+}
+
+/** Calendar YYYY-MM-DD in admin TZ (Asia/Tokyo) for list date filters. */
+function ymdInAdminTz(isoOrDate, timeZone) {
+  const tz = timeZone || 'Asia/Tokyo';
+  let d;
+  if (isoOrDate instanceof Date) d = isoOrDate;
+  else if (isoOrDate) d = new Date(isoOrDate);
+  else return '';
+  if (!Number.isFinite(d.getTime())) return '';
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(d);
+  } catch (_) {
+    return d.toISOString().slice(0, 10);
+  }
+}
+
+function adminTzTodayYmd() {
+  return ymdInAdminTz(new Date(), 'Asia/Tokyo');
+}
+
+function shiftYmd(ymd, deltaDays) {
+  const m = String(ymd || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  const dt = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  return dt.toISOString().slice(0, 10);
+}
+
+function internalTargetActivityYmd(target) {
+  if (!target || typeof target !== 'object') return '';
+  const iso = String(target.updatedAt || target.createdAt || '').trim();
+  return iso ? ymdInAdminTz(iso, 'Asia/Tokyo') : '';
+}
+
+function formatInternalTargetRegisteredDisplay(target) {
+  const iso = String((target && (target.createdAt || target.updatedAt)) || '').trim();
+  if (!iso) return '—';
+  const ymd = ymdInAdminTz(iso, 'Asia/Tokyo'); // YYYY-MM-DD
+  const m = String(ymd || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '—';
+  // YYMMDD e.g. 260210
+  return m[1].slice(-2) + m[2] + m[3];
+}
+
+function listInternalTargetPgOptions(locale) {
+  return [
+    { value: 'chillpay', label: t(locale, 'pg_provider_chillpay') || 'ChillPay' },
+    { value: 'jpay', label: t(locale, 'pg_provider_jpay') || 'JPAY' },
+    { value: 'elementpay', label: t(locale, 'pg_provider_elementpay') || 'ElementPay' },
+    { value: 'ox', label: t(locale, 'pg_provider_ox') || 'OXPAY' },
+    { value: 'crypto', label: t(locale, 'pg_provider_crypto') || 'CRYPTO' },
+    { value: 'ilk', label: t(locale, 'pg_provider_ilk') || 'ILKPAY' },
+    { value: 'qxipay', label: t(locale, 'pg_provider_qxipay') || 'QXIPAY' },
+    { value: 'omspay', label: t(locale, 'pg_provider_omspay') || 'OMSPAY' },
+  ];
+}
 
 /** JPAY 노티 본문 MID(memberid)가 전산 대상 linkedMid 와 일치할 때 해당 멤버에게 표시 허용 */
 function memberCanSeeJpayByBodyMid(member, mid) {
@@ -2065,18 +2221,18 @@ function saveInternalTargets() {
 function findInternalTargetUrl(internalTargetId, kind) {
   if (!internalTargetId) return null;
   const t = INTERNAL_TARGETS.get(internalTargetId);
-  if (!t) return null;
+  if (!t || t.opsUrlsUnused) return null;
   if (kind === 'result') {
-    return t.resultUrl || t.callbackUrl;
+    return t.resultUrl || t.callbackUrl || null;
   }
-  return t.callbackUrl;
+  return t.callbackUrl || null;
 }
 
-/** 개발 전산(신서버) 전용 URL. 비어 있으면 null — 운영 URL로의 폴백은 호출부에서 처리 */
+/** 개발/ICOPAY 전산 전용 URL. 사용안함·비어 있으면 null — 운영 URL로의 폴백은 호출부에서 처리 */
 function findDevInternalTargetUrl(internalTargetId, kind) {
   if (!internalTargetId) return null;
   const t = INTERNAL_TARGETS.get(internalTargetId);
-  if (!t) return null;
+  if (!t || t.devUrlsUnused) return null;
   const dcb = String(t.devCallbackUrl || '').trim();
   const drs = String(t.devResultUrl || '').trim();
   if (kind === 'result') {
@@ -2233,8 +2389,10 @@ function getInternalTargetsList() {
             name,
             callbackUrl: t.callbackUrl || '',
             resultUrl: t.resultUrl || '',
+            opsUrlsUnused: !!(t.opsUrlsUnused === true || t.opsUrlsUnused === 1 || String(t.opsUrlsUnused || '').toLowerCase() === 'true'),
             devCallbackUrl: String(t.devCallbackUrl || '').trim(),
             devResultUrl: String(t.devResultUrl || '').trim(),
+            devUrlsUnused: !!(t.devUrlsUnused === true || t.devUrlsUnused === 1 || String(t.devUrlsUnused || '').toLowerCase() === 'true'),
             pgProvider,
             linkedMid: String(t.linkedMid || '').trim(),
             currency,
@@ -2249,8 +2407,10 @@ function getInternalTargetsList() {
             name: k,
             callbackUrl: '',
             resultUrl: '',
+            opsUrlsUnused: false,
             devCallbackUrl: '',
             devResultUrl: '',
+            devUrlsUnused: false,
             pgProvider: 'chillpay',
             linkedMid: '',
             currency: inferInternalTargetCurrency(k, k),
@@ -2266,8 +2426,10 @@ function getInternalTargetsList() {
           name,
           callbackUrl: v.callbackUrl || '',
           resultUrl: v.resultUrl || '',
+          opsUrlsUnused: !!(v.opsUrlsUnused === true || v.opsUrlsUnused === 1 || String(v.opsUrlsUnused || '').toLowerCase() === 'true'),
           devCallbackUrl: String(v.devCallbackUrl || '').trim(),
           devResultUrl: String(v.devResultUrl || '').trim(),
+          devUrlsUnused: !!(v.devUrlsUnused === true || v.devUrlsUnused === 1 || String(v.devUrlsUnused || '').toLowerCase() === 'true'),
           pgProvider,
           linkedMid: String(v.linkedMid || '').trim(),
           currency,
@@ -2301,6 +2463,9 @@ function buildIcopayInternalTargetsCatalog(filterRaw) {
   else if (filter === 'ox' || filter === 'oxpay') want = 'ox';
   else if (filter === 'elementpay' || filter === 'ep' || filter === 'element') want = 'elementpay';
   else if (filter === 'chillpay' || filter === 'chill') want = 'chillpay';
+  else if (filter === 'ilk' || filter === 'ilkpay') want = 'ilk';
+  else if (filter === 'qxipay' || filter === 'qxpay') want = 'qxipay';
+  else if (filter === 'omspay' || filter === 'oms' || filter === 'waylar') want = 'omspay';
   const list = getInternalTargetsList();
   const out = [];
   for (const t of list) {
@@ -2313,7 +2478,7 @@ function buildIcopayInternalTargetsCatalog(filterRaw) {
       id: String(t.id).trim(),
       name: String(t.name || t.id).trim(),
       pgProvider: pg,
-      label: [pg === 'ox' ? 'OXPAY' : pg === 'elementpay' ? 'ElementPay' : pg === 'jpay' ? 'JPAY' : 'ChillPay', currency, t.id, t.name]
+      label: [pg === 'ox' ? 'OXPAY' : pg === 'omspay' ? 'OMSPAY' : pg === 'qxipay' ? 'QXIPAY' : pg === 'ilk' ? 'ILKPAY' : pg === 'elementpay' ? 'ElementPay' : pg === 'jpay' ? 'JPAY' : 'ChillPay', currency, t.id, t.name]
         .filter(Boolean)
         .join(' · '),
     };
@@ -5190,7 +5355,33 @@ function deleteCryptoMerchantProvision(merchantId, force, meta) {
   };
 }
 
-function buildOxMerchantObject(input) {
+/** Fixed-ingress PG kinds: no ChillPay/JPAY slot URLs — Comp-Id + merchant Callback/Result only. */
+function isFixedIngressMerchantPgKind(kind) {
+  const k = String(kind || '').toLowerCase().trim();
+  return (
+    k === 'elementpay' ||
+    k === 'ox' ||
+    k === 'crypto' ||
+    k === 'ilk' ||
+    k === 'qxipay' ||
+    k === 'omspay'
+  );
+}
+
+function normalizeMerchantRegisterPgKind(raw) {
+  const p = String(raw || '').toLowerCase().trim();
+  if (p === 'jpay') return 'jpay';
+  if (p === 'elementpay' || p === 'ep') return 'elementpay';
+  if (p === 'ox' || p === 'oxpay') return 'ox';
+  if (p === 'crypto') return 'crypto';
+  if (p === 'ilk' || p === 'ilkpay') return 'ilk';
+  if (p === 'qxipay' || p === 'qxpay') return 'qxipay';
+  if (p === 'omspay' || p === 'oms' || p === 'waylar') return 'omspay';
+  return 'chillpay';
+}
+
+function buildFixedIngressMerchantObject(pgKind, input) {
+  const kind = normalizeMerchantRegisterPgKind(pgKind);
   const {
     merchantId,
     callbackUrl,
@@ -5200,7 +5391,7 @@ function buildOxMerchantObject(input) {
     options,
     prev,
     icopayMeta,
-  } = input;
+  } = input || {};
   const opts = normalizeJpayProvisionOptions(options);
   const out = {
     ...(prev || {}),
@@ -5209,7 +5400,7 @@ function buildOxMerchantObject(input) {
     routeResultKey: '',
     callbackUrl: String(callbackUrl || '').trim(),
     resultUrl: String(resultUrl || '').trim(),
-    routeNo: String(routeNo || '').trim(),
+    routeNo: String(routeNo || '').trim() || kind,
     internalCustomerId: '',
     internalTargetId: String(internalTargetId || '').trim(),
     enableRelay: opts.enableRelay,
@@ -5228,7 +5419,7 @@ function buildOxMerchantObject(input) {
     jpayRouteResultKey: '',
     jpayCallbackUrl: '',
     jpayResultUrl: '',
-    merchantPgKind: 'ox',
+    merchantPgKind: kind,
     chillpayRecurring: 'N',
     resultDeliveryMode: opts.resultDeliveryMode,
     relayEnrichmentMode: 'plain',
@@ -5242,6 +5433,22 @@ function buildOxMerchantObject(input) {
     }
   }
   return out;
+}
+
+function buildOxMerchantObject(input) {
+  return buildFixedIngressMerchantObject('ox', input);
+}
+
+function buildIlkMerchantObject(input) {
+  return buildFixedIngressMerchantObject('ilk', input);
+}
+
+function buildQxipayMerchantObject(input) {
+  return buildFixedIngressMerchantObject('qxipay', input);
+}
+
+function buildOmspayMerchantObject(input) {
+  return buildFixedIngressMerchantObject('omspay', input);
 }
 
 function merchantToOxProvisionApiData(merchant, extras) {
@@ -5484,6 +5691,249 @@ function deleteOxMerchantProvision(merchantId, force, meta) {
     ok: true,
     status: 200,
     body: { success: true, data: { deleted: true, merchantId: id, pgKind: 'ox' } },
+  };
+}
+
+function merchantToOmspayProvisionApiData(merchant, extras) {
+  const m = merchant || {};
+  const meta =
+    m.icopayProvisionMeta && typeof m.icopayProvisionMeta === 'object' ? m.icopayProvisionMeta : null;
+  const compName = String(m.name || m.label || (meta && (meta.compName || meta.compNm)) || '').trim();
+  return {
+    merchantId: m.merchantId || '',
+    name: compName || undefined,
+    icopayMeta: meta
+      ? {
+          compId: String(meta.compId || m.merchantId || '').trim() || undefined,
+          compName: String(meta.compName || meta.compNm || compName || '').trim() || undefined,
+          orgUnitId: meta.orgUnitId,
+          provisionedBy: meta.provisionedBy,
+          integrationMode: meta.integrationMode,
+        }
+      : compName
+        ? { compId: String(m.merchantId || '').trim() || undefined, compName }
+        : undefined,
+    pgKind: 'omspay',
+    slot: null,
+    routeNo: String(m.routeNo || 'omspay').trim() || 'omspay',
+    jpayRouteCallbackKey: '',
+    jpayRouteResultKey: '',
+    pgCallbackUrl: '',
+    pgResultUrl: '',
+    icopayJpayNotifyUrl: '',
+    icopayJpayCallbackUrl: '',
+    internalTargetId: String(m.internalTargetId || '').trim(),
+    callbackUrl: String(m.callbackUrl || '').trim(),
+    resultUrl: String(m.resultUrl || '').trim(),
+    enableRelay: m.enableRelay !== false,
+    enableInternal: !!m.enableInternal,
+    enableDevInternal: !!m.enableDevInternal,
+    enableDealmaiWebhook: !!m.enableDealmaiWebhook,
+    dealmaiPartnerCode: String(m.dealmaiPartnerCode || '').trim(),
+    relayOffForwardTarget: normalizeMerchantRelayOffForwardTarget(m.relayOffForwardTarget),
+    relayOffDevCallbackUrl: String(m.relayOffDevCallbackUrl || '').trim(),
+    relayOffDevResultUrl: String(m.relayOffDevResultUrl || '').trim(),
+    relayOffDevDedicatedUse: !!m.relayOffDevDedicatedUse,
+    resultDeliveryMode: String(m.resultDeliveryMode || 'auto').trim(),
+    relayFormat: String(m.relayFormat || 'raw').trim(),
+    ...getOmspayPublicIngressUrls(),
+    created: extras && extras.created === false ? false : true,
+    provisionRequestId: extras && extras.provisionRequestId ? String(extras.provisionRequestId) : undefined,
+  };
+}
+
+function omspayMerchantProvisionSnapshot(rec) {
+  if (!rec || inferMerchantPgKind(rec) !== 'omspay') return null;
+  return {
+    routeNo: String(rec.routeNo || '').trim(),
+    callbackUrl: String(rec.callbackUrl || '').trim(),
+    resultUrl: String(rec.resultUrl || '').trim(),
+    internalTargetId: String(rec.internalTargetId || '').trim(),
+    enableRelay: !!rec.enableRelay,
+    enableInternal: !!rec.enableInternal,
+    enableDevInternal: !!rec.enableDevInternal,
+    relayFormat: String(rec.relayFormat || 'raw').trim(),
+    resultDeliveryMode: String(rec.resultDeliveryMode || 'auto').trim(),
+    enableDealmaiWebhook: !!rec.enableDealmaiWebhook,
+    dealmaiPartnerCode: String(rec.dealmaiPartnerCode || '').trim(),
+    name: String(rec.name || rec.label || '').trim(),
+  };
+}
+
+function provisionOmspayMerchant(body, meta) {
+  const requestId = meta && meta.requestId ? String(meta.requestId).trim() : '';
+  const clientIp = (meta && meta.clientIp) || '';
+  const actor = (meta && meta.actor) || 'icopay-provision';
+  if (!body || typeof body !== 'object') {
+    return { ok: false, status: 400, errorCode: 'INVALID_REQUEST' };
+  }
+  const merchantId = normalizeProvisionMerchantId(body.merchantId);
+  if (!merchantId) {
+    return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  }
+  const pgKind = String(body.pgKind || '').toLowerCase().trim();
+  if (pgKind !== 'omspay' && pgKind !== 'oms' && pgKind !== 'waylar') {
+    return { ok: false, status: 400, errorCode: pgKind ? 'INVALID_PG_KIND' : 'INVALID_REQUEST' };
+  }
+  const internalTargetId = String(body.internalTargetId || '').trim();
+  if (!internalTargetId || !INTERNAL_TARGETS.has(internalTargetId)) {
+    return { ok: false, status: 400, errorCode: 'INVALID_INTERNAL_TARGET' };
+  }
+  const optionsIn = body.options && typeof body.options === 'object' ? { ...body.options } : {};
+  if (body.enableDealmaiWebhook != null && optionsIn.enableDealmaiWebhook == null) {
+    optionsIn.enableDealmaiWebhook = body.enableDealmaiWebhook;
+  }
+  if (body.dealmaiPartnerCode != null && !optionsIn.dealmaiPartnerCode) {
+    optionsIn.dealmaiPartnerCode = body.dealmaiPartnerCode;
+  }
+  const options = normalizeJpayProvisionOptions(optionsIn);
+  const callbackUrl = String(body.callbackUrl || '').trim();
+  const resultUrl = String(body.resultUrl || '').trim();
+  if (options.enableRelay && (!callbackUrl || !resultUrl)) {
+    return { ok: false, status: 400, errorCode: 'MERCHANT_URL_REQUIRED' };
+  }
+  const existing = MERCHANTS.get(merchantId) || null;
+  if (existing && inferMerchantPgKind(existing) !== 'omspay') {
+    return { ok: false, status: 409, errorCode: 'MERCHANT_ALREADY_EXISTS' };
+  }
+  const desiredRecord = buildOmspayMerchantObject({
+    merchantId,
+    callbackUrl,
+    resultUrl,
+    routeNo: body.routeNo || 'omspay',
+    internalTargetId,
+    options,
+    prev: existing || {},
+    icopayMeta: resolveIcopayMetaFromProvisionBody(body, merchantId),
+  });
+  const desiredSnap = omspayMerchantProvisionSnapshot(desiredRecord);
+  const existingSnap = omspayMerchantProvisionSnapshot(existing);
+  if (existingSnap && JSON.stringify(existingSnap) === JSON.stringify(desiredSnap)) {
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        success: true,
+        data: merchantToOmspayProvisionApiData(existing, {
+          created: false,
+          provisionRequestId: requestId || undefined,
+        }),
+      },
+      idempotent: true,
+    };
+  }
+  MERCHANTS.set(merchantId, desiredRecord);
+  try {
+    saveMerchants();
+  } catch (e) {
+    MERCHANTS.delete(merchantId);
+    if (existing) MERCHANTS.set(merchantId, existing);
+    return {
+      ok: false,
+      status: 503,
+      errorCode: 'NOTI_CONFIG_LOCKED',
+      details: { message: (e && e.message) || String(e) },
+    };
+  }
+  appendConfigChangeLog({
+    type: existing ? 'merchant_update' : 'merchant_create',
+    source: 'icopay-provision',
+    actor,
+    clientIp,
+    merchantId,
+    before: existing,
+    after: MERCHANTS.get(merchantId),
+    provisionRequestId: requestId || undefined,
+    icopayMeta: MERCHANTS.get(merchantId) && MERCHANTS.get(merchantId).icopayProvisionMeta,
+  });
+  return {
+    ok: true,
+    status: existing ? 200 : 201,
+    body: {
+      success: true,
+      data: merchantToOmspayProvisionApiData(MERCHANTS.get(merchantId), {
+        created: !existing,
+        provisionRequestId: requestId || undefined,
+      }),
+    },
+  };
+}
+
+function getOmspayMerchantProvision(merchantId) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const m = MERCHANTS.get(id);
+  if (!m || inferMerchantPgKind(m) !== 'omspay') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  return {
+    ok: true,
+    status: 200,
+    body: { success: true, data: merchantToOmspayProvisionApiData(m, { created: false }) },
+  };
+}
+
+function updateOmspayMerchantProvision(merchantId, body, meta) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const existing = MERCHANTS.get(id);
+  if (!existing || inferMerchantPgKind(existing) !== 'omspay') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  const merged = { ...(body || {}), merchantId: id, pgKind: 'omspay' };
+  if (merged.internalTargetId == null) merged.internalTargetId = existing.internalTargetId;
+  if (merged.callbackUrl == null) merged.callbackUrl = existing.callbackUrl;
+  if (merged.resultUrl == null) merged.resultUrl = existing.resultUrl;
+  if (!merged.options || typeof merged.options !== 'object') {
+    merged.options = {
+      enableRelay: existing.enableRelay !== false,
+      enableInternal: !!existing.enableInternal,
+      enableDevInternal: !!existing.enableDevInternal,
+      relayFormat: existing.relayFormat || 'raw',
+      resultDeliveryMode: existing.resultDeliveryMode || 'auto',
+      enableDealmaiWebhook: !!existing.enableDealmaiWebhook,
+      dealmaiPartnerCode: existing.dealmaiPartnerCode || '',
+    };
+  }
+  if (!merged.icopayMeta && existing.icopayProvisionMeta) {
+    merged.icopayMeta = existing.icopayProvisionMeta;
+  }
+  return provisionOmspayMerchant(merged, meta);
+}
+
+function deleteOmspayMerchantProvision(merchantId, force, meta) {
+  const id = normalizeProvisionMerchantId(merchantId);
+  if (!id) return { ok: false, status: 400, errorCode: 'INVALID_MERCHANT_ID' };
+  const existing = MERCHANTS.get(id);
+  if (!existing || inferMerchantPgKind(existing) !== 'omspay') {
+    return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
+  }
+  MERCHANTS.delete(id);
+  try {
+    saveMerchants();
+  } catch (e) {
+    MERCHANTS.set(id, existing);
+    return {
+      ok: false,
+      status: 503,
+      errorCode: 'NOTI_CONFIG_LOCKED',
+      details: { message: (e && e.message) || String(e) },
+    };
+  }
+  appendConfigChangeLog({
+    type: 'merchant_delete',
+    source: 'icopay-provision',
+    actor: (meta && meta.actor) || 'icopay-provision',
+    clientIp: (meta && meta.clientIp) || '',
+    merchantId: id,
+    before: existing,
+    after: null,
+    force: !!force,
+  });
+  return {
+    ok: true,
+    status: 200,
+    body: { success: true, data: { deleted: true, merchantId: id, pgKind: 'omspay' } },
   };
 }
 
@@ -6328,6 +6778,512 @@ async function relayIlkMerchantNotify(merchantId, merchant, notifyBody, rawBody,
   appendPgNotiLog(pgLogEntry);
   return { relaySuccess, relayFailReason };
 }
+
+
+function loadQxipayIngressConfig() {
+  const fromFile = loadJsonConfig(QXIPAY_INGRESS_CONFIG_PATH, {}) || {};
+  const envUrl = String(process.env.QXIPAY_ICOPAY_NOTIFY_URL || '').trim();
+  const envLookup = String(process.env.QXIPAY_ICOPAY_ORDER_LOOKUP_URL || '').trim();
+  return {
+    enabled: fromFile.enabled !== false,
+    icopayNotifyUrl: envUrl || String(fromFile.icopayNotifyUrl || '').trim(),
+    icopayOrderLookupUrl: envLookup || String(fromFile.icopayOrderLookupUrl || '').trim(),
+    timeoutMs: Math.max(
+      3000,
+      Math.min(120000, Number(fromFile.timeoutMs) || Number(process.env.QXIPAY_ICOPAY_TIMEOUT_MS) || 25000),
+    ),
+    note: String(fromFile.note || '').trim(),
+  };
+}
+
+function getQxipayPublicIngressUrls() {
+  const base = 'https://noti.icopay.net';
+  return {
+    qxipayWebhookUrl: base + '/noti/qxipay',
+    qxipayResultUrl: base + '/noti/result/qxipay',
+  };
+}
+
+function stampQxipayCompIdOnBody(body, compId) {
+  const out = body && typeof body === 'object' ? { ...body } : {};
+  const id = String(compId || '').trim();
+  if (id) {
+    out.compId = id;
+    out.CompId = id;
+    out['Comp-Id'] = id;
+    if (!out.merchantId) out.merchantId = id;
+  }
+  return out;
+}
+
+async function forwardQxipayToIcopay(rawBodyStr, contentType, attempt, extraHeaders) {
+  const cfg = loadQxipayIngressConfig();
+  if (!cfg.enabled) {
+    return { ok: false, status: 503, data: 'QXIPAY ingress disabled', headers: {} };
+  }
+  if (!cfg.icopayNotifyUrl) {
+    return { ok: false, status: 503, data: 'QXIPAY ICOPAY notify URL not configured', headers: {} };
+  }
+  const headers = {
+    'Content-Type':
+      contentType && String(contentType).trim()
+        ? String(contentType).split(';')[0].trim() + '; charset=utf-8'
+        : 'application/json; charset=utf-8',
+  };
+  if (extraHeaders && typeof extraHeaders === 'object') {
+    Object.assign(headers, extraHeaders);
+  }
+  applyIcopayPgNotifyIngressHeaders(headers, cfg.icopayNotifyUrl, attempt || 1);
+  if (!headers['X-Icopay-Notify-Delivery']) {
+    headers['X-Icopay-Notify-Delivery'] = (attempt || 1) <= 1 ? 'LIVE' : 'RETRY';
+    headers['X-Noti-Attempt'] = String(Math.max(1, Math.floor(Number(attempt) || 1)));
+  }
+  try {
+    const res = await axios.post(cfg.icopayNotifyUrl, rawBodyStr || '', {
+      headers,
+      timeout: cfg.timeoutMs,
+      validateStatus: () => true,
+      transformResponse: [(d) => d],
+      responseType: 'text',
+    });
+    return { ok: res.status >= 200 && res.status < 300, status: res.status, data: res.data, headers: res.headers || {} };
+  } catch (e) {
+    console.error('[QXIPAY] forward error', e.message || e);
+    return { ok: false, status: 502, data: String(e.message || e), headers: {} };
+  }
+}
+
+async function relayQxipayMerchantNotify(merchantId, merchant, notifyBody, rawBody, incomingContentType) {
+  const enableRelay = !!(merchant && merchant.enableRelay);
+  const targetUrl = merchant && merchant.callbackUrl ? String(merchant.callbackUrl).trim() : '';
+  let relaySuccess = false;
+  let relayFailReason = '';
+  let relayFormat = 'json';
+  if (enableRelay && targetUrl) {
+    const rf = String((merchant && merchant.relayFormat) || 'json').toLowerCase();
+    relayFormat = rf === 'form' ? 'form' : 'json';
+    let relayOpts = { contentType: 'application/json', rawBody: JSON.stringify(notifyBody || {}) };
+    if (relayFormat === 'form') {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v === undefined || v === null) continue;
+        params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      relayOpts = {
+        contentType: 'application/x-www-form-urlencoded',
+        rawBody: params.toString(),
+      };
+    }
+    try {
+      let relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+      relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+      if (!relaySuccess) {
+        relayFailReason =
+          `HTTP ${relayRes.status}` +
+          (relayRes.data && typeof relayRes.data === 'string' ? ': ' + String(relayRes.data).slice(0, 200) : '');
+        await new Promise((r) => setTimeout(r, 2000));
+        relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      }
+    } catch (err) {
+      relayFailReason = err.code || err.message || String(err);
+      try {
+        await new Promise((r) => setTimeout(r, 2000));
+        const retryRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = retryRes.status >= 200 && retryRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      } catch (err2) {
+        if (!relayFailReason) relayFailReason = err2.code || err2.message || String(err2);
+      }
+    }
+  } else if (enableRelay && !targetUrl) {
+    relayFailReason = '가맹점 URL 없음';
+  }
+
+  const pgLogEntry = {
+    routeKey: 'qxipay/webhook',
+    merchantId,
+    kind: 'callback',
+    body: notifyBody,
+    rawBody: rawBody || undefined,
+    targetUrl: enableRelay ? targetUrl || '' : '',
+    contentType: incomingContentType,
+    env: 'live',
+    relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
+    relayFailReason: relaySuccess ? '' : relayFailReason || '',
+    relayFormatUsed: enableRelay && relaySuccess ? relayFormat : undefined,
+    pgProvider: 'qxipay',
+  };
+  appendPgNotiLog(pgLogEntry);
+  return { relaySuccess, relayFailReason };
+}
+
+async function handleQxipayWebhook(req, res) {
+  const cfg = loadQxipayIngressConfig();
+  const rawBodyStr = req.rawBodyBuffer ? req.rawBodyBuffer.toString('utf8') : '';
+  const incomingContentType =
+    (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
+  let body = req.body;
+  if (!body || typeof body !== 'object') body = {};
+  if (Object.keys(body).length === 0 && req.rawBodyBuffer && req.rawBodyBuffer.length) {
+    try {
+      body = JSON.parse(req.rawBodyBuffer.toString('utf8'));
+    } catch (_) {
+      const parsed = parseNotiRawBodyToObject(req.rawBodyBuffer, incomingContentType);
+      if (Object.keys(parsed).length) body = parsed;
+    }
+  }
+  const eventType = String(
+    (req.get && req.get('GW-Event-Type')) || body.type || '',
+  ).trim();
+  const order = String(
+    qxipayNoti.pick(body, ['data.object.reference', 'reference', 'orderNo']) || '',
+  ).trim();
+  console.log('[QXIPAY] webhook', 'event=', eventType || '-', 'order=', order || '-');
+
+  if (!cfg.enabled) {
+    return res.status(503).send('QXIPAY ingress disabled');
+  }
+  if (!cfg.icopayNotifyUrl) {
+    console.error('[QXIPAY] icopayNotifyUrl not configured');
+    return res.status(503).send('QXIPAY ICOPAY URL not configured');
+  }
+
+  const forwardBody =
+    rawBodyStr && String(rawBodyStr).trim() ? rawBodyStr : JSON.stringify(body || {});
+  const passHeaders = {};
+  const sig = (req.get && (req.get('GW-Signature') || req.get('gw-signature'))) || '';
+  if (sig) passHeaders['GW-Signature'] = sig;
+  if (eventType) passHeaders['GW-Event-Type'] = eventType;
+
+  const ico = await forwardQxipayToIcopay(forwardBody, incomingContentType || 'application/json', 1, passHeaders);
+  const compIdHdr = qxipayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-comp-id');
+  const orderHdr = qxipayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-order-no');
+
+  const outStatus = ico.status && Number.isFinite(Number(ico.status)) ? Number(ico.status) : 502;
+  const outCt =
+    qxipayNoti.headerGetIgnoreCase(ico.headers, 'content-type') || 'application/json; charset=utf-8';
+  const outBody = ico.data != null ? ico.data : '';
+  console.log('[QXIPAY] passthrough', 'order=', order || '-', 'http=', outStatus);
+  res.status(outStatus);
+  res.set('Content-Type', outCt);
+  res.send(outBody);
+
+  if (qxipayNoti.qxipayShouldNotifyMerchant(eventType, body)) {
+    setImmediate(() => {
+      Promise.resolve()
+        .then(async () => {
+          let compId = compIdHdr || String(body.compId || body.CompId || '').trim();
+          const orderForComp = orderHdr || order;
+          if (!compId && orderForComp && cfg.icopayOrderLookupUrl) {
+            try {
+              const lookupUrl = String(cfg.icopayOrderLookupUrl).replace(
+                /\{order\}/gi,
+                encodeURIComponent(orderForComp),
+              );
+              const lr = await axios.get(lookupUrl, { timeout: 8000, validateStatus: () => true });
+              const hdr = lr.headers && (lr.headers['x-icopay-comp-id'] || lr.headers['X-Icopay-Comp-Id']);
+              if (hdr) compId = String(hdr).trim();
+              else if (lr.data && typeof lr.data === 'object' && lr.data.compId) {
+                compId = String(lr.data.compId).trim();
+              }
+            } catch (_) {}
+          }
+          const match = findMerchantByCompIdForCrypto(compId);
+          if (!match) {
+            console.warn('[QXIPAY] merchant notify skipped', 'compId=', compId || '(none)', 'order=', orderForComp || '-');
+            appendPgNotiLog({
+              routeKey: 'qxipay/webhook',
+              merchantId: compId || '',
+              kind: 'callback',
+              body: stampQxipayCompIdOnBody(
+                qxipayNoti.mapQxipayToMerchantNotifyBody(body),
+                compId,
+              ),
+              rawBody: forwardBody || undefined,
+              targetUrl: '',
+              contentType: incomingContentType,
+              env: 'live',
+              relayStatus: 'fail',
+              relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing X-Icopay-Comp-Id',
+              pgProvider: 'qxipay',
+            });
+            return;
+          }
+          const notifyBody = stampQxipayCompIdOnBody(
+            qxipayNoti.mapQxipayToMerchantNotifyBody(body),
+            match.merchantId || compId,
+          );
+          try {
+            await relayQxipayMerchantNotify(
+              match.merchantId,
+              match.merchant,
+              notifyBody,
+              forwardBody,
+              incomingContentType,
+            );
+          } catch (e) {
+            console.error('[QXIPAY] merchant relay error', e.message || e);
+          }
+        })
+        .catch((e) => console.error('[QXIPAY] merchant notify async error', e && e.message ? e.message : e));
+    });
+  }
+}
+
+
+
+
+function loadOmspayIngressConfig() {
+  const fromFile = loadJsonConfig(OMSPAY_INGRESS_CONFIG_PATH, {}) || {};
+  const envUrl = String(process.env.OMSPAY_ICOPAY_NOTIFY_URL || '').trim();
+  const envLookup = String(process.env.OMSPAY_ICOPAY_ORDER_LOOKUP_URL || '').trim();
+  return {
+    enabled: fromFile.enabled !== false,
+    icopayNotifyUrl: envUrl || String(fromFile.icopayNotifyUrl || '').trim(),
+    icopayOrderLookupUrl: envLookup || String(fromFile.icopayOrderLookupUrl || '').trim(),
+    timeoutMs: Math.max(
+      3000,
+      Math.min(120000, Number(fromFile.timeoutMs) || Number(process.env.OMSPAY_ICOPAY_TIMEOUT_MS) || 25000),
+    ),
+    note: String(fromFile.note || '').trim(),
+  };
+}
+
+function getOmspayPublicIngressUrls() {
+  const base = 'https://noti.icopay.net';
+  return {
+    omspayWebhookUrl: base + '/noti/omspay',
+    omspayResultUrl: base + '/noti/result/omspay',
+  };
+}
+
+function stampOmspayCompIdOnBody(body, compId) {
+  const out = body && typeof body === 'object' ? { ...body } : {};
+  const id = String(compId || '').trim();
+  if (id) {
+    out.compId = id;
+    out.CompId = id;
+    out['Comp-Id'] = id;
+    if (!out.merchantId) out.merchantId = id;
+  }
+  return out;
+}
+
+async function forwardOmspayToIcopay(rawBodyStr, contentType, attempt, extraHeaders) {
+  const cfg = loadOmspayIngressConfig();
+  if (!cfg.enabled) {
+    return { ok: false, status: 503, data: 'OMSPAY ingress disabled', headers: {} };
+  }
+  if (!cfg.icopayNotifyUrl) {
+    return { ok: false, status: 503, data: 'OMSPAY ICOPAY notify URL not configured', headers: {} };
+  }
+  const headers = {
+    'Content-Type':
+      contentType && String(contentType).trim()
+        ? String(contentType).split(';')[0].trim() + '; charset=utf-8'
+        : 'application/json; charset=utf-8',
+  };
+  if (extraHeaders && typeof extraHeaders === 'object') {
+    Object.assign(headers, extraHeaders);
+  }
+  applyIcopayPgNotifyIngressHeaders(headers, cfg.icopayNotifyUrl, attempt || 1);
+  if (!headers['X-Icopay-Notify-Delivery']) {
+    headers['X-Icopay-Notify-Delivery'] = (attempt || 1) <= 1 ? 'LIVE' : 'RETRY';
+    headers['X-Noti-Attempt'] = String(Math.max(1, Math.floor(Number(attempt) || 1)));
+  }
+  try {
+    const res = await axios.post(cfg.icopayNotifyUrl, rawBodyStr || '', {
+      headers,
+      timeout: cfg.timeoutMs,
+      validateStatus: () => true,
+      transformResponse: [(d) => d],
+      responseType: 'text',
+    });
+    return { ok: res.status >= 200 && res.status < 300, status: res.status, data: res.data, headers: res.headers || {} };
+  } catch (e) {
+    console.error('[OMSPAY] forward error', e.message || e);
+    return { ok: false, status: 502, data: String(e.message || e), headers: {} };
+  }
+}
+
+async function relayOmspayMerchantNotify(merchantId, merchant, notifyBody, rawBody, incomingContentType) {
+  const enableRelay = !!(merchant && merchant.enableRelay);
+  const targetUrl = merchant && merchant.callbackUrl ? String(merchant.callbackUrl).trim() : '';
+  let relaySuccess = false;
+  let relayFailReason = '';
+  let relayFormat = 'json';
+  if (enableRelay && targetUrl) {
+    const rf = String((merchant && merchant.relayFormat) || 'json').toLowerCase();
+    relayFormat = rf === 'form' ? 'form' : 'json';
+    let relayOpts = { contentType: 'application/json', rawBody: JSON.stringify(notifyBody || {}) };
+    if (relayFormat === 'form') {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v === undefined || v === null) continue;
+        params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      relayOpts = {
+        contentType: 'application/x-www-form-urlencoded',
+        rawBody: params.toString(),
+      };
+    }
+    try {
+      let relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+      relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+      if (!relaySuccess) {
+        relayFailReason =
+          `HTTP ${relayRes.status}` +
+          (relayRes.data && typeof relayRes.data === 'string' ? ': ' + String(relayRes.data).slice(0, 200) : '');
+        await new Promise((r) => setTimeout(r, 2000));
+        relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      }
+    } catch (err) {
+      relayFailReason = err.code || err.message || String(err);
+      try {
+        await new Promise((r) => setTimeout(r, 2000));
+        const retryRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = retryRes.status >= 200 && retryRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      } catch (err2) {
+        if (!relayFailReason) relayFailReason = err2.code || err2.message || String(err2);
+      }
+    }
+  } else if (enableRelay && !targetUrl) {
+    relayFailReason = '가맹점 URL 없음';
+  }
+
+  const pgLogEntry = {
+    routeKey: 'omspay/webhook',
+    merchantId,
+    kind: 'callback',
+    body: notifyBody,
+    rawBody: rawBody || undefined,
+    targetUrl: enableRelay ? targetUrl || '' : '',
+    contentType: incomingContentType,
+    env: 'live',
+    relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
+    relayFailReason: relaySuccess ? '' : relayFailReason || '',
+    relayFormatUsed: enableRelay && relaySuccess ? relayFormat : undefined,
+    pgProvider: 'omspay',
+  };
+  appendPgNotiLog(pgLogEntry);
+  return { relaySuccess, relayFailReason };
+}
+
+async function handleOmspayWebhook(req, res) {
+  const cfg = loadOmspayIngressConfig();
+  const rawBodyStr = req.rawBodyBuffer ? req.rawBodyBuffer.toString('utf8') : '';
+  const incomingContentType =
+    (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
+  let body = req.body;
+  if (!body || typeof body !== 'object') body = {};
+  if (Object.keys(body).length === 0 && req.rawBodyBuffer && req.rawBodyBuffer.length) {
+    try {
+      body = JSON.parse(req.rawBodyBuffer.toString('utf8'));
+    } catch (_) {
+      const parsed = parseNotiRawBodyToObject(req.rawBodyBuffer, incomingContentType);
+      if (Object.keys(parsed).length) body = parsed;
+    }
+  }
+  const order = String(
+    omspayNoti.pick(body, ['note', 'orderNo', 'ref1', 'so']) || '',
+  ).trim();
+  console.log('[OMSPAY] webhook', 'so=', body.so || '-', 'order=', order || '-');
+
+  if (!cfg.enabled) {
+    return res.status(503).send('OMSPAY ingress disabled');
+  }
+  if (!cfg.icopayNotifyUrl) {
+    console.error('[OMSPAY] icopayNotifyUrl not configured');
+    return res.status(503).send('OMSPAY ICOPAY URL not configured');
+  }
+
+  const forwardBody =
+    rawBodyStr && String(rawBodyStr).trim() ? rawBodyStr : JSON.stringify(body || {});
+  const passHeaders = {};
+  const sig =
+    (req.get && (req.get('x-waylar-signature') || req.get('X-Waylar-Signature'))) || '';
+  if (sig) passHeaders['x-waylar-signature'] = sig;
+
+  const ico = await forwardOmspayToIcopay(forwardBody, incomingContentType || 'application/json', 1, passHeaders);
+  const compIdHdr = omspayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-comp-id');
+  const orderHdr = omspayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-order-no');
+
+  const outStatus = ico.status && Number.isFinite(Number(ico.status)) ? Number(ico.status) : 502;
+  const outCt =
+    omspayNoti.headerGetIgnoreCase(ico.headers, 'content-type') || 'application/json; charset=utf-8';
+  const outBody = ico.data != null ? ico.data : '';
+  console.log('[OMSPAY] passthrough', 'order=', order || '-', 'http=', outStatus);
+  res.status(outStatus);
+  res.set('Content-Type', outCt);
+  res.send(outBody);
+
+  if (omspayNoti.omspayShouldNotifyMerchant(body)) {
+    setImmediate(() => {
+      Promise.resolve()
+        .then(async () => {
+          let compId = compIdHdr || String(body.compId || body.CompId || '').trim();
+          const orderForComp = orderHdr || order;
+          if (!compId && orderForComp && cfg.icopayOrderLookupUrl) {
+            try {
+              const lookupUrl = String(cfg.icopayOrderLookupUrl).replace(
+                /\{order\}/gi,
+                encodeURIComponent(orderForComp),
+              );
+              const lr = await axios.get(lookupUrl, { timeout: 8000, validateStatus: () => true });
+              const hdr = lr.headers && (lr.headers['x-icopay-comp-id'] || lr.headers['X-Icopay-Comp-Id']);
+              if (hdr) compId = String(hdr).trim();
+              else if (lr.data && typeof lr.data === 'object' && lr.data.compId) {
+                compId = String(lr.data.compId).trim();
+              }
+            } catch (_) {}
+          }
+          const match = findMerchantByCompIdForCrypto(compId);
+          if (!match) {
+            console.warn('[OMSPAY] merchant notify skipped', 'compId=', compId || '(none)', 'order=', orderForComp || '-');
+            appendPgNotiLog({
+              routeKey: 'omspay/webhook',
+              merchantId: compId || '',
+              kind: 'callback',
+              body: stampOmspayCompIdOnBody(
+                omspayNoti.mapOmspayToMerchantNotifyBody(body),
+                compId,
+              ),
+              rawBody: forwardBody || undefined,
+              targetUrl: '',
+              contentType: incomingContentType,
+              env: 'live',
+              relayStatus: 'fail',
+              relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing X-Icopay-Comp-Id',
+              pgProvider: 'omspay',
+            });
+            return;
+          }
+          const notifyBody = stampOmspayCompIdOnBody(
+            omspayNoti.mapOmspayToMerchantNotifyBody(body),
+            match.merchantId || compId,
+          );
+          try {
+            await relayOmspayMerchantNotify(
+              match.merchantId,
+              match.merchant,
+              notifyBody,
+              forwardBody,
+              incomingContentType,
+            );
+          } catch (e) {
+            console.error('[OMSPAY] merchant relay error', e.message || e);
+          }
+        })
+        .catch((e) => console.error('[OMSPAY] merchant notify async error', e && e.message ? e.message : e));
+    });
+  }
+}
+
 
 async function handleIlkWebhook(req, res) {
   const cfg = loadIlkIngressConfig();
@@ -8168,12 +9124,18 @@ function getNotiLogPgAcquirer(log) {
   const explicit = log && log.pgProvider != null ? String(log.pgProvider).toLowerCase().trim() : '';
   if (explicit === 'crypto') return 'crypto';
   if (explicit === 'ox' || explicit === 'oxpay') return 'ox';
+  if (explicit === 'ilk' || explicit === 'ilkpay') return 'ilk';
+  if (explicit === 'qxipay' || explicit === 'qxpay') return 'qxipay';
+  if (explicit === 'omspay' || explicit === 'oms' || explicit === 'waylar') return 'omspay';
   if (explicit === 'elementpay' || explicit === 'ep') return 'elementpay';
   if (explicit === 'jpay') return 'jpay';
   if (explicit === 'chillpay' || explicit === 'chill') return 'chillpay';
   const rk = log && log.routeKey != null ? String(log.routeKey) : '';
   if (rk.startsWith('crypto/') || rk === 'crypto') return 'crypto';
   if (rk.startsWith('ox/') || rk === 'ox') return 'ox';
+  if (rk.startsWith('ilk/') || rk === 'ilk') return 'ilk';
+  if (rk.startsWith('qxipay/') || rk === 'qxipay') return 'qxipay';
+  if (rk.startsWith('omspay/') || rk === 'omspay') return 'omspay';
   if (rk.startsWith('elementpay/') || rk === 'elementpay') return 'elementpay';
   if (rk.startsWith('jpay/')) return 'jpay';
   return 'chillpay';
@@ -8182,7 +9144,9 @@ function getNotiLogPgAcquirer(log) {
 /** ICOPAY 금액 규칙 키: ElementPay·ox·CRYPTO는 JPAY 호환 스키마 → jpay 규칙 사용 */
 function icopayAmountPgKeyFromLog(log) {
   const p = getNotiLogPgAcquirer(log);
-  return p === 'jpay' || p === 'elementpay' || p === 'ox' || p === 'crypto' ? 'jpay' : 'chillpay';
+  return p === 'jpay' || p === 'elementpay' || p === 'ox' || p === 'crypto' || p === 'ilk' || p === 'qxipay' || p === 'omspay'
+    ? 'jpay'
+    : 'chillpay';
 }
 
 function normalizeAdminPgSource(raw) {
@@ -8191,6 +9155,9 @@ function normalizeAdminPgSource(raw) {
     .trim();
   if (p === 'crypto') return 'crypto';
   if (p === 'ox' || p === 'oxpay') return 'ox';
+  if (p === 'ilk' || p === 'ilkpay') return 'ilk';
+  if (p === 'qxipay' || p === 'qxpay') return 'qxipay';
+  if (p === 'omspay' || p === 'oms' || p === 'waylar') return 'omspay';
   if (p === 'elementpay' || p === 'ep' || p === 'element') return 'elementpay';
   if (p === 'jpay') return 'jpay';
   if (p === 'chillpay' || p === 'chill') return 'chillpay';
@@ -8201,6 +9168,9 @@ function acquirerLabelFromLog(locale, log) {
   const pg = getNotiLogPgAcquirer(log);
   if (pg === 'crypto') return t(locale, 'pg_provider_crypto') || 'CRYPTO';
   if (pg === 'ox') return t(locale, 'pg_provider_ox') || 'OXPAY';
+  if (pg === 'ilk') return t(locale, 'pg_provider_ilk') || 'ILKPAY';
+  if (pg === 'qxipay') return t(locale, 'pg_provider_qxipay') || 'QXIPAY';
+  if (pg === 'omspay') return t(locale, 'pg_provider_omspay') || 'OMSPAY';
   if (pg === 'elementpay') return t(locale, 'pg_provider_elementpay') || 'ElementPay';
   if (pg === 'jpay') return t(locale, 'pg_provider_jpay') || 'JPAY';
   return t(locale, 'pg_provider_chillpay') || 'ChillPay';
@@ -8211,12 +9181,18 @@ function getInternalLogPgAcquirer(log) {
   const explicit = log && log.pgProvider != null ? String(log.pgProvider).toLowerCase().trim() : '';
   if (explicit === 'crypto') return 'crypto';
   if (explicit === 'ox' || explicit === 'oxpay') return 'ox';
+  if (explicit === 'ilk' || explicit === 'ilkpay') return 'ilk';
+  if (explicit === 'qxipay' || explicit === 'qxpay') return 'qxipay';
+  if (explicit === 'omspay' || explicit === 'oms' || explicit === 'waylar') return 'omspay';
   if (explicit === 'elementpay' || explicit === 'ep') return 'elementpay';
   if (explicit === 'jpay') return 'jpay';
   // JPAY 노티 경로로 쌓인 로그( Soonpay 미러·가맹점 전산 POST ): 예전 행은 pgProvider 없이 저장됨 → JPAY 탭에서 안 보이던 문제 방지
   const rk = log && log.routeKey != null ? String(log.routeKey) : '';
   if (rk.startsWith('crypto/') || rk === 'crypto') return 'crypto';
   if (rk.startsWith('ox/') || rk === 'ox') return 'ox';
+  if (rk.startsWith('ilk/') || rk === 'ilk') return 'ilk';
+  if (rk.startsWith('qxipay/') || rk === 'qxipay') return 'qxipay';
+  if (rk.startsWith('omspay/') || rk === 'omspay') return 'omspay';
   if (rk.startsWith('elementpay/') || rk === 'elementpay') return 'elementpay';
   if (rk.startsWith('jpay/')) return 'jpay';
   if (log && (log.jpayRawRelay || log.jpaySoonpayMirror)) return 'jpay';
@@ -8226,6 +9202,9 @@ function getInternalLogPgAcquirer(log) {
     const ip = it && String(it.pgProvider || '').toLowerCase();
     if (ip === 'crypto') return 'crypto';
     if (ip === 'ox' || ip === 'oxpay') return 'ox';
+    if (ip === 'ilk' || ip === 'ilkpay') return 'ilk';
+    if (ip === 'qxipay' || ip === 'qxpay') return 'qxipay';
+    if (ip === 'omspay' || ip === 'oms' || ip === 'waylar') return 'omspay';
     if (ip === 'elementpay' || ip === 'ep') return 'elementpay';
     if (ip === 'jpay') return 'jpay';
   }
@@ -13619,6 +14598,42 @@ app.post('/noti/webhook/ox', async (req, res) => {
   }
 });
 
+
+app.post('/noti/qxipay', async (req, res) => {
+  try {
+    await handleQxipayWebhook(req, res);
+  } catch (e) {
+    console.error('[QXIPAY] route error', e);
+    if (!res.headersSent) res.status(500).send('QXIPAY error');
+  }
+});
+app.post('/noti/webhook/qxipay', async (req, res) => {
+  try {
+    await handleQxipayWebhook(req, res);
+  } catch (e) {
+    console.error('[QXIPAY] route error', e);
+    if (!res.headersSent) res.status(500).send('QXIPAY error');
+  }
+});
+
+
+app.post('/noti/omspay', async (req, res) => {
+  try {
+    await handleOmspayWebhook(req, res);
+  } catch (e) {
+    console.error('[OMSPAY] route error', e);
+    if (!res.headersSent) res.status(500).send('OMSPAY error');
+  }
+});
+app.post('/noti/webhook/omspay', async (req, res) => {
+  try {
+    await handleOmspayWebhook(req, res);
+  } catch (e) {
+    console.error('[OMSPAY] route error', e);
+    if (!res.headersSent) res.status(500).send('OMSPAY error');
+  }
+});
+
 // ========== ILK (ILKPAY) fixed Back Noti — EP/ox 와 동일: PG → NOTI → ICOPAY → 가맹 Callback ==========
 app.post('/noti/ilk', async (req, res) => {
   try {
@@ -14075,7 +15090,7 @@ function createAdminSidebarNavHelpers(locale, currentPath, req, member) {
           k = new URLSearchParams(qs).get('kind') || 'chillpay';
         } catch (_) {}
       }
-      if (k !== 'jpay' && k !== 'elementpay' && k !== 'ox' && k !== 'crypto') k = 'chillpay';
+      k = normalizeMerchantRegisterPgKind(k === 'ep' ? 'elementpay' : k);
       isActive = k === kind;
     }
     const clsAttr = isActive ? ' class="active"' : '';
@@ -14096,7 +15111,10 @@ function buildAdminSidebarNavItems(h) {
           merchantsRegisterLink('jpay', t(locale, 'merchants_nav_register_jpay')) +
           merchantsRegisterLink('elementpay', t(locale, 'merchants_nav_register_elementpay')) +
           merchantsRegisterLink('ox', t(locale, 'merchants_nav_register_ox')) +
-          merchantsRegisterLink('crypto', t(locale, 'merchants_nav_register_crypto')),
+          merchantsRegisterLink('crypto', t(locale, 'merchants_nav_register_crypto')) +
+          merchantsRegisterLink('ilk', t(locale, 'merchants_nav_register_ilk')) +
+          merchantsRegisterLink('qxipay', t(locale, 'merchants_nav_register_qxipay')) +
+          merchantsRegisterLink('omspay', t(locale, 'merchants_nav_register_omspay')),
         'merchants',
       ),
     );
@@ -17272,20 +18290,25 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   const nextChillSlot = findNextAvailableChillpayMerchantSlot() || 1;
   const jpayRouteNoDefault = jpayRouteTokenForSlot(nextJpaySlot);
   const registerKind = parseMerchantsRegisterKind(req);
-  const registerHeading =
-    registerKind === 'jpay'
-      ? t(locale, 'merchants_nav_register_jpay')
-      : registerKind === 'elementpay'
-        ? t(locale, 'merchants_nav_register_elementpay')
-        : registerKind === 'ox'
-          ? t(locale, 'merchants_nav_register_ox')
-          : registerKind === 'crypto'
-            ? t(locale, 'merchants_nav_register_crypto')
-            : t(locale, 'merchants_nav_register_chillpay');
+  const registerHeadingKey = {
+    jpay: 'merchants_nav_register_jpay',
+    elementpay: 'merchants_nav_register_elementpay',
+    ox: 'merchants_nav_register_ox',
+    crypto: 'merchants_nav_register_crypto',
+    ilk: 'merchants_nav_register_ilk',
+    qxipay: 'merchants_nav_register_qxipay',
+    omspay: 'merchants_nav_register_omspay',
+    chillpay: 'merchants_nav_register_chillpay',
+  }[registerKind] || 'merchants_nav_register_chillpay';
+  const registerHeading = t(locale, registerHeadingKey);
   const registerJpay = registerKind === 'jpay';
   const registerElementPay = registerKind === 'elementpay';
   const registerOx = registerKind === 'ox';
   const registerCrypto = registerKind === 'crypto';
+  const registerIlk = registerKind === 'ilk';
+  const registerQxipay = registerKind === 'qxipay';
+  const registerOmspay = registerKind === 'omspay';
+  const registerFixedIngress = isFixedIngressMerchantPgKind(registerKind);
 
   const sortType = (req.query.sort || 'recent').toString();
   const sortedEntries = getSortedMerchantEntries(sortType).filter(
@@ -17296,23 +18319,26 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   const internalTargetsRelayOffJson = JSON.stringify(
     Array.from(INTERNAL_TARGETS.entries()).map(([tid, tg]) => ({
       id: tid,
-      callbackUrl: tg.callbackUrl || '',
-      resultUrl: tg.resultUrl || '',
-      devCallbackUrl: String(tg.devCallbackUrl || '').trim(),
-      devResultUrl: String(tg.devResultUrl || '').trim(),
+      callbackUrl: tg.opsUrlsUnused ? '' : tg.callbackUrl || '',
+      resultUrl: tg.opsUrlsUnused ? '' : tg.resultUrl || '',
+      opsUrlsUnused: !!tg.opsUrlsUnused,
+      devCallbackUrl: tg.devUrlsUnused ? '' : String(tg.devCallbackUrl || '').trim(),
+      devResultUrl: tg.devUrlsUnused ? '' : String(tg.devResultUrl || '').trim(),
+      devUrlsUnused: !!tg.devUrlsUnused,
     })),
   );
 
-  const merchantsEmptyMsg =
-    registerKind === 'jpay'
-      ? t(locale, 'merchants_empty_jpay') || t(locale, 'merchants_empty')
-      : registerKind === 'elementpay'
-        ? t(locale, 'merchants_empty_elementpay') || t(locale, 'merchants_empty')
-        : registerKind === 'ox'
-          ? t(locale, 'merchants_empty_ox') || t(locale, 'merchants_empty')
-          : registerKind === 'crypto'
-            ? t(locale, 'merchants_empty_crypto') || t(locale, 'merchants_empty')
-            : t(locale, 'merchants_empty_chillpay') || t(locale, 'merchants_empty');
+  const merchantsEmptyKey = {
+    jpay: 'merchants_empty_jpay',
+    elementpay: 'merchants_empty_elementpay',
+    ox: 'merchants_empty_ox',
+    crypto: 'merchants_empty_crypto',
+    ilk: 'merchants_empty_ilk',
+    qxipay: 'merchants_empty_qxipay',
+    omspay: 'merchants_empty_omspay',
+    chillpay: 'merchants_empty_chillpay',
+  }[registerKind] || 'merchants_empty_chillpay';
+  const merchantsEmptyMsg = t(locale, merchantsEmptyKey) || t(locale, 'merchants_empty');
   const merchantsListQueryBase = `kind=${registerKind}`;
   const merchantsSortHref = (sort) => `/admin/merchants?${merchantsListQueryBase}&sort=${sort}`;
   const merchantsColResizeTitle = escAttr(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절');
@@ -17402,7 +18428,21 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <td>${m.internalCustomerId || ''}</td>
         <td>${internalTargetId}</td>
         <td class="cell-pg-acquirer" style="font-weight:600;color:${
-          listPg === 'jpay' ? '#7c3aed' : listPg === 'elementpay' ? '#0f766e' : listPg === 'ox' ? '#9a3412' : listPg === 'crypto' ? '#5b21b6' : '#0369a1'
+          listPg === 'jpay'
+            ? '#7c3aed'
+            : listPg === 'elementpay'
+              ? '#0f766e'
+              : listPg === 'ox'
+                ? '#9a3412'
+                : listPg === 'crypto'
+                  ? '#5b21b6'
+                  : listPg === 'ilk'
+                    ? '#be185d'
+                    : listPg === 'qxipay'
+                      ? '#0369a1'
+                      : listPg === 'omspay'
+                        ? '#b45309'
+                        : '#0369a1'
         };">${
           listPg === 'jpay'
             ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
@@ -17412,7 +18452,13 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
                 ? (t(locale, 'merchants_pg_provider_ox') || 'OXPAY')
                 : listPg === 'crypto'
                   ? (t(locale, 'merchants_pg_provider_crypto') || 'CRYPTO')
-                  : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
+                  : listPg === 'ilk'
+                    ? (t(locale, 'merchants_pg_provider_ilk') || 'ILKPAY')
+                    : listPg === 'qxipay'
+                      ? (t(locale, 'merchants_pg_provider_qxipay') || 'QXIPAY')
+                      : listPg === 'omspay'
+                        ? (t(locale, 'merchants_pg_provider_omspay') || 'OMSPAY')
+                        : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
         }</td>
         <td class="cell-noti-mode">${merchantNotiStyleCellHtml(locale, m)}</td>
         <td>${String(merchantChillpayRecurringCell(m))
@@ -17471,6 +18517,52 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
               data-relay-off-dev-dedicated="${m.relayOffDevDedicatedUse === true ? 'Y' : 'N'}"
               style="padding:4px 8px;font-size:12px;background:#facc15;color:#111827;border:none;border-radius:4px;cursor:pointer;"
             >${t(locale, 'merchants_edit')}</button>
+            <button
+              type="button"
+              class="load-merchant"
+              data-merchant-id="${id}"
+              data-internal-target-id="${internalTargetId}"
+              data-route-callback-key="${cbKey}"
+              data-route-result-key="${rsKey}"
+              data-callback-url="${cbUrl}"
+              data-result-url="${rsUrl}"
+              data-route-no="${merchantListRouteNoCell(m)}"
+              data-internal-customer-id="${m.internalCustomerId || ''}"
+              data-enable-relay="${relay}"
+              data-enable-internal="${internal}"
+              data-enable-dev-internal="${devInternal}"
+              data-enable-dealmai-webhook="${dealmaiWebhook}"
+              data-dealmai-partner-code="${String(m.dealmaiPartnerCode || '').replace(/"/g, '&quot;')}"
+              data-relay-off-forward="${
+                m.relayOffForwardTarget === 'internal'
+                  ? 'internal'
+                  : m.relayOffForwardTarget === 'dev_internal'
+                  ? 'dev_internal'
+                  : ''
+              }"
+              data-relay-format="${m.relayFormat || 'raw'}"
+              data-relay-enrichment="${m.relayEnrichmentMode === 'enriched' ? 'enriched' : 'plain'}"
+              data-merchant-pg-kind="${merchantPgKind}"
+              data-jpay-route-callback-key="${jpayCbKey}"
+              data-jpay-route-result-key="${jpayRsKey}"
+              data-chillpay-recurring="${m.chillpayRecurring === 'Y' ? 'Y' : 'N'}"
+              data-result-delivery-mode="${
+                m.resultDeliveryMode === 'no_browser_redirect'
+                  ? 'no_browser_redirect'
+                  : m.resultDeliveryMode === 'post_force_redirect'
+                  ? 'post_force_redirect'
+                  : m.resultDeliveryMode === 'autot'
+                  ? 'autot'
+                  : 'auto'
+              }"
+              data-relay-off-internal-cb="${escAttr(m.relayOffInternalCallbackUrl || '')}"
+              data-relay-off-internal-rs="${escAttr(m.relayOffInternalResultUrl || '')}"
+              data-relay-off-dev-cb="${escAttr(m.relayOffDevCallbackUrl || '')}"
+              data-relay-off-dev-rs="${escAttr(m.relayOffDevResultUrl || '')}"
+              data-relay-off-dev-dedicated="${m.relayOffDevDedicatedUse === true ? 'Y' : 'N'}"
+              style="padding:4px 8px;font-size:12px;background:#059669;color:#fff;border:none;border-radius:4px;cursor:pointer;"
+              title="${escAttr(t(locale, 'common_load_as_new_hint') || '')}"
+            >${t(locale, 'common_load_as_new')}</button>
             <form method="post" action="/admin/merchants/delete" onsubmit="return confirm('${confirmDel}') && confirm('${confirmDel2}');" style="margin:0;">
               <input type="hidden" name="merchantId" value="${id}" />
               <button type="submit" style="padding:4px 8px;font-size:12px;background:#dc2626;color:#fff;border:none;border-radius:4px;cursor:pointer;">${t(locale, 'merchants_delete')}</button>
@@ -17613,7 +18705,24 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           <div style="margin-top:6px;font-size:12px;color:#065f46;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/elementpay</div>
           <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_elementpay_result_hint')}</p>
         </div>
-        <div id="merch-pg-chillpay-block" style="display:${registerJpay || registerElementPay || registerOx || registerCrypto ? 'none' : 'block'};">
+        <div id="merch-pg-ilk-block" style="display:${registerIlk ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#fdf2f8;border:1px solid #fbcfe8;border-radius:8px;">
+          <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_ilk_ingress_hint')}</p>
+          <div style="margin-top:8px;font-size:12px;color:#be185d;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/ilk</div>
+          <div style="margin-top:6px;font-size:12px;color:#be185d;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/ilk</div>
+          <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_ilk_result_hint')}</p>
+        </div>
+        <div id="merch-pg-qxipay-block" style="display:${registerQxipay ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;">
+          <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_qxipay_ingress_hint')}</p>
+          <div style="margin-top:8px;font-size:12px;color:#1d4ed8;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/qxipay</div>
+          <div style="margin-top:6px;font-size:12px;color:#1d4ed8;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/qxipay</div>
+          <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_qxipay_result_hint')}</p>
+        </div>
+        <div id="merch-pg-omspay-block" style="display:${registerOmspay ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;">
+          <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_omspay_ingress_hint')}</p>
+          <div style="margin-top:8px;font-size:12px;color:#b45309;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/omspay</div>
+          <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_omspay_result_hint')}</p>
+        </div>
+        <div id="merch-pg-chillpay-block" style="display:${registerJpay || registerFixedIngress ? 'none' : 'block'};">
         <label>
           ${t(locale, 'merchants_label_chillpay_pg_slot_no')}
           <div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap;">
@@ -17867,6 +18976,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       var blockEp = document.getElementById('merch-pg-elementpay-block');
       var blockOx = document.getElementById('merch-pg-ox-block');
       var blockCrypto = document.getElementById('merch-pg-crypto-block');
+      var blockIlk = document.getElementById('merch-pg-ilk-block');
+      var blockQxipay = document.getElementById('merch-pg-qxipay-block');
+      var blockOmspay = document.getElementById('merch-pg-omspay-block');
       var cbPreview = document.getElementById('callback-url-preview');
       var rsPreview = document.getElementById('result-url-preview');
       var cbCopyBtn = document.getElementById('copy-callback-url');
@@ -17881,6 +18993,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       var warningBox = document.getElementById('route-warning');
       var form = document.getElementById('merchant-form');
       var editButtons = document.querySelectorAll('.edit-merchant');
+      var loadButtons = document.querySelectorAll('.load-merchant');
       var defaultJpaySlot = ${nextJpaySlot};
       var defaultJpayRouteToken = '${escAttr(jpayRouteNoDefault)}';
       var chillpayRedirectRouteNos = ${chillpayRedirectRouteNosJson};
@@ -17899,8 +19012,41 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
       function isMerchantCrypto() {
         return pgKindHidden && pgKindHidden.value === 'crypto';
       }
+      function isMerchantIlk() {
+        return pgKindHidden && (pgKindHidden.value === 'ilk' || pgKindHidden.value === 'ilkpay');
+      }
+      function isMerchantQxipay() {
+        return pgKindHidden && (pgKindHidden.value === 'qxipay' || pgKindHidden.value === 'qxpay');
+      }
+      function isMerchantOmspay() {
+        return pgKindHidden && (pgKindHidden.value === 'omspay' || pgKindHidden.value === 'oms' || pgKindHidden.value === 'waylar');
+      }
+      function isMerchantFixedIngress() {
+        return isMerchantElementPay() || isMerchantOx() || isMerchantCrypto() || isMerchantIlk() || isMerchantQxipay() || isMerchantOmspay();
+      }
       function merchantPgKindNow() {
         return (pgKindHidden && pgKindHidden.value) || 'chillpay';
+      }
+      function registerHeadingForKind(kind) {
+        if (kind === 'jpay') return '${(t(locale, 'merchants_nav_register_jpay') || 'JPAY 등록').replace(/'/g, "\\'")}';
+        if (kind === 'elementpay') return '${(t(locale, 'merchants_nav_register_elementpay') || 'ElementPay 등록').replace(/'/g, "\\'")}';
+        if (kind === 'ox') return '${(t(locale, 'merchants_nav_register_ox') || 'OXPAY 등록').replace(/'/g, "\\'")}';
+        if (kind === 'crypto') return '${(t(locale, 'merchants_nav_register_crypto') || 'CRYPTO 등록').replace(/'/g, "\\'")}';
+        if (kind === 'ilk') return '${(t(locale, 'merchants_nav_register_ilk') || 'ILKPAY 등록').replace(/'/g, "\\'")}';
+        if (kind === 'qxipay') return '${(t(locale, 'merchants_nav_register_qxipay') || 'QXIPAY 등록').replace(/'/g, "\\'")}';
+        if (kind === 'omspay') return '${(t(locale, 'merchants_nav_register_omspay') || 'OMSPAY 등록').replace(/'/g, "\\'")}';
+        return '${(t(locale, 'merchants_nav_register_chillpay') || 'CHILLPAY 등록').replace(/'/g, "\\'")}';
+      }
+      function normalizePgKindClient(raw) {
+        var p = String(raw || 'chillpay').toLowerCase();
+        if (p === 'jpay') return 'jpay';
+        if (p === 'elementpay' || p === 'ep') return 'elementpay';
+        if (p === 'ox' || p === 'oxpay') return 'ox';
+        if (p === 'crypto') return 'crypto';
+        if (p === 'ilk' || p === 'ilkpay') return 'ilk';
+        if (p === 'qxipay' || p === 'qxpay') return 'qxipay';
+        if (p === 'omspay' || p === 'oms' || p === 'waylar') return 'omspay';
+        return 'chillpay';
       }
 
       function chillNoFromRouteKey(val) {
@@ -18023,12 +19169,18 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var ep = kind === 'elementpay';
         var ox = kind === 'ox';
         var cr = kind === 'crypto';
-        var fixedIngress = ep || ox || cr;
+        var ilk = kind === 'ilk';
+        var qx = kind === 'qxipay';
+        var oms = kind === 'omspay';
+        var fixedIngress = ep || ox || cr || ilk || qx || oms;
         if (blockChill) blockChill.style.display = j || fixedIngress ? 'none' : 'block';
         if (blockJpay) blockJpay.style.display = j ? 'block' : 'none';
         if (blockEp) blockEp.style.display = ep ? 'block' : 'none';
         if (blockOx) blockOx.style.display = ox ? 'block' : 'none';
         if (blockCrypto) blockCrypto.style.display = cr ? 'block' : 'none';
+        if (blockIlk) blockIlk.style.display = ilk ? 'block' : 'none';
+        if (blockQxipay) blockQxipay.style.display = qx ? 'block' : 'none';
+        if (blockOmspay) blockOmspay.style.display = oms ? 'block' : 'none';
         if (chillSlotNo) chillSlotNo.disabled = !!(j || fixedIngress);
         if (jpaySlotNo) jpaySlotNo.disabled = !j;
         var wrapRoute = document.getElementById('merch-chillpay-route-fields');
@@ -18185,7 +19337,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         });
       }
 
-      function applyEdit(button) {
+      function applyEdit(button, asNewLoad) {
         if (!button || !form) return;
         var merchantIdInput = form.querySelector('input[name="merchantId"]');
         var internalTargetSelect = form.querySelector('select[name="internalTargetId"]');
@@ -18193,22 +19345,13 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var rsUrlInput = form.querySelector('input[name="resultUrl"]');
         var routeNoInput = form.querySelector('input[name="routeNo"]');
         var internalCustomerInput = form.querySelector('input[name="internalCustomerId"]');
-        var pgKindRaw = (button.dataset.merchantPgKind || 'chillpay').toLowerCase();
-        var pgKind =
-          pgKindRaw === 'jpay' ? 'jpay' : pgKindRaw === 'elementpay' ? 'elementpay' : pgKindRaw === 'ox' || pgKindRaw === 'oxpay' ? 'ox' : pgKindRaw === 'crypto' ? 'crypto' : 'chillpay';
+        var pgKind = normalizePgKindClient(button.dataset.merchantPgKind || 'chillpay');
         if (pgKindHidden) pgKindHidden.value = pgKind;
         var registerHeadingEl = document.getElementById('merchant-register-section');
         if (registerHeadingEl) {
-          registerHeadingEl.textContent =
-            pgKind === 'jpay'
-              ? '${(t(locale, 'merchants_nav_register_jpay') || 'JPAY 등록').replace(/'/g, "\\'")}'
-              : pgKind === 'elementpay'
-                ? '${(t(locale, 'merchants_nav_register_elementpay') || 'ElementPay 등록').replace(/'/g, "\\'")}'
-                : pgKind === 'ox'
-                  ? '${(t(locale, 'merchants_nav_register_ox') || 'OXPAY 등록').replace(/'/g, "\\'")}'
-                  : pgKind === 'crypto'
-                    ? '${(t(locale, 'merchants_nav_register_crypto') || 'CRYPTO 등록').replace(/'/g, "\\'")}'
-                    : '${(t(locale, 'merchants_nav_register_chillpay') || 'CHILLPAY 등록').replace(/'/g, "\\'")}';
+          registerHeadingEl.textContent = asNewLoad
+            ? '${(t(locale, 'merchants_load_title') || '불러오기(신규 등록)').replace(/'/g, "\\'")}'
+            : registerHeadingForKind(pgKind);
         }
         syncPgBlocks();
         var relayCheckbox = form.querySelector('input[name="enableRelay"]');
@@ -18217,12 +19360,14 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var dealmaiWebhookCheckbox = form.querySelector('input[name="enableDealmaiWebhook"]');
         var dealmaiPartnerInput = form.querySelector('input[name="dealmaiPartnerCode"]');
 
+        var srcId = button.dataset.merchantId || '';
         if (merchantIdInput) {
-          merchantIdInput.value = button.dataset.merchantId || '';
+          merchantIdInput.value = asNewLoad ? (srcId ? srcId + '_copy' : '') : srcId;
           merchantIdInput.readOnly = false;
         }
         var originalInput = form.querySelector('input[name="originalMerchantId"]');
-        if (originalInput) originalInput.value = button.dataset.merchantId || '';
+        // 불러오기: original 비움 → 저장 시 신규 등록. 수정: original 유지.
+        if (originalInput) originalInput.value = asNewLoad ? '' : srcId;
         if (internalTargetSelect) {
           internalTargetSelect.value = button.dataset.internalTargetId || '';
         }
@@ -18279,13 +19424,21 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         if (rdmSelect) rdmSelect.value = button.dataset.resultDeliveryMode || 'auto';
 
         if (chillSlotNo) {
-          var cn = chillNoFromRouteKey(button.dataset.routeCallbackKey || '');
-          var rn = chillNoFromRouteKey(button.dataset.routeResultKey || '');
-          chillSlotNo.value = cn || rn || '${nextChillSlot}';
+          if (asNewLoad) {
+            chillSlotNo.value = '${nextChillSlot}';
+          } else {
+            var cn = chillNoFromRouteKey(button.dataset.routeCallbackKey || '');
+            var rn = chillNoFromRouteKey(button.dataset.routeResultKey || '');
+            chillSlotNo.value = cn || rn || '${nextChillSlot}';
+          }
         }
         if (jpaySlotNo) {
-          var jn = jpayNoFromRouteKey(button.dataset.jpayRouteCallbackKey || '');
-          jpaySlotNo.value = jn || defaultJpaySlot;
+          if (asNewLoad) {
+            jpaySlotNo.value = defaultJpaySlot;
+          } else {
+            var jn = jpayNoFromRouteKey(button.dataset.jpayRouteCallbackKey || '');
+            jpaySlotNo.value = jn || defaultJpaySlot;
+          }
         }
 
         var recSel = document.getElementById('merchant-chillpay-recurring');
@@ -18298,7 +19451,22 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         Array.prototype.forEach.call(editButtons, function (btn) {
           btn.addEventListener('click', function () {
             if (!confirm('${(t(locale, 'members_confirm_edit') || '').replace(/'/g, "\\'")}')) return;
-            applyEdit(btn);
+            applyEdit(btn, false);
+          });
+        });
+      }
+      if (loadButtons && loadButtons.length > 0) {
+        Array.prototype.forEach.call(loadButtons, function (btn) {
+          btn.addEventListener('click', function () {
+            if (!confirm('${(t(locale, 'common_load_as_new_confirm') || '').replace(/'/g, "\\'")}')) return;
+            applyEdit(btn, true);
+            try {
+              form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            } catch (_) {}
+            var midEl = form.querySelector('input[name="merchantId"]');
+            if (midEl) {
+              try { midEl.focus(); midEl.select(); } catch (_) {}
+            }
           });
         });
       }
@@ -18315,20 +19483,13 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
 
 function parseMerchantsRegisterKind(req) {
   const raw = req && req.query && req.query.kind ? String(req.query.kind).toLowerCase().trim() : '';
-  if (raw === 'jpay') return 'jpay';
-  if (raw === 'elementpay' || raw === 'ep') return 'elementpay';
-  if (raw === 'ox' || raw === 'oxpay') return 'ox';
-  if (raw === 'crypto') return 'crypto';
-  return 'chillpay';
+  return normalizeMerchantRegisterPgKind(raw === 'ep' ? 'elementpay' : raw);
 }
 
 function merchantsRegisterKindUrl(kind) {
-  const k = String(kind || '').toLowerCase();
-  if (k === 'jpay') return '/admin/merchants?kind=jpay';
-  if (k === 'elementpay') return '/admin/merchants?kind=elementpay';
-  if (k === 'ox' || k === 'oxpay') return '/admin/merchants?kind=ox';
-  if (k === 'crypto') return '/admin/merchants?kind=crypto';
-  return '/admin/merchants?kind=chillpay';
+  const k = normalizeMerchantRegisterPgKind(kind);
+  if (k === 'chillpay') return '/admin/merchants?kind=chillpay';
+  return '/admin/merchants?kind=' + encodeURIComponent(k);
 }
 
 /**
@@ -18343,9 +19504,20 @@ function inferMerchantPgKind(m) {
     saved === 'elementpay' ||
     saved === 'ox' ||
     saved === 'oxpay' ||
-    saved === 'crypto'
+    saved === 'crypto' ||
+    saved === 'ilk' ||
+    saved === 'ilkpay' ||
+    saved === 'qxipay' ||
+    saved === 'qxpay' ||
+    saved === 'omspay' ||
+    saved === 'oms' ||
+    saved === 'waylar'
   ) {
-    return saved === 'oxpay' ? 'ox' : saved;
+    if (saved === 'oxpay') return 'ox';
+    if (saved === 'ilkpay') return 'ilk';
+    if (saved === 'qxpay') return 'qxipay';
+    if (saved === 'oms' || saved === 'waylar') return 'omspay';
+    return saved;
   }
   const jpayCb = String(m.jpayRouteCallbackKey || '').trim();
   const jpayRs = String(m.jpayRouteResultKey || '').trim();
@@ -18358,11 +19530,17 @@ function inferMerchantPgKind(m) {
   if (rn.toLowerCase() === 'ox') return 'ox';
   if (rn.toLowerCase() === 'elementpay') return 'elementpay';
   if (rn.toLowerCase() === 'crypto') return 'crypto';
+  if (rn.toLowerCase() === 'ilk') return 'ilk';
+  if (rn.toLowerCase() === 'qxipay' || rn.toLowerCase() === 'qxpay') return 'qxipay';
+  if (rn.toLowerCase() === 'omspay' || rn.toLowerCase() === 'oms' || rn.toLowerCase() === 'waylar') return 'omspay';
   const tid = String(m.internalTargetId || '').trim();
   if (tid && INTERNAL_TARGETS.has(tid)) {
     const pg = String(INTERNAL_TARGETS.get(tid).pgProvider || '').toLowerCase().trim();
-    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay' || pg === 'ox' || pg === 'oxpay' || pg === 'crypto') {
-      return pg === 'oxpay' ? 'ox' : pg;
+    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay' || pg === 'ox' || pg === 'oxpay' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'qxpay' || pg === 'omspay' || pg === 'oms' || pg === 'waylar') {
+      if (pg === 'oxpay') return 'ox';
+      if (pg === 'qxpay') return 'qxipay';
+      if (pg === 'oms' || pg === 'waylar') return 'omspay';
+      return pg;
     }
   }
   return 'chillpay';
@@ -18374,7 +19552,7 @@ function resolveMerchantListPgAcquirer(m) {
 /** 가맹점 목록: ChillPay 결제 방식(A/B). JPAY/ElementPay는 표시용 대시 */
 function merchantChillpayPayModeLabel(locale, m) {
   const pg = resolveMerchantListPgAcquirer(m);
-  if (pg === 'jpay' || pg === 'elementpay' || pg === 'ox' || pg === 'crypto') return t(locale, 'merchants_mode_jpay_dash');
+  if (pg === 'jpay' || pg === 'elementpay' || pg === 'ox' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'omspay') return t(locale, 'merchants_mode_jpay_dash');
   const cb = String(m.routeCallbackKey || '').trim();
   if (isChillpayRedirectHostedPayment(cb)) return t(locale, 'merchants_mode_a_redirect');
   return t(locale, 'merchants_mode_b_inline');
@@ -18383,7 +19561,7 @@ function merchantChillpayPayModeLabel(locale, m) {
 /** 가맹점 목록: Recurring Y/N (ChillPay만; JPAY/EP는 —) */
 function merchantChillpayRecurringCell(m) {
   const pg = resolveMerchantListPgAcquirer(m);
-  if (pg === 'jpay' || pg === 'elementpay' || pg === 'ox' || pg === 'crypto') return '—';
+  if (pg === 'jpay' || pg === 'elementpay' || pg === 'ox' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'omspay') return '—';
   return m.chillpayRecurring === 'Y' ? 'Y' : 'N';
 }
 
@@ -18611,23 +19789,13 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
 
   const merchantId = (rawMerchantId || '').trim();
   const origId = (originalMerchantId || '').trim();
-  const pgKindRaw = String(rawPgKind || '').toLowerCase().trim();
-  const pgKind =
-    pgKindRaw === 'jpay'
-      ? 'jpay'
-      : pgKindRaw === 'elementpay'
-        ? 'elementpay'
-        : pgKindRaw === 'ox' || pgKindRaw === 'oxpay'
-          ? 'ox'
-          : pgKindRaw === 'crypto'
-            ? 'crypto'
-            : 'chillpay';
+  const pgKind = normalizeMerchantRegisterPgKind(rawPgKind);
   let chillCb = '';
   let chillRs = '';
   let jpayCb = '';
   let jpayRs = '';
-  if (pgKind === 'elementpay' || pgKind === 'ox' || pgKind === 'crypto') {
-    // EP/ox/CRYPTO: no PG slot URLs — merchant callback/result only
+  if (isFixedIngressMerchantPgKind(pgKind)) {
+    // Fixed ingress PGs: no PG slot URLs — merchant callback/result only
   } else if (pgKind === 'jpay') {
     const slot =
       normalizePgNotiRouteNumber(rawJpaySlotNo) ||
@@ -18704,21 +19872,18 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
       ? normalizePgNotiRouteNumber(rawPgCallbackNo) || extractChillpayRouteNumberFromKey(chillCb)
       : null;
   const rnManual = String(routeNo || '').trim();
-  const rnSaved =
-    pgKind === 'ox'
-      ? rnManual || 'ox'
-      : pgKind === 'crypto'
-        ? rnManual || 'crypto'
-        : pgKind === 'jpay'
-          ? rnManual || (jpaySlotSaved ? jpayRouteTokenForSlot(jpaySlotSaved) : '')
-          : rnManual || (chillCbN ? String(chillCbN) : '');
+  const rnSaved = isFixedIngressMerchantPgKind(pgKind)
+    ? rnManual || pgKind
+    : pgKind === 'jpay'
+      ? rnManual || (jpaySlotSaved ? jpayRouteTokenForSlot(jpaySlotSaved) : '')
+      : rnManual || (chillCbN ? String(chillCbN) : '');
   const icSaved =
-    pgKind === 'jpay' || pgKind === 'crypto' || pgKind === 'ox' || pgKind === 'elementpay'
+    pgKind === 'jpay' || isFixedIngressMerchantPgKind(pgKind)
       ? ''
       : String(internalCustomerId || '').trim();
   const recRaw = String(rawChillpayRecurring || '').trim().toUpperCase();
   const chillpayRecurringYn =
-    pgKind === 'jpay' || pgKind === 'elementpay' || pgKind === 'ox' || pgKind === 'crypto'
+    pgKind === 'jpay' || isFixedIngressMerchantPgKind(pgKind)
       ? 'N'
       : recRaw === 'Y'
         ? 'Y'
@@ -18744,7 +19909,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
       : '';
   const relayOffDevDedicatedSaved =
     !enableRelayOn && relayOffForwardSaved === 'dev_internal' && req.body && req.body.relayOffDevDedicatedUse === 'on';
-  if ((pgKind === 'jpay' || pgKind === 'elementpay' || pgKind === 'ox' || pgKind === 'crypto') && relayOffDevDedicatedSaved) {
+  if ((pgKind === 'jpay' || isFixedIngressMerchantPgKind(pgKind)) && relayOffDevDedicatedSaved) {
     const probeMerchant = {
       internalTargetId: internalTargetId || '',
       relayOffDevCallbackUrl: relayOffDevCbSaved,
@@ -18760,6 +19925,25 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     }
   }
   const enableDevInternalSaved = enableDevInternal === 'on' || relayOffDevDedicatedSaved;
+  const fixedIngressOptions = {
+    enableRelay: enableRelayOn,
+    enableInternal: enableInternal === 'on',
+    enableDevInternal: enableDevInternalSaved,
+    relayFormat: fmt,
+    resultDeliveryMode: resultDeliveryModeSaved,
+    enableDealmaiWebhook: enableDealmaiWebhook === 'on',
+    dealmaiPartnerCode: String(rawDealmaiPartnerCode || '').trim(),
+    relayOffForwardTarget: relayOffForwardSaved,
+    relayOffInternalCallbackUrl: relayOffInternalCbSaved,
+    relayOffInternalResultUrl: relayOffInternalRsSaved,
+    relayOffDevCallbackUrl: relayOffDevCbSaved,
+    relayOffDevResultUrl: relayOffDevRsSaved,
+    relayOffDevDedicatedUse: relayOffDevDedicatedSaved,
+  };
+  const fixedIngressIcopayMeta = {
+    compId: merchantId,
+    compName: String((prev && (prev.name || prev.label)) || '').trim() || undefined,
+  };
   let merchantRecord;
   if (pgKind === 'crypto') {
     merchantRecord = buildCryptoMerchantObject({
@@ -18768,26 +19952,9 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
       resultUrl: rsSaved,
       routeNo: rnSaved,
       internalTargetId,
-      options: {
-        enableRelay: enableRelayOn,
-        enableInternal: enableInternal === 'on',
-        enableDevInternal: enableDevInternalSaved,
-        relayFormat: fmt,
-        resultDeliveryMode: resultDeliveryModeSaved,
-        enableDealmaiWebhook: enableDealmaiWebhook === 'on',
-        dealmaiPartnerCode: String(rawDealmaiPartnerCode || '').trim(),
-        relayOffForwardTarget: relayOffForwardSaved,
-        relayOffInternalCallbackUrl: relayOffInternalCbSaved,
-        relayOffInternalResultUrl: relayOffInternalRsSaved,
-        relayOffDevCallbackUrl: relayOffDevCbSaved,
-        relayOffDevResultUrl: relayOffDevRsSaved,
-        relayOffDevDedicatedUse: relayOffDevDedicatedSaved,
-      },
+      options: fixedIngressOptions,
       prev,
-      icopayMeta: {
-        compId: merchantId,
-        compName: String((prev && (prev.name || prev.label)) || '').trim() || undefined,
-      },
+      icopayMeta: fixedIngressIcopayMeta,
     });
   } else if (pgKind === 'ox') {
     merchantRecord = buildOxMerchantObject({
@@ -18796,26 +19963,42 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
       resultUrl: rsSaved,
       routeNo: rnSaved,
       internalTargetId,
-      options: {
-        enableRelay: enableRelayOn,
-        enableInternal: enableInternal === 'on',
-        enableDevInternal: enableDevInternalSaved,
-        relayFormat: fmt,
-        resultDeliveryMode: resultDeliveryModeSaved,
-        enableDealmaiWebhook: enableDealmaiWebhook === 'on',
-        dealmaiPartnerCode: String(rawDealmaiPartnerCode || '').trim(),
-        relayOffForwardTarget: relayOffForwardSaved,
-        relayOffInternalCallbackUrl: relayOffInternalCbSaved,
-        relayOffInternalResultUrl: relayOffInternalRsSaved,
-        relayOffDevCallbackUrl: relayOffDevCbSaved,
-        relayOffDevResultUrl: relayOffDevRsSaved,
-        relayOffDevDedicatedUse: relayOffDevDedicatedSaved,
-      },
+      options: fixedIngressOptions,
       prev,
-      icopayMeta: {
-        compId: merchantId,
-        compName: String((prev && (prev.name || prev.label)) || '').trim() || undefined,
-      },
+      icopayMeta: fixedIngressIcopayMeta,
+    });
+  } else if (pgKind === 'ilk') {
+    merchantRecord = buildIlkMerchantObject({
+      merchantId,
+      callbackUrl: cbSaved,
+      resultUrl: rsSaved,
+      routeNo: rnSaved,
+      internalTargetId,
+      options: fixedIngressOptions,
+      prev,
+      icopayMeta: fixedIngressIcopayMeta,
+    });
+  } else if (pgKind === 'qxipay') {
+    merchantRecord = buildQxipayMerchantObject({
+      merchantId,
+      callbackUrl: cbSaved,
+      resultUrl: rsSaved,
+      routeNo: rnSaved,
+      internalTargetId,
+      options: fixedIngressOptions,
+      prev,
+      icopayMeta: fixedIngressIcopayMeta,
+    });
+  } else if (pgKind === 'omspay') {
+    merchantRecord = buildOmspayMerchantObject({
+      merchantId,
+      callbackUrl: cbSaved,
+      resultUrl: rsSaved,
+      routeNo: rnSaved,
+      internalTargetId,
+      options: fixedIngressOptions,
+      prev,
+      icopayMeta: fixedIngressIcopayMeta,
     });
   } else if (pgKind === 'elementpay') {
     merchantRecord = buildElementPayMerchantObject({
@@ -18824,26 +20007,9 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
       resultUrl: rsSaved,
       routeNo: rnSaved,
       internalTargetId,
-      options: {
-        enableRelay: enableRelayOn,
-        enableInternal: enableInternal === 'on',
-        enableDevInternal: enableDevInternalSaved,
-        relayFormat: fmt,
-        resultDeliveryMode: resultDeliveryModeSaved,
-        enableDealmaiWebhook: enableDealmaiWebhook === 'on',
-        dealmaiPartnerCode: String(rawDealmaiPartnerCode || '').trim(),
-        relayOffForwardTarget: relayOffForwardSaved,
-        relayOffInternalCallbackUrl: relayOffInternalCbSaved,
-        relayOffInternalResultUrl: relayOffInternalRsSaved,
-        relayOffDevCallbackUrl: relayOffDevCbSaved,
-        relayOffDevResultUrl: relayOffDevRsSaved,
-        relayOffDevDedicatedUse: relayOffDevDedicatedSaved,
-      },
+      options: fixedIngressOptions,
       prev,
-      icopayMeta: {
-        compId: merchantId,
-        compName: String((prev && (prev.name || prev.label)) || '').trim() || undefined,
-      },
+      icopayMeta: fixedIngressIcopayMeta,
     });
   } else if (pgKind === 'jpay') {
     merchantRecord = buildJpayMerchantObject({
@@ -18996,11 +20162,13 @@ app.post('/api/v1/icopay/merchants/provision', (req, res) => {
   const result =
     pgKindIn === 'crypto'
       ? provisionCryptoMerchant(req.body, provisionMeta)
-      : pgKindIn === 'ox' || pgKindIn === 'oxpay'
-        ? provisionOxMerchant(req.body, provisionMeta)
-        : pgKindIn === 'elementpay'
-          ? provisionElementPayMerchant(req.body, provisionMeta)
-          : provisionJpayMerchant(req.body, provisionMeta);
+      : pgKindIn === 'omspay' || pgKindIn === 'oms' || pgKindIn === 'waylar'
+        ? provisionOmspayMerchant(req.body, provisionMeta)
+        : pgKindIn === 'ox' || pgKindIn === 'oxpay'
+          ? provisionOxMerchant(req.body, provisionMeta)
+          : pgKindIn === 'elementpay'
+            ? provisionElementPayMerchant(req.body, provisionMeta)
+            : provisionJpayMerchant(req.body, provisionMeta);
   if (!result.ok) {
     return sendProvisionJson(
       res,
@@ -19022,17 +20190,28 @@ app.get('/api/v1/icopay/merchants/:merchantId', (req, res) => {
     return sendProvisionJson(res, auth.status, { success: false, errorCode: auth.errorCode }, locale);
   }
   const pgKind = String(req.query.pgKind || '').toLowerCase().trim();
-  if (pgKind !== 'jpay' && pgKind !== 'elementpay' && pgKind !== 'ox' && pgKind !== 'oxpay' && pgKind !== 'crypto') {
+  if (
+    pgKind !== 'jpay' &&
+    pgKind !== 'elementpay' &&
+    pgKind !== 'ox' &&
+    pgKind !== 'oxpay' &&
+    pgKind !== 'crypto' &&
+    pgKind !== 'omspay' &&
+    pgKind !== 'oms' &&
+    pgKind !== 'waylar'
+  ) {
     return sendProvisionJson(res, 400, { success: false, errorCode: pgKind ? 'INVALID_PG_KIND' : 'INVALID_REQUEST' }, locale);
   }
   const result =
     pgKind === 'crypto'
       ? getCryptoMerchantProvision(req.params.merchantId)
-      : pgKind === 'ox' || pgKind === 'oxpay'
-        ? getOxMerchantProvision(req.params.merchantId)
-        : pgKind === 'elementpay'
-          ? getElementPayMerchantProvision(req.params.merchantId)
-          : getJpayMerchantProvision(req.params.merchantId);
+      : pgKind === 'omspay' || pgKind === 'oms' || pgKind === 'waylar'
+        ? getOmspayMerchantProvision(req.params.merchantId)
+        : pgKind === 'ox' || pgKind === 'oxpay'
+          ? getOxMerchantProvision(req.params.merchantId)
+          : pgKind === 'elementpay'
+            ? getElementPayMerchantProvision(req.params.merchantId)
+            : getJpayMerchantProvision(req.params.merchantId);
   if (!result.ok) {
     return sendProvisionJson(res, result.status, { success: false, errorCode: result.errorCode }, locale);
   }
@@ -19057,11 +20236,13 @@ app.put('/api/v1/icopay/merchants/:merchantId', (req, res) => {
   const result =
     pgKindIn === 'crypto'
       ? updateCryptoMerchantProvision(req.params.merchantId, req.body, provisionMeta)
-      : pgKindIn === 'ox' || pgKindIn === 'oxpay'
-        ? updateOxMerchantProvision(req.params.merchantId, req.body, provisionMeta)
-        : pgKindIn === 'elementpay'
-          ? updateElementPayMerchantProvision(req.params.merchantId, req.body, provisionMeta)
-          : updateJpayMerchantProvision(req.params.merchantId, req.body, provisionMeta);
+      : pgKindIn === 'omspay' || pgKindIn === 'oms' || pgKindIn === 'waylar'
+        ? updateOmspayMerchantProvision(req.params.merchantId, req.body, provisionMeta)
+        : pgKindIn === 'ox' || pgKindIn === 'oxpay'
+          ? updateOxMerchantProvision(req.params.merchantId, req.body, provisionMeta)
+          : pgKindIn === 'elementpay'
+            ? updateElementPayMerchantProvision(req.params.merchantId, req.body, provisionMeta)
+            : updateJpayMerchantProvision(req.params.merchantId, req.body, provisionMeta);
   if (!result.ok) {
     return sendProvisionJson(
       res,
@@ -19089,22 +20270,29 @@ app.delete('/api/v1/icopay/merchants/:merchantId', (req, res) => {
           clientIp: provisionClientIp(req),
           actor: 'icopay-provision',
         })
-      : pgKind === 'ox' || pgKind === 'oxpay'
-        ? deleteOxMerchantProvision(req.params.merchantId, force, {
+      : pgKind === 'omspay' || pgKind === 'oms' || pgKind === 'waylar'
+        ? deleteOmspayMerchantProvision(req.params.merchantId, force, {
             locale,
             requestId: '',
             clientIp: provisionClientIp(req),
             actor: 'icopay-provision',
           })
-        : pgKind === 'elementpay'
-          ? deleteElementPayMerchantProvision(req.params.merchantId, force, {
+        : pgKind === 'ox' || pgKind === 'oxpay'
+          ? deleteOxMerchantProvision(req.params.merchantId, force, {
+              locale,
+              requestId: '',
               clientIp: provisionClientIp(req),
               actor: 'icopay-provision',
             })
-          : deleteJpayMerchantProvision(req.params.merchantId, force, {
-              clientIp: provisionClientIp(req),
-              actor: 'icopay-provision',
-            });
+          : pgKind === 'elementpay'
+            ? deleteElementPayMerchantProvision(req.params.merchantId, force, {
+                clientIp: provisionClientIp(req),
+                actor: 'icopay-provision',
+              })
+            : deleteJpayMerchantProvision(req.params.merchantId, force, {
+                clientIp: provisionClientIp(req),
+                actor: 'icopay-provision',
+              });
   if (!result.ok) {
     return sendProvisionJson(res, result.status, { success: false, errorCode: result.errorCode }, locale);
   }
@@ -19990,6 +21178,12 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#9a3412;color:#fff;border:1px solid #9a3412;';
   const cryptoOn =
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#5b21b6;color:#fff;border:1px solid #4c1d95;';
+  const ilkOn =
+    'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#0369a1;color:#fff;border:1px solid #075985;';
+  const qxipayOn =
+    'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#be185d;color:#fff;border:1px solid #9d174d;';
+  const omspayOn =
+    'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#0f766e;color:#fff;border:1px solid #115e59;';
   const pillInactive =
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:600;font-size:13px;background:#f3f4f6;color:#6b7280;border:1px solid #d1d5db;';
   const withNavEnv = (path) => {
@@ -20007,8 +21201,29 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
           ? 'ox'
           : pgCfg.active === 'crypto'
             ? 'crypto'
-            : 'chillpay';
-  const envOn = envTone === 'jpay' ? jpayOn : envTone === 'elementpay' ? epOn : envTone === 'ox' ? oxOn : envTone === 'crypto' ? cryptoOn : chillOn;
+            : pgCfg.active === 'ilk'
+              ? 'ilk'
+              : pgCfg.active === 'qxipay'
+                ? 'qxipay'
+                : pgCfg.active === 'omspay'
+                  ? 'omspay'
+                  : 'chillpay';
+  const envOn =
+    envTone === 'jpay'
+      ? jpayOn
+      : envTone === 'elementpay'
+        ? epOn
+        : envTone === 'ox'
+          ? oxOn
+          : envTone === 'crypto'
+            ? cryptoOn
+            : envTone === 'ilk'
+              ? ilkOn
+              : envTone === 'qxipay'
+                ? qxipayOn
+                : envTone === 'omspay'
+                  ? omspayOn
+                  : chillOn;
   const envOff = pillInactive;
   const envCfg = c.env || {};
   let envSeg = '';
@@ -20104,6 +21319,51 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
           cryptoLabel +
           '</a>';
       }
+      const hideIlk = !!pgCfg.hideIlk;
+      const hideQxipay = !!pgCfg.hideQxipay;
+      const hideOmspay = !!pgCfg.hideOmspay;
+      const ilkActive = pgCfg.active === 'ilk';
+      const qxipayActive = pgCfg.active === 'qxipay';
+      const omspayActive = pgCfg.active === 'omspay';
+      const ilkHref = withNavEnv(pgCfg.ilkUrl || '#');
+      const qxipayHref = withNavEnv(pgCfg.qxipayUrl || '#');
+      const omspayHref = withNavEnv(pgCfg.omspayUrl || '#');
+      const ilkLabel = esc(t(locale, 'pg_provider_ilk') || 'ILKPAY');
+      const qxipayLabel = esc(t(locale, 'pg_provider_qxipay') || 'QXIPAY');
+      const omspayLabel = esc(t(locale, 'pg_provider_omspay') || 'OMSPAY');
+      if (!hideIlk && pgCfg.ilkUrl) {
+        pgSeg +=
+          '<span style="color:#94a3b8;font-weight:500;">|</span>' +
+          '<a href="' +
+          esc(ilkHref) +
+          '" style="' +
+          (ilkActive ? ilkOn : pillInactive) +
+          '">' +
+          ilkLabel +
+          '</a>';
+      }
+      if (!hideQxipay && pgCfg.qxipayUrl) {
+        pgSeg +=
+          '<span style="color:#94a3b8;font-weight:500;">|</span>' +
+          '<a href="' +
+          esc(qxipayHref) +
+          '" style="' +
+          (qxipayActive ? qxipayOn : pillInactive) +
+          '">' +
+          qxipayLabel +
+          '</a>';
+      }
+      if (!hideOmspay && pgCfg.omspayUrl) {
+        pgSeg +=
+          '<span style="color:#94a3b8;font-weight:500;">|</span>' +
+          '<a href="' +
+          esc(omspayHref) +
+          '" style="' +
+          (omspayActive ? omspayOn : pillInactive) +
+          '">' +
+          omspayLabel +
+          '</a>';
+      }
       pgSeg += '</span>';
     }
   }
@@ -20137,6 +21397,9 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
   const qEp = logPgQueryWithBase(q, 'elementpay', { page: 1 });
   const qOx = logPgQueryWithBase(q, 'ox', { page: 1 });
   const qCrypto = logPgQueryWithBase(q, 'crypto', { page: 1 });
+  const qIlk = logPgQueryWithBase(q, 'ilk', { page: 1 });
+  const qQxipay = logPgQueryWithBase(q, 'qxipay', { page: 1 });
+  const qOmspay = logPgQueryWithBase(q, 'omspay', { page: 1 });
   const envLive = logPgQueryWithBase(q, logPg, { env: 'live', page: 1 });
   const envSand = logPgQueryWithBase(q, logPg, { env: 'sandbox', page: 1 });
   const currentEnv = (o.getEnv && o.getEnv()) || 'live';
@@ -20160,6 +21423,9 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
       elementpayUrl: pathname + '?' + buildQueryString(qEp),
       oxUrl: pathname + '?' + buildQueryString(qOx),
       cryptoUrl: pathname + '?' + buildQueryString(qCrypto),
+      ilkUrl: pathname + '?' + buildQueryString(qIlk),
+      qxipayUrl: pathname + '?' + buildQueryString(qQxipay),
+      omspayUrl: pathname + '?' + buildQueryString(qOmspay),
     },
   });
 }
@@ -21645,6 +22911,8 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     else if (o.source === 'elementpay') parts.push('source=' + encodeURIComponent('elementpay'));
     else if (o.source === 'ox') parts.push('source=' + encodeURIComponent('ox'));
     else if (o.source === 'crypto') parts.push('source=' + encodeURIComponent('crypto'));
+    else if (o.source === 'ilk') parts.push('source=' + encodeURIComponent('ilk'));
+    else if (o.source === 'qxipay') parts.push('source=' + encodeURIComponent('qxipay'));
     if (o.env === 'sandbox') parts.push('env=' + encodeURIComponent('sandbox'));
     return parts.length ? '?' + parts.join('&') : '';
   };
@@ -21818,6 +23086,9 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       elementpayUrl: baseUrl + qs({ source: 'elementpay', page: 1 }),
       oxUrl: baseUrl + qs({ source: 'ox', page: 1 }),
       cryptoUrl: baseUrl + qs({ source: 'crypto', page: 1 }),
+      ilkUrl: baseUrl + qs({ source: 'ilk', page: 1 }),
+      qxipayUrl: baseUrl + qs({ source: 'qxipay', page: 1 }),
+      omspayUrl: baseUrl + qs({ source: 'omspay', page: 1 }),
     },
   });
   const LEGEND_MAX_DESC = 80;
@@ -22537,6 +23808,8 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
     else if (o.source === 'elementpay') parts.push('source=' + encodeURIComponent('elementpay'));
     else if (o.source === 'ox') parts.push('source=' + encodeURIComponent('ox'));
     else if (o.source === 'crypto') parts.push('source=' + encodeURIComponent('crypto'));
+    else if (o.source === 'ilk') parts.push('source=' + encodeURIComponent('ilk'));
+    else if (o.source === 'qxipay') parts.push('source=' + encodeURIComponent('qxipay'));
     return parts.length ? '?' + parts.join('&') : '';
   };
   const exportUrl = baseUrl + '/export' + qs();
@@ -22662,6 +23935,9 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
       elementpayUrl: baseUrl + qs({ source: 'elementpay' }),
       oxUrl: baseUrl + qs({ source: 'ox' }),
       cryptoUrl: baseUrl + qs({ source: 'crypto' }),
+      ilkUrl: baseUrl + qs({ source: 'ilk' }),
+      qxipayUrl: baseUrl + qs({ source: 'qxipay' }),
+      omspayUrl: baseUrl + qs({ source: 'omspay' }),
     },
   });
   const thead =
@@ -24515,6 +25791,10 @@ function inferTransactionNotiCallbackResultFromRouteKey(routeKey) {
   if (rk === 'ox/webhook' || rk.startsWith('ox/webhook')) return 'callback';
   if (rk === 'elementpay/result' || rk.startsWith('elementpay/result')) return 'result';
   if (rk === 'elementpay/webhook' || rk.startsWith('elementpay/webhook')) return 'callback';
+  if (rk === 'ilk/result' || rk.startsWith('ilk/result')) return 'result';
+  if (rk === 'ilk/webhook' || rk.startsWith('ilk/webhook')) return 'callback';
+  if (rk === 'qxipay/result' || rk.startsWith('qxipay/result')) return 'result';
+  if (rk === 'qxipay/webhook' || rk.startsWith('qxipay/webhook')) return 'callback';
   if (rk.startsWith('jpay/result/')) return 'result';
   if (rk.startsWith('jpay/callback/')) return 'callback';
   if (rk.startsWith('result/') || rk.includes('/result/')) return 'result';
@@ -24983,6 +26263,9 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       elementpayUrl: withPgSourceInUrl('/admin/transactions', 'elementpay'),
       oxUrl: withPgSourceInUrl('/admin/transactions', 'ox'),
       cryptoUrl: withPgSourceInUrl('/admin/transactions', 'crypto'),
+      ilkUrl: withPgSourceInUrl('/admin/transactions', 'ilk'),
+      qxipayUrl: withPgSourceInUrl('/admin/transactions', 'qxipay'),
+      omspayUrl: withPgSourceInUrl('/admin/transactions', 'omspay'),
     },
   });
   const cancelPg = getSessionPgSource(req);
@@ -29069,8 +30352,34 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
   const escCell = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
   const escAttr = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
   const editIdRaw = (req.query && req.query.edit != null ? String(req.query.edit) : '').trim();
+  const loadIdRaw = (req.query && req.query.load != null ? String(req.query.load) : '').trim();
   const editTarget = editIdRaw ? INTERNAL_TARGETS.get(editIdRaw) : null;
-  const jpayLinkedSelected = editTarget && (editTarget.pgProvider || '').toLowerCase() === 'jpay' ? String(editTarget.linkedMid || '').trim() : '';
+  const loadTarget = !editTarget && loadIdRaw ? INTERNAL_TARGETS.get(loadIdRaw) : null;
+  const isLoadMode = !!loadTarget;
+  const formSource = editTarget || loadTarget || null;
+  const filterPgRaw = (req.query && req.query.pg != null ? String(req.query.pg) : '').trim().toLowerCase();
+  const filterPg =
+    filterPgRaw && filterPgRaw !== 'all' ? normalizeInternalTargetPgProvider(filterPgRaw) : '';
+  const filterQ = (req.query && req.query.q != null ? String(req.query.q) : '').trim();
+  const filterRange = (req.query && req.query.range != null ? String(req.query.range) : '').trim().toLowerCase();
+  const filterSort = (req.query && req.query.sort != null ? String(req.query.sort) : 'newest').trim().toLowerCase();
+  let filterDateFrom = (req.query && req.query.dateFrom != null ? String(req.query.dateFrom) : '').trim();
+  let filterDateTo = (req.query && req.query.dateTo != null ? String(req.query.dateTo) : '').trim();
+  const todayYmd = adminTzTodayYmd();
+  if (filterRange === 'today') {
+    filterDateFrom = todayYmd;
+    filterDateTo = todayYmd;
+  } else if (filterRange === '7d') {
+    filterDateFrom = shiftYmd(todayYmd, -6);
+    filterDateTo = todayYmd;
+  } else if (filterRange === '30d') {
+    filterDateFrom = shiftYmd(todayYmd, -29);
+    filterDateTo = todayYmd;
+  }
+  const jpayLinkedSelected =
+    formSource && (formSource.pgProvider || '').toLowerCase() === 'jpay'
+      ? String(formSource.linkedMid || '').trim()
+      : '';
   const jpayMidOptionsHtml = (() => {
     const profiles = loadJpayProfiles();
     const hasAny = profiles.some((p) => String(p.mid || '').trim());
@@ -29096,21 +30405,45 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
   })();
   const chillMidDisplay = escCell(getChillpayProductionMidForInternalLinked());
   const formIdVal = editTarget ? escAttr(editTarget.id) : '';
-  const formNameVal = editTarget ? escAttr(editTarget.name) : '';
-  const formCbVal = editTarget ? escAttr(editTarget.callbackUrl) : '';
-  const formResVal = editTarget ? escAttr(editTarget.resultUrl || '') : '';
-  const formDevCbVal = editTarget ? escAttr(editTarget.devCallbackUrl || '') : '';
-  const formDevResVal = editTarget ? escAttr(editTarget.devResultUrl || '') : '';
-  const pgIsJpay = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'jpay');
-  const pgIsElementPay = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'elementpay');
-  const pgIsOx = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'ox' || (editTarget.pgProvider || '').toLowerCase() === 'oxpay'));
-  const pgIsCrypto = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'crypto');
-  const formTzMode = editTarget ? normalizeInternalTargetTimezoneMode(editTarget.timezoneMode) : 'global';
-  const formTzStd = editTarget ? (editTarget.standardTimezone || DEFAULT_CHILLPAY_TIMEZONE) : DEFAULT_CHILLPAY_TIMEZONE;
-  const formTzOp = editTarget ? (editTarget.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE) : DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
+  const formIdPlaceholder = isLoadMode
+    ? escAttr(String(loadTarget.id || '') + '_copy')
+    : '';
+  const formNameVal = formSource ? escAttr(formSource.name) : '';
+  const formCbVal = formSource ? escAttr(formSource.callbackUrl) : '';
+  const formResVal = formSource ? escAttr(formSource.resultUrl || '') : '';
+  const formOpsUnused = !!(formSource && formSource.opsUrlsUnused);
+  const formDevCbVal = formSource ? escAttr(formSource.devCallbackUrl || '') : '';
+  const formDevResVal = formSource ? escAttr(formSource.devResultUrl || '') : '';
+  const formDevUnused = !!(formSource && formSource.devUrlsUnused);
+  const unusedLabel = escCell(t(locale, 'internal_targets_urls_unused'));
+  const urlTail10 = (url) => {
+    const s = String(url || '').trim();
+    if (!s) return '';
+    return s.length <= 10 ? s : s.slice(-10);
+  };
+  const urlCell = (url, unused) => {
+    if (unused) {
+      return `<span style="color:#94a3b8;font-style:italic;">${unusedLabel}</span>`;
+    }
+    const full = String(url || '').trim();
+    if (!full) return '';
+    return `<span title="${escAttr(full)}">${escCell(urlTail10(full))}</span>`;
+  };
+  const pgIsJpay = !!(formSource && (formSource.pgProvider || '').toLowerCase() === 'jpay');
+  const pgIsElementPay = !!(formSource && (formSource.pgProvider || '').toLowerCase() === 'elementpay');
+  const pgIsOx = !!(formSource && ((formSource.pgProvider || '').toLowerCase() === 'ox' || (formSource.pgProvider || '').toLowerCase() === 'oxpay'));
+  const pgIsCrypto = !!(formSource && (formSource.pgProvider || '').toLowerCase() === 'crypto');
+  const editPgNorm = formSource ? normalizeInternalTargetPgProvider(formSource.pgProvider) : 'chillpay';
+  const pgIsIlk = editPgNorm === 'ilk';
+  const pgIsQxipay = editPgNorm === 'qxipay';
+  const pgIsOmspay = editPgNorm === 'omspay';
+  const pgIsFixedNoMid = pgIsElementPay || pgIsOx || pgIsCrypto || pgIsIlk || pgIsQxipay || pgIsOmspay;
+  const formTzMode = formSource ? normalizeInternalTargetTimezoneMode(formSource.timezoneMode) : 'global';
+  const formTzStd = formSource ? (formSource.standardTimezone || DEFAULT_CHILLPAY_TIMEZONE) : DEFAULT_CHILLPAY_TIMEZONE;
+  const formTzOp = formSource ? (formSource.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE) : DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
   const idReadonlyAttr = editTarget ? ' readonly style="background:#e5e7eb;color:#374151;cursor:not-allowed;"' : '';
   const editInvalidAlert =
-    editIdRaw && !editTarget
+    (editIdRaw && !editTarget) || (loadIdRaw && !loadTarget && !editTarget)
       ? `<div style="margin-bottom:12px;padding:10px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#991b1b;font-size:13px;">${escCell(
           t(locale, 'internal_targets_edit_not_found') || 'Not found.',
         )}</div>`
@@ -29120,20 +30453,85 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
       ? `<p style="font-size:13px;color:#1d4ed8;margin:0 0 10px;padding:8px 12px;background:#eff6ff;border-radius:8px;border:1px solid #bfdbfe;">${escCell(
           t(locale, 'internal_targets_editing_hint'),
         )} <a href="/admin/internal-targets" style="color:#1d4ed8;font-weight:600;">${escCell(t(locale, 'internal_targets_cancel_edit'))}</a></p>`
-      : '';
-  const rows = Array.from(INTERNAL_TARGETS.values())
+      : isLoadMode
+        ? `<p style="font-size:13px;color:#9a3412;margin:0 0 10px;padding:8px 12px;background:#fff7ed;border-radius:8px;border:1px solid #fed7aa;">${escCell(
+            t(locale, 'internal_targets_load_hint'),
+          )} <a href="/admin/internal-targets" style="color:#9a3412;font-weight:600;">${escCell(t(locale, 'internal_targets_cancel_load'))}</a></p>`
+        : '';
+  const qLower = filterQ.toLowerCase();
+  let filteredTargets = Array.from(INTERNAL_TARGETS.values()).filter((target) => {
+    if (filterPg && normalizeInternalTargetPgProvider(target.pgProvider) !== filterPg) return false;
+    if (filterDateFrom || filterDateTo) {
+      const ymd = internalTargetActivityYmd(target);
+      if (!ymd) return false;
+      if (filterDateFrom && ymd < filterDateFrom) return false;
+      if (filterDateTo && ymd > filterDateTo) return false;
+    }
+    if (qLower) {
+      const hay = [
+        target.id,
+        target.name,
+        target.callbackUrl,
+        target.resultUrl,
+        target.devCallbackUrl,
+        target.devResultUrl,
+        target.linkedMid,
+        target.pgProvider,
+      ]
+        .map((x) => String(x || '').toLowerCase())
+        .join(' ');
+      if (!hay.includes(qLower)) return false;
+    }
+    return true;
+  });
+  filteredTargets.sort((a, b) => {
+    // 「최신/오래된 등록순」은 등록일(createdAt) 기준. updatedAt 은 수정만 반영하므로 쓰지 않음.
+    if (filterSort === 'oldest') {
+      const ta = Date.parse(a.createdAt) || 0;
+      const tb = Date.parse(b.createdAt) || 0;
+      if (ta !== tb) return ta - tb;
+      return String(a.id || '').localeCompare(String(b.id || ''));
+    }
+    if (filterSort === 'name') {
+      return String(a.name || a.id || '').localeCompare(String(b.name || b.id || ''), undefined, { sensitivity: 'base' });
+    }
+    if (filterSort === 'id') {
+      return String(a.id || '').localeCompare(String(b.id || ''), undefined, { sensitivity: 'base' });
+    }
+    // newest (default): createdAt desc; missing dates last
+    const tb = Date.parse(b.createdAt) || 0;
+    const ta = Date.parse(a.createdAt) || 0;
+    if (tb !== ta) return tb - ta;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  });
+  const filterCountLabel = `${filteredTargets.length} / ${INTERNAL_TARGETS.size}`;
+  const pgFilterOptionsHtml =
+    `<option value="all"${!filterPg ? ' selected' : ''}>${escCell(t(locale, 'internal_targets_filter_pg_all') || 'All')}</option>` +
+    listInternalTargetPgOptions(locale)
+      .map(
+        (o) =>
+          `<option value="${escAttr(o.value)}"${filterPg === o.value ? ' selected' : ''}>${escCell(o.label)}</option>`,
+      )
+      .join('');
+  const rows = filteredTargets
     .map((target) => {
       const pg = normalizeInternalTargetPgProvider(target.pgProvider);
       const pgLabel =
         pg === 'jpay'
           ? t(locale, 'pg_provider_jpay') || 'JPAY'
-          :         pg === 'elementpay'
+          : pg === 'elementpay'
             ? t(locale, 'pg_provider_elementpay') || t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay'
             : pg === 'ox'
               ? t(locale, 'pg_provider_ox') || 'OXPAY'
               : pg === 'crypto'
                 ? t(locale, 'pg_provider_crypto') || 'CRYPTO'
-                : t(locale, 'pg_provider_chillpay') || 'ChillPay';
+                : pg === 'ilk'
+                  ? t(locale, 'pg_provider_ilk') || 'ILKPAY'
+                  : pg === 'qxipay'
+                    ? t(locale, 'pg_provider_qxipay') || 'QXIPAY'
+                    : pg === 'omspay'
+                      ? t(locale, 'pg_provider_omspay') || 'OMSPAY'
+                      : t(locale, 'pg_provider_chillpay') || 'ChillPay';
       const linkCell =
         pg === 'chillpay'
           ? escCell(getChillpayProductionMidForInternalLinked())
@@ -29141,22 +30539,27 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
             ? escCell((target.linkedMid || '').trim() || '-')
             : escCell((target.linkedMid || '').trim() || '—');
       const tzDisp = formatInternalTargetTimezoneDisplay(locale, target);
+      const registeredDisp = formatInternalTargetRegisteredDisplay(target);
       return `<tr>
           <td class="cell-compact">${escCell(target.id)}</td>
           <td class="cell-compact">${escCell(target.name)}</td>
           <td class="cell-compact">${escCell(pgLabel)}</td>
           <td class="cell-compact">${linkCell}</td>
+          <td class="cell-compact" title="${escAttr(registeredDisp)}">${escCell(registeredDisp)}</td>
           <td class="cell-compact" title="${escAttr(tzDisp.standard)}">${escCell(tzDisp.standard)}</td>
           <td class="cell-compact" title="${escAttr(tzDisp.operational)}">${escCell(tzDisp.operational)}</td>
-          <td class="cell-url-one-line" title="${escAttr(target.callbackUrl)}">${escCell(target.callbackUrl)}</td>
-          <td class="cell-url-one-line" title="${escAttr(target.resultUrl || '')}">${escCell(target.resultUrl || '')}</td>
-          <td class="cell-url-one-line" title="${escAttr(target.devCallbackUrl || '')}">${escCell(target.devCallbackUrl || '')}</td>
-          <td class="cell-url-one-line" title="${escAttr(target.devResultUrl || '')}">${escCell(target.devResultUrl || '')}</td>
+          <td class="cell-url-one-line">${urlCell(target.callbackUrl, !!target.opsUrlsUnused)}</td>
+          <td class="cell-url-one-line">${urlCell(target.resultUrl, !!target.opsUrlsUnused)}</td>
+          <td class="cell-url-one-line">${urlCell(target.devCallbackUrl, !!target.devUrlsUnused)}</td>
+          <td class="cell-url-one-line">${urlCell(target.devResultUrl, !!target.devUrlsUnused)}</td>
           <td class="actions-cell">
             <div class="internal-target-actions">
             <a href="/admin/internal-targets?edit=${encodeURIComponent(String(target.id))}" class="btn-internal-target-edit">${escCell(
               t(locale, 'internal_targets_edit'),
             )}</a>
+            <a href="/admin/internal-targets?load=${encodeURIComponent(String(target.id))}" class="btn-internal-target-load" title="${escAttr(
+              t(locale, 'common_load_as_new_hint') || '',
+            )}">${escCell(t(locale, 'common_load_as_new'))}</a>
             <form method="post" action="/admin/internal-targets/delete" class="internal-target-delete-form" onsubmit="return confirm('${String(t(locale, 'internal_targets_confirm_delete')).replace(/'/g, "\\'")}');">
               <input type="hidden" name="id" value="${String(target.id).replace(/"/g, '&quot;')}" />
               <button type="submit" class="btn-internal-target-delete">${t(locale, 'common_delete')}</button>
@@ -29180,43 +30583,80 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
     th, td { border: 1px solid #e5e7eb; padding: 4px 6px; font-size: 11px; }
     th { background: #e5f0ff; text-align: center; }
     td { text-align: center; }
-    table.internal-targets-list { table-layout: fixed; }
-    table.internal-targets-list th { font-size: 11px; padding: 4px 6px; line-height: 1.25; }
-    table.internal-targets-list td.cell-url-one-line {
-      font-size: 11px;
-      line-height: 1.2;
+    table.internal-targets-list { table-layout: fixed; width: 100%; }
+    table.internal-targets-list th,
+    table.internal-targets-list td {
+      text-align: center;
+      vertical-align: middle;
+      font-size: 12px;
+      line-height: 1.3;
+      padding: 6px 4px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      text-align: left;
-      vertical-align: middle;
-      padding: 5px 6px;
     }
-    table.internal-targets-list td.cell-compact {
-      font-size: 11px;
-      line-height: 1.2;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      vertical-align: middle;
-      padding: 5px 6px;
+    table.internal-targets-list th { font-size: 12px; font-weight: 600; }
+    table.internal-targets-list td.cell-url-one-line {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: 0.02em;
     }
     tr:nth-child(even) { background:#f9fafb; }
     .actions-cell { text-align:center; vertical-align:middle; }
-    .internal-target-actions { display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:nowrap; }
-    .internal-target-delete-form { margin:0; display:inline-flex; align-items:center; }
+    .internal-target-actions {
+      display:inline-flex; align-items:center; justify-content:center; gap:3px; flex-wrap:nowrap; white-space:nowrap;
+    }
+    .internal-target-delete-form { margin:0; display:inline-flex; align-items:center; flex-shrink:0; }
     a.btn-internal-target-edit {
       display:inline-flex; align-items:center; justify-content:center;
-      padding:4px 10px; font-size:12px; background:#2563eb; color:#fff; border-radius:4px; text-decoration:none;
-      white-space:nowrap;
+      padding:3px 6px; font-size:11px; line-height:1.2; background:#2563eb; color:#fff; border-radius:3px; text-decoration:none;
+      white-space:nowrap; flex-shrink:0;
     }
+    a.btn-internal-target-load {
+      display:inline-flex; align-items:center; justify-content:center;
+      padding:3px 6px; font-size:11px; line-height:1.2; background:#059669; color:#fff; border-radius:3px; text-decoration:none;
+      white-space:nowrap; flex-shrink:0;
+    }
+    a.btn-internal-target-load:hover { background:#047857; color:#fff; }
     button.btn-internal-target-delete {
-      margin-top:0; padding:4px 8px; font-size:12px; background:#dc2626; color:#fff; border:none; border-radius:4px; cursor:pointer;
+      margin-top:0; padding:3px 6px; font-size:11px; line-height:1.2; background:#dc2626; color:#fff; border:none; border-radius:3px; cursor:pointer;
+      white-space:nowrap; flex-shrink:0;
     }
     button.btn-internal-target-delete:hover { background:#b91c1c; }
+    .internal-targets-filter {
+      display:flex; flex-wrap:wrap; gap:10px 12px; align-items:flex-end;
+      margin:0 0 14px; padding:12px 14px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px;
+    }
+    .internal-targets-filter label { margin:0; font-size:12px; color:#334155; }
+    .internal-targets-filter input[type="text"],
+    .internal-targets-filter input[type="date"],
+    .internal-targets-filter select {
+      width:auto; min-width:110px; max-width:200px; margin-top:4px; padding:6px 8px; font-size:12px;
+      border-radius:6px; border:1px solid #d1d5db; background:#fff;
+    }
+    .internal-targets-filter .filter-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .internal-targets-filter .filter-actions button,
+    .internal-targets-filter .filter-actions a {
+      margin-top:0; padding:6px 12px; font-size:12px; border-radius:6px; text-decoration:none; display:inline-flex; align-items:center;
+    }
+    .internal-targets-filter .btn-filter-search { background:#2563eb; color:#fff; border:none; cursor:pointer; }
+    .internal-targets-filter .btn-filter-reset { background:#64748b; color:#fff; }
+    .internal-targets-filter-meta { font-size:12px; color:#64748b; margin:0 0 8px; }
+    table.internal-targets-list td.actions-cell { white-space:nowrap; overflow:visible; padding:4px 2px; }
     label { display:block; margin-top:8px; font-size: 14px; }
     input[type="text"] { width: 100%; padding: 8px 10px; margin-top:4px; box-sizing:border-box; border-radius:6px; border:1px solid #d1d5db; background:#f9fafb; }
     input[type="text"]:focus { outline:none; border-color:#60a5fa; box-shadow:0 0 0 1px #bfdbfe; background:#ffffff; }
+    input[type="text"].url-unused-disabled {
+      background:#e5e7eb !important; color:#6b7280 !important; cursor:not-allowed;
+      border-color:#cbd5e1;
+    }
+    .url-group-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-top:12px; }
+    .url-group-head .admin-page-desc { margin:0; flex:1; }
+    .url-unused-check {
+      display:inline-flex; align-items:center; gap:6px; margin:0; white-space:nowrap;
+      font-size:13px; font-weight:600; color:#475569; cursor:pointer; user-select:none;
+      padding:6px 10px; background:#f1f5f9; border:1px solid #e2e8f0; border-radius:6px;
+    }
+    .url-unused-check input { margin:0; width:auto; }
     button { margin-top: 12px; padding: 9px 16px; background:#60a5fa; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; }
     button:hover { background:#3b82f6; }
     .layout { display:flex; min-height:100vh; width:100%; gap:0; margin:0; }
@@ -29251,23 +30691,35 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
       <h1>${t(locale, 'internal_targets_title')}</h1>
       <p class="admin-page-desc">${t(locale, 'internal_targets_desc')}</p>
       ${editInvalidAlert}
-      <h2>${editTarget ? t(locale, 'internal_targets_edit') + ' — ' + escCell(editTarget.id) : t(locale, 'internal_targets_register')}</h2>
+      <h2>${
+        editTarget
+          ? t(locale, 'internal_targets_edit') + ' — ' + escCell(editTarget.id)
+          : isLoadMode
+            ? t(locale, 'internal_targets_load_title') + ' — ' + escCell(loadTarget.id)
+            : t(locale, 'internal_targets_register')
+      }</h2>
       ${editingHint}
       <form method="post" action="/admin/internal-targets" id="internal-target-form" data-prev-tz-mode="${escAttr(formTzMode)}" data-prev-std="${escAttr(formTzStd)}" data-prev-op="${escAttr(formTzOp)}" onsubmit="return confirmInternalTargetSave(this);">
-        <label>${t(locale, 'internal_targets_id')}<input type="text" name="id" required value="${formIdVal}"${idReadonlyAttr} /></label>
+        <label>${t(locale, 'internal_targets_id')}<input type="text" name="id" required value="${formIdVal}"${idReadonlyAttr}${
+        formIdPlaceholder ? ` placeholder="${formIdPlaceholder}"` : ''
+      } /></label>
         <label>${t(locale, 'internal_targets_name')}<input type="text" name="name" required value="${formNameVal}" /></label>
         <label>${t(locale, 'internal_targets_pg_provider')}
           <select name="pgProvider" id="internal-target-pg" style="width:100%;max-width:320px;padding:8px 10px;margin-top:4px;border-radius:6px;border:1px solid #d1d5db;">
-            <option value="chillpay"${!pgIsJpay && !pgIsElementPay && !pgIsOx && !pgIsCrypto ? ' selected' : ''}>${t(locale, 'pg_provider_chillpay') || 'ChillPay'}</option>
+            <option value="chillpay"${!pgIsJpay && !pgIsFixedNoMid ? ' selected' : ''}>${t(locale, 'pg_provider_chillpay') || 'ChillPay'}</option>
             <option value="jpay"${pgIsJpay ? ' selected' : ''}>${t(locale, 'pg_provider_jpay') || 'JPAY'}</option>
             <option value="elementpay"${pgIsElementPay ? ' selected' : ''}>${t(locale, 'pg_provider_elementpay') || t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay'}</option>
             <option value="ox"${pgIsOx ? ' selected' : ''}>${t(locale, 'pg_provider_ox') || 'OXPAY'}</option>
             <option value="crypto"${pgIsCrypto ? ' selected' : ''}>${t(locale, 'pg_provider_crypto') || 'CRYPTO'}</option>
+            <option value="ilk"${pgIsIlk ? ' selected' : ''}>${t(locale, 'pg_provider_ilk') || 'ILKPAY'}</option>
+            <option value="qxipay"${pgIsQxipay ? ' selected' : ''}>${t(locale, 'pg_provider_qxipay') || 'QXIPAY'}</option>
+            <option value="omspay"${pgIsOmspay ? ' selected' : ''}>${t(locale, 'pg_provider_omspay') || 'OMSPAY'}</option>
           </select>
         </label>
         <p class="admin-page-desc" id="internal-pg-hint-jpay" style="display:${pgIsJpay ? 'block' : 'none'};">${t(locale, 'internal_targets_jpay_fields_hint')}</p>
         <p class="admin-page-desc" id="internal-pg-hint-ep" style="display:${pgIsElementPay ? 'block' : 'none'};">${t(locale, 'internal_targets_elementpay_fields_hint')}</p>
         <p class="admin-page-desc" id="internal-pg-hint-ox" style="display:${pgIsOx ? 'block' : 'none'};">${t(locale, 'internal_targets_ox_fields_hint')}</p>
+        <p class="admin-page-desc" id="internal-pg-hint-fixed" style="display:${pgIsIlk || pgIsQxipay || pgIsOmspay || pgIsCrypto ? 'block' : 'none'};">${t(locale, 'internal_targets_fixed_ingress_fields_hint')}</p>
         <div id="internal-mid-chillpay-wrap" style="margin-top:10px;">
           <div style="font-size:14px;color:#1e293b;"><strong>${t(locale, 'internal_targets_linked_mid')}</strong>:
             <code style="background:#f1f5f9;padding:4px 10px;border-radius:6px;font-size:13px;">${chillMidDisplay}</code>
@@ -29289,12 +30741,25 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
           <p class="admin-page-desc" style="margin:0;">${t(locale, 'internal_targets_ox_mid_hint')}</p>
         </div>
         <p class="admin-page-desc" id="internal-linked-mid-hint">${t(locale, 'internal_targets_linked_mid_hint')}</p>
-        <label>${t(locale, 'internal_targets_callback_url')}<input type="text" name="callbackUrl" required value="${formCbVal}" /></label>
-        <label>${t(locale, 'internal_targets_result_url')}<input type="text" name="resultUrl" value="${formResVal}" /></label>
-        <p class="admin-page-desc">${t(locale, 'internal_targets_dev_urls_hint')}</p>
-        <label>${t(locale, 'internal_targets_dev_callback_url')}<input type="text" name="devCallbackUrl" value="${formDevCbVal}" placeholder="https://..." /></label>
-        <label>${t(locale, 'internal_targets_dev_result_url')}<input type="text" name="devResultUrl" value="${formDevResVal}" placeholder="https://..." /></label>
-        ${renderInternalTargetTimezoneFormFields(locale, editTarget)}
+        <div class="url-group-head">
+          <p class="admin-page-desc">${t(locale, 'internal_targets_ops_urls_hint')}</p>
+          <label class="url-unused-check" for="ops-urls-unused">
+            <input type="checkbox" name="opsUrlsUnused" value="1" id="ops-urls-unused"${formOpsUnused ? ' checked' : ''} />
+            ${t(locale, 'internal_targets_urls_unused')}
+          </label>
+        </div>
+        <label>${t(locale, 'internal_targets_callback_url')}<input type="text" name="callbackUrl" id="ops-callback-url" value="${formCbVal}"${formOpsUnused ? ' readonly class="url-unused-disabled"' : ' required'} /></label>
+        <label>${t(locale, 'internal_targets_result_url')}<input type="text" name="resultUrl" id="ops-result-url" value="${formResVal}"${formOpsUnused ? ' readonly class="url-unused-disabled"' : ''} /></label>
+        <div class="url-group-head">
+          <p class="admin-page-desc">${t(locale, 'internal_targets_dev_urls_hint')}</p>
+          <label class="url-unused-check" for="dev-urls-unused">
+            <input type="checkbox" name="devUrlsUnused" value="1" id="dev-urls-unused"${formDevUnused ? ' checked' : ''} />
+            ${t(locale, 'internal_targets_urls_unused')}
+          </label>
+        </div>
+        <label>${t(locale, 'internal_targets_dev_callback_url')}<input type="text" name="devCallbackUrl" id="dev-callback-url" value="${formDevCbVal}" placeholder="https://..."${formDevUnused ? ' readonly class="url-unused-disabled"' : ''} /></label>
+        <label>${t(locale, 'internal_targets_dev_result_url')}<input type="text" name="devResultUrl" id="dev-result-url" value="${formDevResVal}" placeholder="https://..."${formDevUnused ? ' readonly class="url-unused-disabled"' : ''} /></label>
+        ${renderInternalTargetTimezoneFormFields(locale, formSource)}
         <button type="submit">${t(locale, 'common_save')}</button>
       </form>
       <script>
@@ -29326,13 +30791,43 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         var hintE = document.getElementById('internal-pg-hint-ep');
         var hintO = document.getElementById('internal-pg-hint-ox');
         var midHint = document.getElementById('internal-linked-mid-hint');
+        function setUrlUnused(inputs, unused, requireFirst) {
+          for (var i = 0; i < inputs.length; i++) {
+            var el = inputs[i];
+            if (!el) continue;
+            el.readOnly = !!unused;
+            if (unused) el.classList.add('url-unused-disabled');
+            else el.classList.remove('url-unused-disabled');
+            if (requireFirst && i === 0) {
+              if (unused) el.removeAttribute('required');
+              else el.setAttribute('required', 'required');
+            }
+          }
+        }
+        function syncOpsUnused() {
+          var cb = document.getElementById('ops-urls-unused');
+          setUrlUnused(
+            [document.getElementById('ops-callback-url'), document.getElementById('ops-result-url')],
+            cb && cb.checked,
+            true,
+          );
+        }
+        function syncDevUnused() {
+          var cb = document.getElementById('dev-urls-unused');
+          setUrlUnused(
+            [document.getElementById('dev-callback-url'), document.getElementById('dev-result-url')],
+            cb && cb.checked,
+            false,
+          );
+        }
         function syncPg() {
           if (!pg) return;
           var v = pg.value;
           var j = v === 'jpay';
           var ep = v === 'elementpay';
           var ox = v === 'ox';
-          var fixed = ep || ox;
+          var fixed = ep || ox || v === 'crypto' || v === 'ilk' || v === 'qxipay' || v === 'omspay';
+          var hintFixed = document.getElementById('internal-pg-hint-fixed');
           if (wC) wC.style.display = !j && !fixed ? 'block' : 'none';
           if (wJ) wJ.style.display = j ? 'block' : 'none';
           if (wE) wE.style.display = ep ? 'block' : 'none';
@@ -29340,6 +30835,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
           if (hintJ) hintJ.style.display = j ? 'block' : 'none';
           if (hintE) hintE.style.display = ep ? 'block' : 'none';
           if (hintO) hintO.style.display = ox ? 'block' : 'none';
+          if (hintFixed) hintFixed.style.display = (!ep && !ox && fixed) ? 'block' : 'none';
           if (midHint) midHint.style.display = fixed ? 'none' : 'block';
         }
         function syncTz() {
@@ -29358,24 +30854,70 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
           });
           syncTz();
         }
+        var opsUnusedCb = document.getElementById('ops-urls-unused');
+        var devUnusedCb = document.getElementById('dev-urls-unused');
+        if (opsUnusedCb) {
+          opsUnusedCb.addEventListener('change', syncOpsUnused);
+          syncOpsUnused();
+        }
+        if (devUnusedCb) {
+          devUnusedCb.addEventListener('change', syncDevUnused);
+          syncDevUnused();
+        }
       })();
       </script>
     </div>
     <div class="card">
       <h2>${t(locale, 'internal_targets_list')}</h2>
+      <form method="get" action="/admin/internal-targets" class="internal-targets-filter" id="internal-targets-filter-form">
+        <label>${t(locale, 'tx_th_acquirer')}
+          <select name="pg">${pgFilterOptionsHtml}</select>
+        </label>
+        <label>${t(locale, 'internal_targets_filter_q')}
+          <input type="text" name="q" value="${escAttr(filterQ)}" placeholder="${escAttr(t(locale, 'internal_targets_filter_q_ph') || '')}" />
+        </label>
+        <label>${t(locale, 'internal_targets_filter_range')}
+          <select name="range">
+            <option value=""${!filterRange ? ' selected' : ''}>${escCell(t(locale, 'internal_targets_filter_range_all'))}</option>
+            <option value="today"${filterRange === 'today' ? ' selected' : ''}>${escCell(t(locale, 'internal_targets_quick_today'))}</option>
+            <option value="7d"${filterRange === '7d' ? ' selected' : ''}>${escCell(t(locale, 'internal_targets_quick_7d'))}</option>
+            <option value="30d"${filterRange === '30d' ? ' selected' : ''}>${escCell(t(locale, 'internal_targets_quick_30d'))}</option>
+          </select>
+        </label>
+        <label>${t(locale, 'internal_targets_filter_date_from')}
+          <input type="date" name="dateFrom" value="${escAttr(filterDateFrom)}" />
+        </label>
+        <label>${t(locale, 'internal_targets_filter_date_to')}
+          <input type="date" name="dateTo" value="${escAttr(filterDateTo)}" />
+        </label>
+        <label>${t(locale, 'internal_targets_filter_sort')}
+          <select name="sort">
+            <option value="newest"${filterSort === 'newest' || !filterSort ? ' selected' : ''}>${escCell(t(locale, 'internal_targets_sort_newest'))}</option>
+            <option value="oldest"${filterSort === 'oldest' ? ' selected' : ''}>${escCell(t(locale, 'internal_targets_sort_oldest'))}</option>
+            <option value="name"${filterSort === 'name' ? ' selected' : ''}>${escCell(t(locale, 'internal_targets_sort_name'))}</option>
+            <option value="id"${filterSort === 'id' ? ' selected' : ''}>${escCell(t(locale, 'internal_targets_sort_id'))}</option>
+          </select>
+        </label>
+        <div class="filter-actions">
+          <button type="submit" class="btn-filter-search">${t(locale, 'common_search')}</button>
+          <a class="btn-filter-reset" href="/admin/internal-targets">${t(locale, 'common_search_reset')}</a>
+        </div>
+      </form>
+      <p class="internal-targets-filter-meta">${escCell(t(locale, 'internal_targets_filter_count'))}: ${escCell(filterCountLabel)}</p>
       <table class="internal-targets-list">
         <colgroup>
+          <col style="width:9%" />
+          <col style="width:12%" />
+          <col style="width:7%" />
           <col style="width:8%" />
-          <col style="width:10%" />
+          <col style="width:5%" />
+          <col style="width:8%" />
+          <col style="width:8%" />
           <col style="width:6%" />
-          <col style="width:8%" />
-          <col style="width:11%" />
-          <col style="width:11%" />
-          <col style="width:13%" />
-          <col style="width:13%" />
-          <col style="width:13%" />
-          <col style="width:13%" />
-          <col style="width:120px" />
+          <col style="width:6%" />
+          <col style="width:6%" />
+          <col style="width:6%" />
+          <col style="width:19%" />
         </colgroup>
         <thead>
           <tr>
@@ -29383,6 +30925,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
             <th>${t(locale, 'internal_targets_name')}</th>
             <th>${t(locale, 'tx_th_acquirer')}</th>
             <th>${t(locale, 'internal_targets_linked_mid')}</th>
+            <th>${t(locale, 'internal_targets_col_registered')}</th>
             <th>${t(locale, 'internal_targets_col_standard_tz')}</th>
             <th>${t(locale, 'internal_targets_col_operational_tz')}</th>
             <th>${t(locale, 'internal_targets_callback_url')}</th>
@@ -29393,7 +30936,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="11" style="text-align:center;color:#777;">${t(locale, 'internal_targets_empty')}</td></tr>`}
+          ${rows || `<tr><td colspan="12" style="text-align:center;color:#777;">${t(locale, 'internal_targets_empty')}</td></tr>`}
         </tbody>
       </table>
       </div>
@@ -30141,10 +31684,18 @@ app.post('/admin/internal-targets', requireAuth, requirePage('internal_targets')
   const pg = normalizeInternalTargetPgProvider(pgProvider);
   const jpayMidPick = (rawLinkedMid || '').toString().trim();
   const allowedJpayMids = new Set(getJpayProfileMidsUniqueSorted());
-  if (!id || !name || !callbackUrl) {
+  const parseUnusedFlag = (v) => {
+    if (v === true || v === 1) return true;
+    const s = String(v == null ? '' : v).trim().toLowerCase();
+    return s === '1' || s === 'true' || s === 'on' || s === 'yes';
+  };
+  const opsUrlsUnused = parseUnusedFlag(req.body && req.body.opsUrlsUnused);
+  const devUrlsUnused = parseUnusedFlag(req.body && req.body.devUrlsUnused);
+  const cbTrim = String(callbackUrl || '').trim();
+  if (!id || !name || (!opsUrlsUnused && !cbTrim)) {
     return res
       .status(400)
-      .send('id, name, callbackUrl 은 필수입니다.');
+      .send('id, name, callbackUrl 은 필수입니다. (운영 사용안함이면 Callback 생략 가능)');
   }
   let linkedMid = '';
   if (pg === 'chillpay') {
@@ -30172,21 +31723,24 @@ app.post('/admin/internal-targets', requireAuth, requirePage('internal_targets')
     operationalTimezone: req.body && req.body.operationalTimezone,
   });
 
-  INTERNAL_TARGETS.set(id, {
+  const nextRec = stampInternalTargetTimestamps(before, {
     id,
     name,
-    callbackUrl,
-    resultUrl: resultUrl || '',
+    callbackUrl: cbTrim,
+    resultUrl: String(resultUrl || '').trim(),
+    opsUrlsUnused,
     devCallbackUrl: String(devCallbackUrl || '').trim(),
     devResultUrl: String(devResultUrl || '').trim(),
+    devUrlsUnused,
     pgProvider: pg,
     linkedMid,
     ...tzFields,
   });
+  INTERNAL_TARGETS.set(id, nextRec);
   saveInternalTargets();
   console.log('[관리자] 전산 대상 저장:', id, INTERNAL_TARGETS.get(id));
   appendConfigChangeLog({
-    type: 'internal_target_update',
+    type: before ? 'internal_target_update' : 'internal_target_create',
     actor,
     clientIp,
     targetId: id,
@@ -30208,18 +31762,22 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
   const nowKr = nowDate.toLocaleString('ko-KR', { hour12: false });
   const nowTh = nowDate.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', hour12: false });
 
-  const editId = (req.query.id || '').toString();
+  const editId = (req.query.id || '').toString().trim();
+  const loadId = (req.query.load || '').toString().trim();
   const editingConfig = editId && TEST_CONFIGS.get(editId) ? TEST_CONFIGS.get(editId) : null;
+  const loadingConfig = !editingConfig && loadId && TEST_CONFIGS.get(loadId) ? TEST_CONFIGS.get(loadId) : null;
+  const isTestConfigLoadMode = !!loadingConfig;
+  const formConfig = editingConfig || loadingConfig || null;
   const editRelayFormat =
-    editingConfig && (editingConfig.relayFormat === 'json' || editingConfig.relayFormat === 'form')
-      ? editingConfig.relayFormat
+    formConfig && (formConfig.relayFormat === 'json' || formConfig.relayFormat === 'form')
+      ? formConfig.relayFormat
       : 'raw';
   const editResultDeliveryMode =
-    editingConfig && editingConfig.resultDeliveryMode === 'no_browser_redirect'
+    formConfig && formConfig.resultDeliveryMode === 'no_browser_redirect'
       ? 'no_browser_redirect'
-      : editingConfig && editingConfig.resultDeliveryMode === 'post_force_redirect'
+      : formConfig && formConfig.resultDeliveryMode === 'post_force_redirect'
       ? 'post_force_redirect'
-      : editingConfig && editingConfig.resultDeliveryMode === 'autot'
+      : formConfig && formConfig.resultDeliveryMode === 'autot'
       ? 'autot'
       : 'auto';
 
@@ -30239,6 +31797,8 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
     ? [...TEST_CONFIGS.keys()].filter((k) => k !== editingConfig.id)
     : [...TEST_CONFIGS.keys()];
   const idDuplicate = false;
+  const testConfigFormIdVal = editingConfig ? editingConfig.id : '';
+  const testConfigFormIdPh = isTestConfigLoadMode ? String(loadingConfig.id || '') + '_copy' : '';
 
   const escTd = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const shortMid = (val, head, tail) => {
@@ -30330,6 +31890,10 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
                 <input type="hidden" name="id" value="${escapeHtmlAttr(cfg.id)}" />
                 <button type="submit" class="tc-tb-btn tc-tb-edit">${t(locale, 'common_edit')}</button>
               </form>
+              <form method="get" action="/admin/test-configs" style="margin:0;" onsubmit="return confirm('${(t(locale, 'common_load_as_new_confirm') || '').replace(/'/g, "\\'")}');">
+                <input type="hidden" name="load" value="${escapeHtmlAttr(cfg.id)}" />
+                <button type="submit" class="tc-tb-btn tc-tb-load" title="${escapeHtmlAttr(t(locale, 'common_load_as_new_hint') || '')}">${t(locale, 'common_load_as_new')}</button>
+              </form>
               <form method="post" action="/admin/test-configs/delete" onsubmit="return confirm('${String(t(locale, 'test_config_confirm_delete')).replace(/'/g, "\\'")}');" style="margin:0;">
                 <input type="hidden" name="id" value="${escapeHtmlAttr(cfg.id)}" />
                 <button type="submit" class="tc-tb-btn tc-tb-del">${t(locale, 'common_delete')}</button>
@@ -30374,6 +31938,8 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
     .tc-tb-rec:hover { background: #1d4ed8; }
     .tc-tb-edit { background: #facc15; color: #111827; }
     .tc-tb-edit:hover { background: #eab308; }
+    .tc-tb-load { background: #059669; color: #fff; }
+    .tc-tb-load:hover { background: #047857; }
     .tc-tb-del { background: #dc2626; color: #fff; }
     .tc-tb-del:hover { background: #b91c1c; }
     .tc-td-actions { padding: 4px !important; }
@@ -30418,34 +31984,48 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
       <div class="card">
         <h1>${t(locale, 'test_config_title')}</h1>
         <p class="admin-page-desc">${t(locale, 'test_config_desc')}</p>
-        <h2 class="tc-form-h2">${t(locale, 'test_config_form_title')}</h2>
+        <h2 class="tc-form-h2">${
+          isTestConfigLoadMode
+            ? t(locale, 'test_config_load_title') || t(locale, 'test_config_form_title')
+            : t(locale, 'test_config_form_title')
+        }</h2>
+        ${
+          isTestConfigLoadMode
+            ? `<p class="admin-page-desc" style="color:#9a3412;background:#fff7ed;border:1px solid #fed7aa;padding:8px 12px;border-radius:8px;">${t(
+                locale,
+                'common_load_as_new_hint',
+              )} <a href="/admin/test-configs">${t(locale, 'internal_targets_cancel_load')}</a></p>`
+            : ''
+        }
         <form method="post" action="/admin/test-configs" id="test-config-form" onsubmit="return (function(){ var dup=document.getElementById('test-config-id-dup'); if(dup&&dup.style.display!=='none'){ alert('${(t(locale, 'test_config_id_dup_alert') || '').replace(/'/g, "\\'")}'); return false; } return confirm('${(t(locale, 'merchants_confirm_save') || '저장(적용)하시겠습니까?').replace(/'/g, "\\'")}'); })();">
           ${editingConfig ? `<input type="hidden" name="originalId" value="${editingConfig.id}" />` : ''}
           <label>
             ${t(locale, 'test_config_label_id')}
-            <input type="text" name="id" id="test-config-id" value="${editingConfig ? editingConfig.id : ''}" required />
+            <input type="text" name="id" id="test-config-id" value="${testConfigFormIdVal}" ${
+              testConfigFormIdPh ? `placeholder="${escapeHtmlAttr(testConfigFormIdPh)}"` : ''
+            } required />
             <div id="test-config-id-dup" style="color:#dc2626;font-size:13px;margin-top:6px;font-weight:500;display:${idDuplicate ? 'block' : 'none'};">
               ${t(locale, 'test_config_id_dup_alert')}
             </div>
           </label>
           <label>
             ${t(locale, 'test_config_label_name')}
-            <input type="text" name="name" value="${editingConfig ? editingConfig.name : ''}" required />
+            <input type="text" name="name" value="${formConfig ? formConfig.name : ''}" required />
           </label>
           <label>
             ${t(locale, 'test_config_label_environment')}
             <select name="environment" required>
-              <option value="SANDBOX" ${!editingConfig || editingConfig.environment === 'SANDBOX' ? 'selected' : ''}>Sandbox</option>
-              <option value="PRODUCTION" ${editingConfig && editingConfig.environment === 'PRODUCTION' ? 'selected' : ''}>Production</option>
+              <option value="SANDBOX" ${!formConfig || formConfig.environment === 'SANDBOX' ? 'selected' : ''}>Sandbox</option>
+              <option value="PRODUCTION" ${formConfig && formConfig.environment === 'PRODUCTION' ? 'selected' : ''}>Production</option>
             </select>
           </label>
           <label>
             Merchant Code
-            <input type="text" name="merchantCode" value="${editingConfig ? editingConfig.merchantCode : ''}" required />
+            <input type="text" name="merchantCode" value="${formConfig ? formConfig.merchantCode : ''}" required />
           </label>
           <label>
             Route No
-            <input type="text" name="routeNo" id="test-config-routeNo" value="${editingConfig ? editingConfig.routeNo : ''}" required />
+            <input type="text" name="routeNo" id="test-config-routeNo" value="${formConfig ? formConfig.routeNo : ''}" required />
             <div id="route-no-warning" style="color:#dc2626;font-size:13px;margin-top:6px;font-weight:500;display:${routeNoInUse ? 'block' : 'none'};">
               ⚠ ${t(locale, 'test_config_route_warning')}
             </div>
@@ -30480,32 +32060,32 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
           <\/script>
           <label>
             API KEY
-            <input type="text" name="apiKey" value="${editingConfig ? editingConfig.apiKey : ''}" required />
+            <input type="text" name="apiKey" value="${formConfig ? formConfig.apiKey : ''}" required />
           </label>
           <label>
             MD5 Key
-            <input type="text" name="md5Key" value="${editingConfig ? editingConfig.md5Key : ''}" required />
+            <input type="text" name="md5Key" value="${formConfig ? formConfig.md5Key : ''}" required />
           </label>
           <label>
             Currency
             <select name="currency" required>
-              <option value="392" ${!editingConfig || editingConfig.currency === 'JPY' || editingConfig.currency === '392' ? 'selected' : ''}>JPY (392)</option>
-              <option value="840" ${editingConfig && (editingConfig.currency === 'USD' || editingConfig.currency === '840') ? 'selected' : ''}>USD (840)</option>
-              <option value="764" ${editingConfig && (editingConfig.currency === 'THB' || editingConfig.currency === '764') ? 'selected' : ''}>THB (764)</option>
-              <option value="410" ${editingConfig && (editingConfig.currency === 'KRW' || editingConfig.currency === 'KOR' || editingConfig.currency === '410') ? 'selected' : ''}>KOR (410)</option>
+              <option value="392" ${!formConfig || formConfig.currency === 'JPY' || formConfig.currency === '392' ? 'selected' : ''}>JPY (392)</option>
+              <option value="840" ${formConfig && (formConfig.currency === 'USD' || formConfig.currency === '840') ? 'selected' : ''}>USD (840)</option>
+              <option value="764" ${formConfig && (formConfig.currency === 'THB' || formConfig.currency === '764') ? 'selected' : ''}>THB (764)</option>
+              <option value="410" ${formConfig && (formConfig.currency === 'KRW' || formConfig.currency === 'KOR' || formConfig.currency === '410') ? 'selected' : ''}>KOR (410)</option>
             </select>
           </label>
           <label>
             ${t(locale, 'test_config_label_payment_api')}
-            <input type="text" name="paymentApiUrl" value="${editingConfig ? (editingConfig.paymentApiUrl || '') : ''}" placeholder="${t(locale, 'test_config_placeholder_payment_api')}" />
+            <input type="text" name="paymentApiUrl" value="${formConfig ? (formConfig.paymentApiUrl || '') : ''}" placeholder="${t(locale, 'test_config_placeholder_payment_api')}" />
           </label>
           <label>
             Recurring API URL
-            <input type="text" name="recurringApiUrl" value="${editingConfig ? (editingConfig.recurringApiUrl || '') : ''}" placeholder="(empty = auto: sandbox/prod recurring URL)" />
+            <input type="text" name="recurringApiUrl" value="${formConfig ? (formConfig.recurringApiUrl || '') : ''}" placeholder="(empty = auto: sandbox/prod recurring URL)" />
           </label>
           <label>
             ${t(locale, 'test_config_label_return_url')}
-            <input type="text" name="returnUrl" value="${editingConfig ? (editingConfig.returnUrl || '') : ''}" placeholder="${t(locale, 'test_config_placeholder_return_url')}" />
+            <input type="text" name="returnUrl" value="${formConfig ? (formConfig.returnUrl || '') : ''}" placeholder="${t(locale, 'test_config_placeholder_return_url')}" />
           </label>
           <label>
             ${t(locale, 'merchants_label_relay_format')}
@@ -30526,7 +32106,7 @@ app.get('/admin/test-configs', requireAuth, requirePage('test_config'), (req, re
           </label>
           <p class="admin-page-desc">${t(locale, 'test_config_relay_result_hint')}</p>
           <label style="margin-top:12px; display:flex; align-items:center; gap:8px;">
-            <input type="checkbox" name="useTestResultPage" ${editingConfig && editingConfig.useTestResultPage ? 'checked' : ''} />
+            <input type="checkbox" name="useTestResultPage" ${formConfig && formConfig.useTestResultPage ? 'checked' : ''} />
             ${t(locale, 'test_config_label_use_result_page')}
           </label>
           <p class="admin-page-desc">${t(locale, 'test_config_use_result_page_desc')}</p>
