@@ -1,7 +1,7 @@
-{
-  "enabled": true,
-  "icopayNotifyUrl": "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/QXIPAY",
-  "icopayOrderLookupUrl": "",
-  "timeoutMs": 25000,
-  "note": "QXIPAY Webhooks → POST https://noti.icopay.net/noti/qxipay . Verify GW-Signature on ICOPAY. Merchant Callback uses Comp-Id."
+﻿{
+    "enabled":  true,
+    "icopayNotifyUrl":  "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/QXIPAY",
+    "icopayOrderLookupUrl":  "https://api.icopay.co.kr/api/middleware/notify/v1/order-lookup?order={order}",
+    "timeoutMs":  25000,
+    "note":  "QXIPAY Webhooks → POST https://noti.icopay.net/noti/qxipay . Verify GW-Signature on ICOPAY. Merchant Callback uses Comp-Id."
 }

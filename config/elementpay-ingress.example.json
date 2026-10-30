@@ -1,14 +1,24 @@
-{
-  "enabled": true,
-  "icopayNotifyUrl": "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/ELEMENTPAY",
-  "icopayOrderLookupUrl": "",
-  "timeoutMs": 25000,
-  "note": "EP Cabinet Webhooks → POST https://noti.icopay.net/noti/elementpay only. Browser Result → GET|POST https://noti.icopay.net/noti/result/elementpay (do not register merchant Result on EP). Optional icopayOrderLookupUrl may include {order} and return Comp-Id (JSON or X-Icopay-Comp-Id).",
-  "webhookIpWhitelist": {
-    "enabled": true,
-    "sandboxIps": ["3.0.36.253"],
-    "liveIps": ["3.1.29.20"],
-    "extraIps": [],
-    "trustedProxies": ["127.0.0.1", "::1", "::ffff:127.0.0.1"]
-  }
+﻿{
+    "enabled":  true,
+    "icopayNotifyUrl":  "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/ELEMENTPAY",
+    "icopayOrderLookupUrl":  "https://api.icopay.co.kr/api/middleware/notify/v1/order-lookup?order={order}",
+    "timeoutMs":  25000,
+    "note":  "EP Cabinet Webhooks → POST https://noti.icopay.net/noti/elementpay only. Browser Result → GET|POST https://noti.icopay.net/noti/result/elementpay (do not register merchant Result on EP). Optional icopayOrderLookupUrl may include {order} and return Comp-Id (JSON or X-Icopay-Comp-Id).",
+    "webhookIpWhitelist":  {
+                               "enabled":  true,
+                               "sandboxIps":  [
+                                                  "3.0.36.253"
+                                              ],
+                               "liveIps":  [
+                                               "3.1.29.20"
+                                           ],
+                               "extraIps":  [
+
+                                            ],
+                               "trustedProxies":  [
+                                                      "127.0.0.1",
+                                                      "::1",
+                                                      "::ffff:127.0.0.1"
+                                                  ]
+                           }
 }

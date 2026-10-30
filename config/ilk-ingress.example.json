@@ -1,7 +1,7 @@
-{
-  "enabled": true,
-  "icopayNotifyUrl": "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/ILK",
-  "icopayOrderLookupUrl": "",
-  "timeoutMs": 25000,
-  "note": "ILK Back Noti → POST https://noti.icopay.net/noti/ilk only. ICOPAY registers this URL as processingInformation.notifyUrl. Merchant Callback uses existing Comp-Id (EP/JPAY 등 동일 가맹). QR(PayPay)도 동일 경로."
+﻿{
+    "enabled":  true,
+    "icopayNotifyUrl":  "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/ILK",
+    "icopayOrderLookupUrl":  "https://api.icopay.co.kr/api/middleware/notify/v1/order-lookup?order={order}",
+    "timeoutMs":  25000,
+    "note":  "ILK Back Noti → POST https://noti.icopay.net/noti/ilk only. ICOPAY registers this URL as processingInformation.notifyUrl. Merchant Callback uses existing Comp-Id (EP/JPAY 등 동일 가맹). QR(PayPay)도 동일 경로."
 }

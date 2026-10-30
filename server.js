@@ -141,6 +141,55 @@ const ADMIN_LOG_FILTER_BAR_CSS = `
     }
 `;
 
+/** 로그 JSON 셀: 기본 3줄 높이 + 행 더블클릭 펼침 */
+const ADMIN_LOG_JSON_COLLAPSE_CSS = `
+    tr.log-json-row { cursor: zoom-in; }
+    tr.log-json-row.is-json-expanded { cursor: zoom-out; background: #f8fafc; }
+    .json-cell-wrap { text-align: left; max-width: 100%; }
+    .json-cell-summary {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #1f2937;
+      line-height: 1.25;
+      margin: 0 0 2px 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .json-cell-wrap pre.json-preview {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 11px;
+      line-height: 1.25;
+      text-align: left;
+      max-height: 2.5em;
+      overflow: hidden;
+      color: #6b7280;
+    }
+    tr.is-json-expanded .json-cell-wrap pre.json-preview {
+      max-height: none;
+      overflow: auto;
+      color: #111827;
+      font-size: 12px;
+    }
+    .log-json-dblclick-hint {
+      margin: 0 0 8px 0;
+      font-size: 11px;
+      color: #6b7280;
+    }
+    .col-date, .col-time, .col-narrow, .col-status { white-space: nowrap; }
+    .cell-upstream-pre.json-preview {
+      max-height: 2.5em;
+      overflow: hidden;
+    }
+    tr.is-json-expanded .cell-upstream-pre.json-preview {
+      max-height: none;
+      overflow: auto;
+    }
+`;
+
 const ADMIN_LIST_COL_GUIDE_CSS = `
     .list-col-guide { margin:8px 0 12px; padding:10px 12px; border:1px solid #e2e8f0; border-radius:8px; background:#f8fafc; box-sizing:border-box; }
     .list-col-guide-head { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; margin-bottom:8px; }
@@ -6909,6 +6958,46 @@ function stampOmspayCompIdOnBody(body, compId) {
   return out;
 }
 
+/** ICOPAY notify 응답 헤더·본문에서 Comp-Id / Order-No 추출 */
+function extractIcopayCompIdAndOrderFromNotifyResult(ico) {
+  const headers = (ico && ico.headers) || {};
+  let compId =
+    omspayNoti.headerGetIgnoreCase(headers, 'x-icopay-comp-id') ||
+    omspayNoti.headerGetIgnoreCase(headers, 'x-comp-id') ||
+    '';
+  let orderNo =
+    omspayNoti.headerGetIgnoreCase(headers, 'x-icopay-order-no') ||
+    omspayNoti.headerGetIgnoreCase(headers, 'x-order-no') ||
+    '';
+  let data = ico && ico.data;
+  if (typeof data === 'string' && data.trim()) {
+    try {
+      data = JSON.parse(data);
+    } catch (_) {
+      data = null;
+    }
+  }
+  if (data && typeof data === 'object') {
+    const nested = data.data && typeof data.data === 'object' ? data.data : data;
+    if (!compId) {
+      compId = String(
+        nested.compId ||
+          nested.CompId ||
+          nested['Comp-Id'] ||
+          nested.merchantId ||
+          nested.MerchantId ||
+          '',
+      ).trim();
+    }
+    if (!orderNo) {
+      orderNo = String(
+        nested.orderNo || nested.OrderNo || nested.order || nested.orderid || nested.note || '',
+      ).trim();
+    }
+  }
+  return { compId: String(compId || '').trim(), orderNo: String(orderNo || '').trim() };
+}
+
 async function forwardOmspayToIcopay(rawBodyStr, contentType, attempt, extraHeaders) {
   const cfg = loadOmspayIngressConfig();
   if (!cfg.enabled) {
@@ -7071,86 +7160,37 @@ async function handleOmspayWebhook(req, res) {
     1,
     passHeaders,
   );
-  const compIdHdr = omspayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-comp-id');
-  const orderHdr = omspayNoti.headerGetIgnoreCase(ico.headers, 'x-icopay-order-no');
+  const extracted = extractIcopayCompIdAndOrderFromNotifyResult(ico);
+  const compIdHdr = extracted.compId;
+  const orderHdr = extracted.orderNo;
 
   const outStatus = ico.status && Number.isFinite(Number(ico.status)) ? Number(ico.status) : 502;
   const outCt =
     omspayNoti.headerGetIgnoreCase(ico.headers, 'content-type') || 'application/json; charset=utf-8';
   const outBody = ico.data != null ? ico.data : '';
-  console.log('[OMSPAY] passthrough', 'so=', so || '-', 'order=', order || '-', 'http=', outStatus);
+  console.log(
+    '[OMSPAY] passthrough',
+    'so=',
+    so || '-',
+    'order=',
+    order || '-',
+    'http=',
+    outStatus,
+    'compId=',
+    compIdHdr || '(none)',
+  );
   res.status(outStatus);
   res.set('Content-Type', outCt);
   res.send(outBody);
 
-  if (omspayNoti.omspayShouldNotifyMerchant(body)) {
-    setImmediate(() => {
-      Promise.resolve()
-        .then(async () => {
-          let compId = compIdHdr || String(body.compId || body.CompId || body['Comp-Id'] || '').trim();
-          const orderForComp = orderHdr || order || so;
-          if (!compId && orderForComp && cfg.icopayOrderLookupUrl) {
-            try {
-              const lookupUrl = String(cfg.icopayOrderLookupUrl).replace(
-                /{order}/gi,
-                encodeURIComponent(orderForComp),
-              );
-              const lr = await axios.get(lookupUrl, { timeout: 8000, validateStatus: () => true });
-              const hdr = lr.headers && (lr.headers['x-icopay-comp-id'] || lr.headers['X-Icopay-Comp-Id']);
-              if (hdr) compId = String(hdr).trim();
-              else if (lr.data && typeof lr.data === 'object' && lr.data.compId) {
-                compId = String(lr.data.compId).trim();
-              }
-            } catch (_) {}
-          }
-          const match = findMerchantByCompIdForCrypto(compId);
-          if (!match) {
-            console.warn(
-              '[OMSPAY] merchant notify skipped',
-              'compId=',
-              compId || '(none)',
-              'order=',
-              orderForComp || '-',
-            );
-            appendPgNotiLog({
-              routeKey: 'omspay/webhook',
-              merchantId: compId || '',
-              kind: 'callback',
-              body: stampOmspayCompIdOnBody(omspayNoti.mapOmspayToMerchantNotifyBody(body), compId),
-              rawBody: forwardBody || undefined,
-              targetUrl: '',
-              contentType: incomingContentType,
-              env: 'live',
-              relayStatus: 'fail',
-              relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing X-Icopay-Comp-Id',
-              pgProvider: 'omspay',
-            });
-            return;
-          }
-          const notifyBody = stampOmspayCompIdOnBody(
-            omspayNoti.mapOmspayToMerchantNotifyBody(body),
-            match.merchantId || compId,
-          );
-          try {
-            await relayOmspayMerchantNotify(
-              match.merchantId,
-              match.merchant,
-              notifyBody,
-              forwardBody,
-              incomingContentType,
-            );
-          } catch (e) {
-            console.error('[OMSPAY] merchant relay error', e.message || e);
-          }
-        })
-        .catch((e) => console.error('[OMSPAY] merchant notify async error', e && e.message ? e.message : e));
-    });
-  } else {
+  // 로그분석·노티거래내역에 즉시 반영 (가맹 릴레이는 비동기)
+  const baseNotifyBody = stampOmspayCompIdOnBody(omspayNoti.mapOmspayToMerchantNotifyBody(body), compIdHdr);
+  if (!omspayNoti.omspayShouldNotifyMerchant(body)) {
     appendPgNotiLog({
       routeKey: 'omspay/webhook',
       merchantId: compIdHdr || '',
       kind: 'callback',
-      body: stampOmspayCompIdOnBody(omspayNoti.mapOmspayToMerchantNotifyBody(body), compIdHdr),
+      body: baseNotifyBody,
       rawBody: forwardBody || undefined,
       targetUrl: '',
       contentType: incomingContentType,
@@ -7159,7 +7199,116 @@ async function handleOmspayWebhook(req, res) {
       relayFailReason: 'event_skip',
       pgProvider: 'omspay',
     });
+    return;
   }
+
+  setImmediate(() => {
+    Promise.resolve()
+      .then(async () => {
+        let compId = compIdHdr || String(body.compId || body.CompId || body['Comp-Id'] || '').trim();
+        // ICOPAY order-lookup: SO·가맹주문번호는 매칭, charge/ref1(ch_…)은 NOT_FOUND 인 경우 많음 → SO 우선
+        const lookupCandidates = [];
+        for (const c of [orderHdr, so, order, String(omspayNoti.pick(body, ['note', 'orderNo']) || '').trim()]) {
+          const v = String(c || '').trim();
+          if (v && lookupCandidates.indexOf(v) < 0) lookupCandidates.push(v);
+        }
+        const orderForComp = lookupCandidates[0] || order || so || '';
+        if (!compId && cfg.icopayOrderLookupUrl) {
+          for (const cand of lookupCandidates) {
+            try {
+              const lookupUrl = String(cfg.icopayOrderLookupUrl).replace(
+                /{order}/gi,
+                encodeURIComponent(cand),
+              );
+              const lr = await axios.get(lookupUrl, { timeout: 8000, validateStatus: () => true });
+              const looked = extractIcopayCompIdAndOrderFromNotifyResult({
+                headers: lr.headers || {},
+                data: lr.data,
+              });
+              // nested data.compId 도 허용
+              let fromData = looked.compId;
+              if (!fromData && lr.data && typeof lr.data === 'object') {
+                const nest = lr.data.data && typeof lr.data.data === 'object' ? lr.data.data : lr.data;
+                fromData = String(nest.compId || nest.CompId || nest.merchantId || '').trim();
+              }
+              if (fromData) {
+                compId = fromData;
+                console.log('[OMSPAY] order-lookup hit', 'cand=', cand, 'compId=', compId);
+                break;
+              }
+            } catch (_) {}
+          }
+        }
+        const match = findMerchantByCompIdForCrypto(compId);
+        if (!match) {
+          console.warn(
+            '[OMSPAY] merchant notify skipped',
+            'compId=',
+            compId || '(none)',
+            'order=',
+            orderForComp || '-',
+          );
+          appendPgNotiLog({
+            routeKey: 'omspay/webhook',
+            merchantId: compId || '',
+            kind: 'callback',
+            body: stampOmspayCompIdOnBody(omspayNoti.mapOmspayToMerchantNotifyBody(body), compId),
+            rawBody: forwardBody || undefined,
+            targetUrl: '',
+            contentType: incomingContentType,
+            env: 'live',
+            relayStatus: 'fail',
+            relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing X-Icopay-Comp-Id',
+            pgProvider: 'omspay',
+          });
+          return;
+        }
+        const notifyBody = stampOmspayCompIdOnBody(
+          omspayNoti.mapOmspayToMerchantNotifyBody(body),
+          match.merchantId || compId,
+        );
+        try {
+          await relayOmspayMerchantNotify(
+            match.merchantId,
+            match.merchant,
+            notifyBody,
+            forwardBody,
+            incomingContentType,
+          );
+        } catch (e) {
+          console.error('[OMSPAY] merchant relay error', e.message || e);
+          appendPgNotiLog({
+            routeKey: 'omspay/webhook',
+            merchantId: match.merchantId || compId || '',
+            kind: 'callback',
+            body: notifyBody,
+            rawBody: forwardBody || undefined,
+            targetUrl: String((match.merchant && match.merchant.callbackUrl) || '').trim(),
+            contentType: incomingContentType,
+            env: 'live',
+            relayStatus: 'fail',
+            relayFailReason: e.message || String(e),
+            pgProvider: 'omspay',
+          });
+        }
+      })
+      .catch((e) => {
+        console.error('[OMSPAY] merchant notify async error', e && e.message ? e.message : e);
+        appendPgNotiLog({
+          routeKey: 'omspay/webhook',
+          merchantId: compIdHdr || '',
+          kind: 'callback',
+          body: baseNotifyBody,
+          rawBody: forwardBody || undefined,
+          targetUrl: '',
+          contentType: incomingContentType,
+          env: 'live',
+          relayStatus: 'fail',
+          relayFailReason: e && e.message ? e.message : String(e),
+          pgProvider: 'omspay',
+        });
+      });
+  });
 }
 
 function extractOmspayBrowserPayload(req) {
@@ -7179,11 +7328,35 @@ function extractOmspayBrowserPayload(req) {
 
 async function handleOmspayBrowserResult(req, res) {
   const payload = extractOmspayBrowserPayload(req);
+  let compId = String(payload.compId || '').trim();
+  const orderForComp = String(payload.order || '').trim();
+  const cfg = loadOmspayIngressConfig();
+  if (!compId && orderForComp && cfg.icopayOrderLookupUrl) {
+    try {
+      const lookupUrl = String(cfg.icopayOrderLookupUrl).replace(
+        /{order}/gi,
+        encodeURIComponent(orderForComp),
+      );
+      const lr = await axios.get(lookupUrl, { timeout: 8000, validateStatus: () => true });
+      const looked = extractIcopayCompIdAndOrderFromNotifyResult({
+        headers: lr.headers || {},
+        data: lr.data,
+      });
+      if (looked.compId) compId = looked.compId;
+    } catch (_) {}
+  }
+  let match = compId ? findMerchantByCompIdForCrypto(compId) : null;
+  // OMSPAY 전용 슬롯(#omspay) 우선
+  if (compId && (!match || !String(match.merchantId || '').includes('#omspay'))) {
+    const omsSlot = MERCHANTS.get(String(compId) + '#omspay');
+    if (omsSlot && String(omsSlot.callbackUrl || omsSlot.resultUrl || '').trim()) {
+      match = { merchantId: String(compId) + '#omspay', merchant: omsSlot, via: 'omspay-slot' };
+    }
+  }
   const notifyBody = stampOmspayCompIdOnBody(
     omspayNoti.mapOmspayToMerchantNotifyBody(payload.body),
-    payload.compId,
+    (match && match.merchantId) || compId || '',
   );
-  const match = payload.compId ? findMerchantByCompIdForCrypto(payload.compId) : null;
   let targetUrl = '';
   if (match && match.merchant) {
     const enableRelay = match.merchant.enableRelay !== false;
@@ -7194,7 +7367,7 @@ async function handleOmspayBrowserResult(req, res) {
   }
   appendPgNotiLog({
     routeKey: 'omspay/result',
-    merchantId: (match && match.merchantId) || payload.compId || '',
+    merchantId: (match && match.merchantId) || compId || '',
     kind: 'result',
     body: notifyBody,
     targetUrl: targetUrl || '',
@@ -7202,15 +7375,25 @@ async function handleOmspayBrowserResult(req, res) {
     env: typeof APP_ENV !== 'undefined' && APP_ENV === 'test' ? 'sandbox' : 'production',
     pgProvider: 'omspay',
     relayStatus: targetUrl ? 'ok' : 'skip',
+    relayFailReason: targetUrl ? '' : compId ? 'resultUrl_empty' : 'Missing Comp-Id',
   });
   if (targetUrl && String(req.method || 'GET').toUpperCase() === 'GET') {
-    const sep = targetUrl.includes('?') ? '&' : '?';
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(notifyBody || {})) {
-      if (v == null) continue;
-      qs.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+    try {
+      const url = new URL(targetUrl.trim());
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v === undefined || v === null || v === '') continue;
+        url.searchParams.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      return res.redirect(302, url.toString());
+    } catch (_) {
+      const sep = targetUrl.includes('?') ? '&' : '?';
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v == null || v === '') continue;
+        qs.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      return res.redirect(302, targetUrl + sep + qs.toString());
     }
-    return res.redirect(302, targetUrl + sep + qs.toString());
   }
   res
     .status(200)
@@ -10600,6 +10783,109 @@ function highlightLogSearchHtml(raw, searchRaw, escFn) {
       return escFn(part);
     })
     .join('');
+}
+
+/** 로그 JSON 셀 한 줄 요약 (returncode · tx · amount · status · Comp-Id) */
+function buildNotiBodyJsonSummaryLine(bodyOrText) {
+  let body = bodyOrText;
+  if (typeof body === 'string') {
+    const s = body.trim();
+    if (!s || s === '-') return '';
+    try {
+      body = JSON.parse(s);
+    } catch {
+      return s.length > 80 ? s.slice(0, 80) + '…' : s;
+    }
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return '';
+  const parts = [];
+  const rc = body.returncode ?? body.returnCode ?? body.ReturnCode;
+  if (rc != null && String(rc).trim() !== '') parts.push('returncode=' + String(rc).trim());
+  const tx =
+    body.transaction_id ??
+    body.TransactionId ??
+    body.transactionId ??
+    body.so ??
+    body.OrderNo ??
+    body.orderNo ??
+    body.orderid ??
+    body.orderID;
+  if (tx != null && String(tx).trim() !== '') parts.push(String(tx).trim());
+  const amt = body.amount ?? body.Amount;
+  const cur = body.currency ?? body.Currency;
+  if (amt != null && String(amt).trim() !== '') {
+    parts.push(String(amt).trim() + (cur != null && String(cur).trim() ? ' ' + String(cur).trim() : ''));
+  }
+  const st =
+    body.paymentStatus ??
+    body.PaymentStatus ??
+    body.status ??
+    body.PaymentStatusDesc ??
+    body.status_message;
+  if (st != null && String(st).trim() !== '') parts.push(String(st).trim());
+  const comp =
+    body.compId ?? body.CompId ?? body['Comp-Id'] ?? body.merchantId ?? body.MerchantId;
+  if (comp != null && String(comp).trim() !== '') parts.push('Comp ' + String(comp).trim());
+  return parts.join(' · ');
+}
+
+/**
+ * 접힌 JSON 셀 HTML (요약 1줄 + pre 2줄). 행 더블클릭으로 펼침.
+ * @returns {string} td 안쪽 HTML (td 태그 제외) 또는 전체 td
+ */
+function formatJsonCellCollapsedInnerHtml(locale, escFn, fullJsonText, bodyOptional, searchRaw) {
+  const raw = fullJsonText == null ? '' : String(fullJsonText);
+  if (!raw.trim() || raw.trim() === '-') {
+    return '<div class="json-cell-wrap">' + escFn('-') + '</div>';
+  }
+  const summary =
+    buildNotiBodyJsonSummaryLine(bodyOptional != null ? bodyOptional : raw) ||
+    (t(locale, 'pg_logs_json_preview') || 'JSON');
+  const highlighted = highlightLogSearchHtml(raw, searchRaw, escFn);
+  return (
+    '<div class="json-cell-wrap" title="' +
+    escFn(t(locale, 'pg_logs_json_dblclick_hint') || 'Double-click row to expand/collapse JSON') +
+    '">' +
+    '<span class="json-cell-summary">' +
+    highlightLogSearchHtml(summary, searchRaw, escFn) +
+    '</span>' +
+    '<pre class="json-preview">' +
+    highlighted +
+    '</pre></div>'
+  );
+}
+
+function formatJsonCellCollapsedTdHtml(locale, escFn, fullJsonText, bodyOptional, searchRaw, extraClass) {
+  const cls = 'col-json' + (extraClass ? ' ' + extraClass : '');
+  return (
+    '<td class="' +
+    cls +
+    '">' +
+    formatJsonCellCollapsedInnerHtml(locale, escFn, fullJsonText, bodyOptional, searchRaw) +
+    '</td>'
+  );
+}
+
+function logJsonDblclickHintHtml(locale, escFn) {
+  return (
+    '<p class="log-json-dblclick-hint">' +
+    escFn(t(locale, 'pg_logs_json_dblclick_hint') || 'Double-click a row to expand/collapse JSON') +
+    '</p>'
+  );
+}
+
+/** 행 더블클릭 → is-json-expanded 토글. 버튼/폼/링크/입력에서는 무시 */
+function attachLogJsonRowToggleScript() {
+  return `<script>(function(){
+  document.querySelectorAll('tr.log-json-row').forEach(function(tr){
+    tr.addEventListener('dblclick', function(ev){
+      var t = ev.target;
+      if (!t) return;
+      if (t.closest && (t.closest('button') || t.closest('a') || t.closest('form') || t.closest('input') || t.closest('select') || t.closest('textarea') || t.closest('label'))) return;
+      tr.classList.toggle('is-json-expanded');
+    });
+  });
+})();</script>`;
 }
 
 /** 노티거래내역 Route 검색용: 가맹점 route → 본문 RouteNo → routeKey 숫자 */
@@ -20566,18 +20852,150 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
           : '';
       const body = bodyForDisplayPg;
       const merchantIdDispPg = resolveNotiLogMerchantId(log, body);
+      const merchantDispLabel = formatNotiLogMerchantDisplay(locale, merchantIdDispPg, logPg);
+      const resolvedMerchantEntry = resolveMerchantEntry(merchantIdDispPg, logPg);
+      const resolvedMerchantId =
+        (resolvedMerchantEntry && resolvedMerchantEntry.merchantId) || merchantIdDispPg || '';
+      const resolvedCallbackUrl =
+        resolvedMerchantEntry && resolvedMerchantEntry.merchant
+          ? String(resolvedMerchantEntry.merchant.callbackUrl || '').trim()
+          : '';
       const canResend = (relayStatus === 'fail' || relayStatus === 'ok') && relayHasTarget && (log.body || log.rawBody);
       const resendKindVal = isCancelNotiBody(body) ? 'cancel' : 'payment';
       const resendKindLabel = resendKindVal === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
-      const resendBtn = canResend
-        ? `<div class="resend-wrap"><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_plain') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><button type="submit" class="btn-resend">${t(locale, 'pg_logs_btn_plain')}</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_json') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;" onsubmit="return confirm('${(t(locale, 'pg_logs_resend_confirm_form') || '').replace(/'/g, "\\'")}');"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form">FORM</button></form></div>`
-        : !relayHasTarget
-        ? '<span class="label-none">' + highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawPg, esc) + '</span>'
-        : '-';
+      const canManualAssignPg =
+        !relayHasTarget &&
+        (log.body || log.rawBody) &&
+        (logPg === 'omspay' ||
+          logPg === 'qxipay' ||
+          logPg === 'ilk' ||
+          logPg === 'qbang' ||
+          logPg === 'crypto' ||
+          logPg === 'ox' ||
+          logPg === 'elementpay');
+      const canKnownAssignResend =
+        !relayHasTarget &&
+        !!(log.body || log.rawBody) &&
+        !!resolvedMerchantId &&
+        !!resolvedCallbackUrl;
+      let resendBtn;
+      if (canResend) {
+        const resendMerchant =
+          (resolvedMerchantEntry && resolvedMerchantEntry.merchant) ||
+          (log.merchantId ? MERCHANTS.get(log.merchantId) : null);
+        const preferredFmt = normalizeMerchantRelayFormat(resendMerchant);
+        resendBtn = buildPgLogsResendFormatButtonsHtml(locale, esc, {
+          action: '/admin/logs/resend',
+          index: realIndex,
+          resendKind: resendKindVal,
+          source: logPg,
+          preferredFormat: preferredFmt,
+        });
+      } else if (canKnownAssignResend) {
+        const knownHint = t(locale, 'pg_logs_assign_known_hint') || 'Known merchant';
+        const preferredFmt = normalizeMerchantRelayFormat(
+          resolvedMerchantEntry && resolvedMerchantEntry.merchant,
+        );
+        const recvHint = (
+          t(locale, 'pg_logs_merchant_recv_format') || 'Receive format: {format}'
+        ).replace(/\{format\}/g, merchantRelayFormatLabel(locale, preferredFmt));
+        resendBtn =
+          '<div style="min-width:170px;">' +
+          '<div style="font-size:10px;color:#065f46;font-weight:600;margin-bottom:2px;" title="' +
+          esc(merchantDispLabel) +
+          '">' +
+          esc(knownHint) +
+          '</div>' +
+          '<div style="font-size:10px;color:#374151;margin-bottom:2px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' +
+          esc(merchantDispLabel) +
+          '">' +
+          esc(merchantDispLabel) +
+          '</div>' +
+          '<div style="font-size:10px;color:#2563eb;margin-bottom:4px;">' +
+          esc(recvHint) +
+          '</div>' +
+          buildPgLogsResendFormatButtonsHtml(locale, esc, {
+            action: '/admin/logs/assign-merchant-resend',
+            index: realIndex,
+            resendKind: resendKindVal,
+            source: logPg,
+            merchantId: resolvedMerchantId,
+            preferredFormat: preferredFmt,
+            merchantName: merchantDispLabel,
+          }) +
+          '</div>';
+      } else if (canManualAssignPg) {
+        const opts = listMerchantsForPgManualAssign(logPg)
+          .filter((o) => o.callbackUrl)
+          .map((o) => {
+            const fmt = normalizeMerchantRelayFormat(o.merchant);
+            const fmtLabel = merchantRelayFormatLabel(locale, fmt);
+            return (
+              '<option value="' +
+              esc(o.merchantId) +
+              '" data-relay-format="' +
+              esc(fmt) +
+              '">' +
+              esc(o.label) +
+              ' [' +
+              esc(fmtLabel) +
+              ']</option>'
+            );
+          })
+          .join('');
+        const manualConfirm = (t(locale, 'pg_logs_assign_resend_confirm') || '').replace(
+          /'/g,
+          "\\'",
+        );
+        const selectHtml =
+          '<select name="merchantId" required style="font-size:11px;max-width:200px;margin-bottom:4px;">' +
+          '<option value="">' +
+          esc(t(locale, 'pg_logs_select_merchant') || 'Select merchant') +
+          '</option>' +
+          opts +
+          '</select>';
+        const hiddenManual =
+          '<input type="hidden" name="index" value="' +
+          realIndex +
+          '" />' +
+          '<input type="hidden" name="source" value="' +
+          esc(logPg) +
+          '" />' +
+          '<input type="hidden" name="resendKind" value="' +
+          esc(resendKindVal) +
+          '" />';
+        resendBtn =
+          '<div class="resend-wrap" style="min-width:180px;display:flex;flex-direction:column;gap:4px;align-items:stretch;">' +
+          '<div style="font-size:10px;color:#6b7280;">' +
+          esc(t(locale, 'pg_logs_assign_pick_then_format') || 'Select merchant, then format') +
+          '</div>' +
+          '<form method="post" action="/admin/logs/assign-merchant-resend" style="display:flex;flex-direction:column;gap:4px;" onsubmit="return confirm(\'' +
+          manualConfirm +
+          '\');">' +
+          hiddenManual +
+          selectHtml +
+          '<div style="display:flex;flex-wrap:wrap;gap:4px;">' +
+          '<button type="submit" class="btn-resend" style="font-size:11px;" name="resendFormat" value="plain">' +
+          esc(t(locale, 'pg_logs_btn_plain') || 'Plain') +
+          '</button>' +
+          '<button type="submit" class="btn-resend-json" style="font-size:11px;" name="resendAsJson" value="1">JSON</button>' +
+          '<button type="submit" class="btn-resend-form" style="font-size:11px;" name="resendAsForm" value="1">FORM</button>' +
+          '</div></form></div>';
+      } else if (!relayHasTarget) {
+        resendBtn =
+          '<span class="label-none">' +
+          highlightLogSearchHtml(t(locale, 'status_noti_none'), logSearchRawPg, esc) +
+          '</span>';
+      } else {
+        resendBtn = '-';
+      }
       const txId = notifBodyTxId(body) || null;
       const isSuccess = isSuccessPaymentBody(body);
       const baseDate = body.TransactionDate || body.transactionDate || body.PaymentDate || body.paymentDate || log.receivedAtIso || log.receivedAt;
-      const windowType = txId && isSuccess && merchantIdDispPg && MERCHANTS.get(merchantIdDispPg) ? getVoidRefundWindow(baseDate) : null;
+      const windowType =
+        txId && isSuccess && resolvedMerchantEntry
+          ? getVoidRefundWindow(baseDate)
+          : null;
       const canRefundByWindow = baseDate && isWithinRefundWindow(baseDate);
       const cfg = loadChillPayTransactionConfig();
       const useSandbox = cfg.useSandbox;
@@ -20596,7 +21014,12 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
           '<td class="col-narrow">' +
           highlightLogSearchHtml(formatLogsResultRouteDisplay(log.routeKey, logPg), logSearchRawPg, esc) +
           '</td>',
-        merchant_id: '<td class="col-narrow">' + highlightLogSearchHtml(resolveNotiLogMerchantId(log, bodyForDisplayPg) || '', logSearchRawPg, esc) + '</td>',
+        merchant_id:
+          '<td class="col-narrow"' +
+          (!merchantIdDispPg ? ' style="color:#b91c1c;font-weight:600;"' : '') +
+          '>' +
+          highlightLogSearchHtml(merchantDispLabel, logSearchRawPg, esc) +
+          '</td>',
         relay_status:
           '<td class="col-status"><span class="' +
           relayClass +
@@ -20607,8 +21030,20 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
             ? '<br /><span class="relay-fail-reason" title="' + esc(relayFailReason) + '">' + highlightLogSearchHtml(relayFailReason, logSearchRawPg, esc) + '</span>'
             : '') +
           '</td>',
-        callback_json: '<td class="col-json"><pre>' + (jsonCallback ? highlightLogSearchHtml(jsonCallback, logSearchRawPg, esc) : esc('-')) + '</pre></td>',
-        result_json: '<td class="col-json"><pre>' + (jsonResult ? highlightLogSearchHtml(jsonResult, logSearchRawPg, esc) : esc('-')) + '</pre></td>',
+        callback_json: formatJsonCellCollapsedTdHtml(
+          locale,
+          esc,
+          jsonCallback || '-',
+          log.kind === 'callback' ? bodyForDisplayPg : null,
+          logSearchRawPg,
+        ),
+        result_json: formatJsonCellCollapsedTdHtml(
+          locale,
+          esc,
+          jsonResult || '-',
+          log.kind === 'result' ? bodyForDisplayPg : null,
+          logSearchRawPg,
+        ),
         noti_state: '<td class="col-noti-state">' + highlightLogSearchHtml(resendKindLabel, logSearchRawPg, esc) + '</td>',
         resend: '<td class="col-action">' + resendBtn + '</td>',
         webhook: jpayWebhookCellHtml(locale, log, esc),
@@ -20625,7 +21060,11 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
           ) +
           '</td>',
       };
-      return '<tr>' + pgLogsColFiltered.map((c) => rowCells[c.key] || '').join('') + '</tr>';
+      return (
+        '<tr class="log-json-row">' +
+        pgLogsColFiltered.map((c) => rowCells[c.key] || '').join('') +
+        '</tr>'
+      );
     })
     .join('');
 
@@ -20643,7 +21082,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'pg_logs_title')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LOG_JSON_COLLAPSE_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     h1.cr-page-title {
@@ -20732,6 +21171,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       ${pgLogsColHello.panelHtml}
       ${jpayLogsNoticeHtml}
       <p class="admin-page-desc">${t(locale, 'pg_logs_desc_full')}</p>
+      ${logJsonDblclickHintHtml(locale, esc)}
       ${(() => {
         const fh =
           (logPg === 'jpay' || logPg === 'elementpay' || logPg === 'ox' ? '<input type="hidden" name="source" value="' + logPg + '" />' : '') +
@@ -20772,6 +21212,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
       </table>
       ${logPagerFooterPg}
       ${pgLogsColHello.scriptHtml}
+      ${attachLogJsonRowToggleScript()}
       </div>
     </main>
   </div>
@@ -21940,7 +22381,294 @@ function enrichElementPayNotiBodyForDisplay(body, log) {
   return out;
 }
 
-/** 로그 merchantId 비어 있을 때 EP/JPAY 본문 Comp-Id·merchantId, 동일 OrderNo 형제 로그 사용 */
+/**
+ * merchantId / Comp-Id / `6000…#omspay` 등 → MERCHANTS 엔트리.
+ * 모든 PG 목록·재전송에서 공통 사용.
+ */
+function resolveMerchantEntry(merchantId, preferPg) {
+  const id = String(merchantId || '').trim();
+  if (!id || typeof MERCHANTS === 'undefined' || !MERCHANTS || !MERCHANTS.get) return null;
+  const prefer = String(preferPg || '')
+    .toLowerCase()
+    .trim();
+  const baseId = id.includes('#') ? id.split('#')[0] : id;
+  const tryIds = [];
+  const pushId = (x) => {
+    const v = String(x || '').trim();
+    if (v && tryIds.indexOf(v) < 0) tryIds.push(v);
+  };
+  pushId(id);
+  if (prefer) pushId(baseId + '#' + prefer);
+  for (const s of [
+    'omspay',
+    'crypto',
+    'ox',
+    'elementpay',
+    'jpay',
+    'qxipay',
+    'ilk',
+    'qbang',
+    'chillpay',
+  ]) {
+    pushId(baseId + '#' + s);
+  }
+  pushId(baseId);
+  for (const mid of tryIds) {
+    const m = MERCHANTS.get(mid);
+    if (m) return { merchantId: mid, merchant: m };
+  }
+  if (typeof findMerchantByCompIdForCrypto === 'function') {
+    const byComp = findMerchantByCompIdForCrypto(baseId);
+    if (byComp && byComp.merchant) return byComp;
+  }
+  return null;
+}
+
+/** 로그 목록용 가맹점 표시: 이름 (Comp-Id) — 전 PG 공통 */
+function formatNotiLogMerchantDisplay(locale, merchantId, preferPg) {
+  const id = String(merchantId || '').trim();
+  if (!id) return t(locale, 'pg_logs_merchant_unknown') || 'Unknown merchant (no Comp-Id)';
+  const entry = resolveMerchantEntry(id, preferPg);
+  const m = entry && entry.merchant;
+  const baseId = id.includes('#') ? id.split('#')[0] : id;
+  const name = String(
+    (m &&
+      (m.name ||
+        m.label ||
+        (m.icopayProvisionMeta && (m.icopayProvisionMeta.compName || m.icopayProvisionMeta.compNm)))) ||
+      '',
+  ).trim();
+  const comp = String(
+    (m && m.icopayProvisionMeta && m.icopayProvisionMeta.compId) || baseId,
+  ).trim();
+  if (name && comp && name !== comp) return name + ' (' + comp + ')';
+  if (name) return name;
+  return id;
+}
+
+/** 가맹점 수신 형식(relayFormat): raw | json | form — JPAY와 동일 */
+function normalizeMerchantRelayFormat(merchant) {
+  const rf = String((merchant && merchant.relayFormat) || 'raw')
+    .trim()
+    .toLowerCase();
+  if (rf === 'json' || rf === 'form') return rf;
+  return 'raw';
+}
+
+function merchantRelayFormatLabel(locale, format) {
+  const f = String(format || 'raw').toLowerCase();
+  if (f === 'json') return 'JSON';
+  if (f === 'form') return 'FORM';
+  return t(locale, 'pg_logs_btn_plain') || 'Plain';
+}
+
+/**
+ * JPAY /admin/logs/resend 와 동일한 전송 계획.
+ * - JSON/FORM 강제 시 해당 Content-Type
+ * - 일반: preferMerchantFormatOnPlain 이면 가맹점 relayFormat(수신 가능 수준),
+ *   아니면 원문(rawBody) 우선(JPAY 기본)
+ */
+function resolveResendRelayPlan(log, merchant, opts) {
+  const o = opts || {};
+  const forceJson = o.forceJson === true || o.forceJson === '1' || o.forceJson === 'true';
+  const forceForm = o.forceForm === true || o.forceForm === '1' || o.forceForm === 'true';
+  let body =
+    o.bodyOverride && typeof o.bodyOverride === 'object' && !Array.isArray(o.bodyOverride)
+      ? o.bodyOverride
+      : null;
+  if (!body && log && log.body && typeof log.body === 'object' && !Array.isArray(log.body)) {
+    body = log.body;
+  }
+  if (!body && log && typeof log.body === 'string') {
+    try {
+      const parsed = JSON.parse(log.body);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) body = parsed;
+    } catch (_) {}
+  }
+  const hasRawBody =
+    log && log.rawBody !== undefined && log.rawBody !== null && String(log.rawBody).trim() !== '';
+  const mrf = normalizeMerchantRelayFormat(merchant);
+  const logCt = String((log && log.contentType) || '')
+    .trim()
+    .toLowerCase();
+
+  if (forceJson) {
+    return { formatUsed: 'json', contentType: 'application/json', body, rawBody: undefined };
+  }
+  if (forceForm) {
+    return {
+      formatUsed: 'form',
+      contentType: 'application/x-www-form-urlencoded',
+      body,
+      rawBody: undefined,
+    };
+  }
+
+  // 일반
+  if (o.preferMerchantFormatOnPlain) {
+    if (mrf === 'form') {
+      return {
+        formatUsed: 'form',
+        contentType: 'application/x-www-form-urlencoded',
+        body,
+        rawBody: undefined,
+      };
+    }
+    if (mrf === 'json') {
+      return { formatUsed: 'json', contentType: 'application/json', body, rawBody: undefined };
+    }
+    // raw: 원문 가능하면 원문, Comp-Id 스탬프 본문이 있으면 그 객체
+    if (hasRawBody && !o.bodyOverride) {
+      return {
+        formatUsed: 'raw',
+        contentType: logCt || 'application/json',
+        body: null,
+        rawBody: log.rawBody,
+      };
+    }
+    return { formatUsed: 'raw', contentType: 'application/json', body, rawBody: undefined };
+  }
+
+  if (hasRawBody) {
+    return {
+      formatUsed: 'raw',
+      contentType: logCt || 'application/json',
+      body: null,
+      rawBody: log.rawBody,
+    };
+  }
+  return {
+    formatUsed: 'raw',
+    contentType: logCt || 'application/json',
+    body,
+    rawBody: undefined,
+  };
+}
+
+/**
+ * 로그분석 재전송 버튼 HTML — JPAY와 동일하게 일반 / JSON / FORM
+ * preferredFormat 에 해당하는 버튼에 강조 스타일(가맹점 수신 가능 형식)
+ */
+function buildPgLogsResendFormatButtonsHtml(locale, esc, cfg) {
+  const c = cfg || {};
+  const action = String(c.action || '/admin/logs/resend');
+  const index = c.index;
+  const resendKind = String(c.resendKind || 'payment');
+  const source = c.source != null ? String(c.source) : '';
+  const merchantId = c.merchantId != null ? String(c.merchantId) : '';
+  const returnTo = c.returnTo != null ? String(c.returnTo) : '';
+  const preferred = normalizeMerchantRelayFormat({ relayFormat: c.preferredFormat || 'raw' });
+  const merchantName = String(c.merchantName || '').trim();
+  const confirmPlain = (
+    merchantName
+      ? (t(locale, 'pg_logs_assign_known_confirm') || 'Resend to {name}?').replace(/\{name\}/g, merchantName)
+      : t(locale, 'pg_logs_resend_confirm_plain') || 'Resend in plain format?'
+  ).replace(/'/g, "\\'");
+  const confirmJson = (t(locale, 'pg_logs_resend_confirm_json') || 'Resend in JSON?').replace(
+    /'/g,
+    "\\'",
+  );
+  const confirmForm = (t(locale, 'pg_logs_resend_confirm_form') || 'Resend in FORM?').replace(
+    /'/g,
+    "\\'",
+  );
+  const hiddenBase =
+    '<input type="hidden" name="index" value="' +
+    esc(String(index)) +
+    '" />' +
+    '<input type="hidden" name="resendKind" value="' +
+    esc(resendKind) +
+    '" />' +
+    (source
+      ? '<input type="hidden" name="source" value="' + esc(source) + '" />'
+      : '') +
+    (merchantId
+      ? '<input type="hidden" name="merchantId" value="' + esc(merchantId) + '" />'
+      : '') +
+    (returnTo
+      ? '<input type="hidden" name="returnTo" value="' + esc(returnTo) + '" />'
+      : '');
+  const preferStyle = (fmt) =>
+    preferred === fmt
+      ? 'outline:2px solid #2563eb;outline-offset:1px;font-weight:700;'
+      : '';
+  const preferTitle = (fmt) =>
+    preferred === fmt
+      ? esc(t(locale, 'pg_logs_resend_preferred_format') || 'Merchant configured format')
+      : '';
+  return (
+    '<div class="resend-wrap" style="display:inline-flex;flex-direction:row;flex-wrap:wrap;gap:6px;align-items:center;">' +
+    '<form method="post" action="' +
+    esc(action) +
+    '" style="display:inline;" onsubmit="return confirm(\'' +
+    confirmPlain +
+    '\');">' +
+    hiddenBase +
+    '<button type="submit" class="btn-resend" style="' +
+    preferStyle('raw') +
+    '" title="' +
+    preferTitle('raw') +
+    '">' +
+    esc(t(locale, 'pg_logs_btn_plain') || 'Plain') +
+    '</button></form>' +
+    '<form method="post" action="' +
+    esc(action) +
+    '" style="display:inline;" onsubmit="return confirm(\'' +
+    confirmJson +
+    '\');">' +
+    hiddenBase +
+    '<input type="hidden" name="resendAsJson" value="1" />' +
+    '<button type="submit" class="btn-resend-json" style="' +
+    preferStyle('json') +
+    '" title="' +
+    preferTitle('json') +
+    '">JSON</button></form>' +
+    '<form method="post" action="' +
+    esc(action) +
+    '" style="display:inline;" onsubmit="return confirm(\'' +
+    confirmForm +
+    '\');">' +
+    hiddenBase +
+    '<input type="hidden" name="resendAsForm" value="1" />' +
+    '<button type="submit" class="btn-resend-form" style="' +
+    preferStyle('form') +
+    '" title="' +
+    preferTitle('form') +
+    '">FORM</button></form>' +
+    '</div>'
+  );
+}
+
+/** 고정 ingress PG(omspay 등) 수동 지정용 가맹점 옵션 */
+function listMerchantsForPgManualAssign(pg) {
+  const want = normalizeAdminPgSource(pg) || String(pg || '').toLowerCase().trim();
+  if (!want || typeof MERCHANTS === 'undefined') return [];
+  const out = [];
+  for (const [mid, m] of MERCHANTS.entries()) {
+    if (!m) continue;
+    const kind = inferMerchantPgKind(m);
+    const idLow = String(mid || '').toLowerCase();
+    const matchKind = kind === want || idLow.endsWith('#' + want);
+    if (!matchKind) continue;
+    const cb = String(m.callbackUrl || '').trim();
+    const name = String(
+      m.name || (m.icopayProvisionMeta && (m.icopayProvisionMeta.compName || m.icopayProvisionMeta.compNm)) || mid,
+    ).trim();
+    const comp = String((m.icopayProvisionMeta && m.icopayProvisionMeta.compId) || mid.split('#')[0] || mid).trim();
+    out.push({
+      merchantId: mid,
+      compId: comp,
+      label: name + ' (' + comp + ')' + (cb ? '' : ' [URL-]'),
+      callbackUrl: cb,
+      enableRelay: m.enableRelay !== false,
+      relayFormat: m.relayFormat,
+      merchant: m,
+    });
+  }
+  out.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+  return out;
+}
+
 function resolveNotiLogMerchantId(log, bodyOptional) {
   const fromLog = String((log && log.merchantId) || '').trim();
   if (fromLog) return fromLog;
@@ -21993,6 +22721,25 @@ function resolveNotiLogMerchantId(log, bodyOptional) {
     if (sib) {
       if (String(sib.merchantId || '').trim()) return String(sib.merchantId).trim();
       const sibBody = parseNotiBody(sib);
+      const fromSib = String(
+        (sibBody &&
+          (sibBody.merchantId ||
+            sibBody.MerchantId ||
+            sibBody.compId ||
+            sibBody.CompId ||
+            sibBody['Comp-Id'])) ||
+          '',
+      ).trim();
+      if (fromSib) return fromSib;
+    }
+  }
+  // OMSPAY 등: webhook order(ch_…) ≠ result order 인 경우가 많아 TransactionId(SO-…)로 형제 로그 보강
+  const txId = notifBodyTxId(body);
+  if (txId) {
+    const sibTx = findSiblingNotiLogByTxId(txId, pg, { excludeLog: log, want: 'merchantId' });
+    if (sibTx) {
+      if (String(sibTx.merchantId || '').trim()) return String(sibTx.merchantId).trim();
+      const sibBody = parseNotiBody(sibTx);
       const fromSib = String(
         (sibBody &&
           (sibBody.merchantId ||
@@ -22253,6 +23000,42 @@ function findSiblingNotiLogByOrderNo(orderNo, preferPg, opts) {
       if (!fallback) fallback = L;
       continue;
     }
+    if (want === 'merchantId') {
+      if (String(L.merchantId || '').trim()) return L;
+      const fromB = String(
+        (b &&
+          (b.merchantId ||
+            b.MerchantId ||
+            b.compId ||
+            b.CompId ||
+            b['Comp-Id'] ||
+            b.MID ||
+            b.mid)) ||
+          '',
+      ).trim();
+      if (fromB) return L;
+      if (!fallback) fallback = L;
+      continue;
+    }
+    return L;
+  }
+  return fallback;
+}
+
+/** 동일 TransactionId 형제 로그 (OMSPAY webhook/result order 불일치 시 Comp-Id·가맹점명 보강) */
+function findSiblingNotiLogByTxId(txId, preferPg, opts) {
+  const tid = String(txId || '').trim();
+  if (!tid || !Array.isArray(NOTI_LOGS) || NOTI_LOGS.length === 0) return null;
+  const prefer = preferPg ? String(preferPg).toLowerCase() : '';
+  const exclude = opts && opts.excludeLog;
+  const want = opts && opts.want ? String(opts.want) : '';
+  let fallback = null;
+  for (let i = NOTI_LOGS.length - 1; i >= 0; i--) {
+    const L = NOTI_LOGS[i];
+    if (!L || L === exclude) continue;
+    if (prefer && getNotiLogPgAcquirer(L) !== prefer) continue;
+    const b = parseNotiBody(L);
+    if (notifBodyTxId(b) !== tid) continue;
     if (want === 'merchantId') {
       if (String(L.merchantId || '').trim()) return L;
       const fromB = String(
@@ -23340,8 +24123,9 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     const badgeClass = statusClass.replace('tx-status-', 'tx-badge-');
     const dt = formatNotiLogPaymentDateTimeTHJP(log, chillTz);
     const merchantIdDisp = resolveNotiLogMerchantId(log, body);
-    const merchant = merchantIdDisp ? MERCHANTS.get(merchantIdDisp) : null;
     const pgAcq = getNotiLogPgAcquirer(log);
+    const merchantEntry = resolveMerchantEntry(merchantIdDisp, pgAcq);
+    const merchant = (merchantEntry && merchantEntry.merchant) || null;
     const routeNoDisplay = formatRouteCellForPgList(merchant, log.routeKey, pgAcq);
     const cells = [];
     for (const col of txListColumns) {
@@ -23351,7 +24135,16 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
         else if (col.id === 'received_time') cells.push('<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>');
         else if (col.id === 'route_no') cells.push('<td class="col-route">' + esc(routeNoDisplay || '-') + '</td>');
         else if (col.id === 'pg_acquirer') cells.push('<td class="col-acquirer">' + esc(acquirerLabelFromLog(locale, log)) + '</td>');
-        else if (col.id === 'merchant') cells.push('<td class="col-merchant">' + esc(merchantIdDisp || '-') + '</td>');
+        else if (col.id === 'merchant')
+          cells.push(
+            '<td class="col-merchant">' +
+              esc(
+                formatNotiLogMerchantDisplay(locale, merchantIdDisp, pgAcq) ||
+                  merchantIdDisp ||
+                  '-',
+              ) +
+              '</td>',
+          );
         else if (col.id === 'internal_amount') {
           const pgK = icopayAmountPgKeyFromLog(log);
           const amt = getNotiBodyAmountRawForIcopay(body, pgK);
@@ -26491,7 +27284,10 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       received_time:
         '<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>',
       route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
-      merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
+      merchant:
+        '<td class="col-narrow">' +
+        esc(formatNotiLogMerchantDisplay(locale, resolveNotiLogMerchantId(log), cancelPg) || '') +
+        '</td>',
       transaction_id: '<td>' + esc(String(txId)) + '</td>',
       order_no: '<td>' + esc(String(orderNo)) + '</td>',
       customer: '<td class="col-narrow">' + esc((parseNotiBodyForDisplay(log).customer || '-')) + '</td>',
@@ -26950,7 +27746,10 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
       agency: '<td class="col-narrow">' + esc(pgProvLabel) + '</td>',
       transaction_id: '<td class="col-narrow">' + esc(e.transactionId || '') + '</td>',
       order_no: '<td class="col-narrow">' + esc(e.orderNo || '') + '</td>',
-      merchant: '<td class="col-narrow">' + esc(e.merchantId || '') + '</td>',
+      merchant:
+        '<td class="col-narrow">' +
+        esc(formatNotiLogMerchantDisplay(locale, e.merchantId, pgFilter) || e.merchantId || '') +
+        '</td>',
       route: '<td class="col-narrow">' + esc(e.routeNo || '') + '</td>',
       internal_target: '<td class="col-narrow">' + esc(internalTargetName) + '</td>',
       merchant_receive: '<td class="col-status">' + relayLabel(e.relayStatus, e.skipReason) + '</td>',
@@ -27596,7 +28395,10 @@ app.get('/admin/cancel-refund/void', requireAuth, requirePage('cr_void'), (req, 
       sent_time:
         '<td class="col-time">' + dualTimeCellInner(sentDt, esc) + '</td>',
       route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
-      merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
+      merchant:
+        '<td class="col-narrow">' +
+        esc(formatNotiLogMerchantDisplay(locale, resolveNotiLogMerchantId(log, body), voidPg) || '') +
+        '</td>',
       transaction_id: '<td class="col-narrow">' + esc(txId) + '</td>',
       order_no: '<td class="col-narrow">' + esc(orderNo) + '</td>',
       customer: jpayExtras.customer,
@@ -27820,7 +28622,10 @@ app.get('/admin/mail-logs', requireAuth, requirePage('mail_logs'), (req, res) =>
       type: '<td class="col-narrow">' + esc(typeLabel) + '</td>',
       transaction_id: '<td class="col-narrow">' + esc(tx) + '</td>',
       order_no: '<td class="col-narrow">' + esc(orderNo) + '</td>',
-      merchant: '<td class="col-narrow">' + esc(merchantId) + '</td>',
+      merchant:
+        '<td class="col-narrow">' +
+        esc(formatNotiLogMerchantDisplay(locale, merchantId) || merchantId || '') +
+        '</td>',
       route: '<td class="col-narrow">' + esc(routeNo) + '</td>',
       email_to: '<td class="col-narrow">' + esc(emailTo) + '</td>',
       send_status: '<td class="col-narrow">' + esc(status) + '</td>',
@@ -28425,7 +29230,13 @@ app.get('/admin/cancel-refund/force-refund', requireAuth, requirePage('cr_force_
       received_time:
         '<td class="col-time">' + dualTimeCellInner(dt, esc) + '</td>',
       route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
-      merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
+      merchant:
+        '<td class="col-narrow">' +
+        esc(
+          formatNotiLogMerchantDisplay(locale, resolveNotiLogMerchantId(log, body), forceRefundPg) ||
+            '',
+        ) +
+        '</td>',
       transaction_id: '<td class="col-narrow">' + esc(txId) + '</td>',
       order_no: '<td class="col-narrow">' + esc(orderNo) + '</td>',
       customer: jpayExtrasFv.customer,
@@ -28475,8 +29286,9 @@ app.get('/admin/cancel-refund/void-delete-confirm', requireAuth, requirePageAny(
   }
   const sourceLabel = source === 'force_refund' ? (t(locale, 'cr_source_force_refund') || '강제환불') : source === 'force_void' ? t(locale, 'cr_source_force_void') : t(locale, 'cr_source_void');
   const backUrl = source === 'force_refund' || source === 'force_void' ? '/admin/cancel-refund/force-refund?env=' + encodeURIComponent(env) : '/admin/cancel-refund/void?env=' + encodeURIComponent(env);
+  const merchantDispDel = formatNotiLogMerchantDisplay(locale, merchantId) || merchantId;
   const confirmBody = '<p class="admin-page-desc">' + (t(locale, 'cr_delete_confirm_body') || '') + '</p>'
-    + '<p class="admin-page-desc"><strong>' + t(locale, 'cr_th_transaction_id') + '</strong>: ' + esc(transactionId) + ' / <strong>' + t(locale, 'cr_th_merchant') + '</strong>: ' + esc(merchantId) + ' (' + esc(sourceLabel) + ')</p>'
+    + '<p class="admin-page-desc"><strong>' + t(locale, 'cr_th_transaction_id') + '</strong>: ' + esc(transactionId) + ' / <strong>' + t(locale, 'cr_th_merchant') + '</strong>: ' + esc(merchantDispDel) + ' (' + esc(sourceLabel) + ')</p>'
     + '<form method="post" action="/admin/cancel-refund/void-delete" id="void-delete-form">'
     + '<input type="hidden" name="transactionId" value="' + esc(transactionId) + '" />'
     + '<input type="hidden" name="merchantId" value="' + esc(merchantId) + '" />'
@@ -28557,7 +29369,10 @@ app.get('/admin/cancel-refund/void-deleted-list', requireAuth, requirePage('cr_v
     const restoreForm = '<form method="post" action="/admin/cancel-refund/void-deleted-restore" style="display:inline;"><input type="hidden" name="id" value="' + esc(d.id || '') + '" /><input type="hidden" name="env" value="' + esc(env) + '" /><button type="submit" style="padding:4px 10px;font-size:12px;background:#16a34a;color:#fff;border:none;border-radius:4px;cursor:pointer;">' + esc(t(locale, 'cr_restore')) + '</button></form>';
     const rowCellsVd = {
       transaction_id: '<td class="col-narrow">' + esc(d.transactionId || '') + '</td>',
-      merchant: '<td class="col-narrow">' + esc(d.merchantId || '') + '</td>',
+      merchant:
+        '<td class="col-narrow">' +
+        esc(formatNotiLogMerchantDisplay(locale, d.merchantId) || d.merchantId || '') +
+        '</td>',
       source: '<td class="col-narrow">' + esc(sourceLabel(d.source)) + '</td>',
       deleted_at: '<td class="col-date">' + esc(deletedAtStr) + '</td>',
       deleted_by: '<td class="col-narrow">' + esc(d.deletedBy || '') + '</td>',
@@ -29377,7 +30192,12 @@ app.get('/admin/cancel-refund/refund', requireAuth, requirePage('cr_refund'), (r
       sent_time:
         '<td class="col-time">' + dualTimeCellInner(sentDt, esc) + '</td>',
       route: '<td class="col-narrow">' + esc(routeNoDisplay) + '</td>',
-      merchant: '<td class="col-narrow">' + esc(log.merchantId || '') + '</td>',
+      merchant:
+        '<td class="col-narrow">' +
+        esc(
+          formatNotiLogMerchantDisplay(locale, resolveNotiLogMerchantId(log, body), refundPg) || '',
+        ) +
+        '</td>',
       transaction_id: '<td class="col-narrow">' + esc(txId) + '</td>',
       order_no: '<td class="col-narrow">' + esc(orderNo) + '</td>',
       customer: jpayExtrasRf.customer,
@@ -29857,7 +30677,10 @@ app.get('/admin/cancel-refund/jpay-followup', requireAuth, requirePage('cr_jpay_
       received_date: '<td>' + esc(dt.date) + '</td>',
       received_time: '<td>' + esc(dt.timeTh) + '</td>',
       route: '<td>' + esc(routeNoDisplay) + '</td>',
-      merchant: '<td>' + esc(log.merchantId || '') + '</td>',
+      merchant:
+        '<td>' +
+        esc(formatNotiLogMerchantDisplay(locale, resolveNotiLogMerchantId(log, body), 'jpay') || '') +
+        '</td>',
       transaction_id: '<td>' + esc(txId) + '</td>',
       order_no: '<td>' + esc(orderNo) + '</td>',
       customer: '<td>' + customer + '</td>',
@@ -29967,6 +30790,130 @@ app.post('/admin/cancel-refund/jpay-followup-refund', requireAuth, requirePage('
   return res.redirect(redirectBase + (sendResult.success ? '&refund=ok' : '&refund=ok&noti=partial'));
 });
 
+/** Comp-Id 누락 건: 관리자가 가맹점 지정 후 피지(가맹) 재전송 */
+app.post('/admin/logs/assign-merchant-resend', requireAuth, requirePageAny(['pg_logs', 'pg_result']), async (req, res) => {
+  const locale = getLocale(req);
+  const returnTo = (req.body.returnTo || '').trim() || 'logs';
+  const sourceQ = normalizeAdminPgSource(req.body.source) || '';
+  const base =
+    (returnTo === 'logs-result' ? '/admin/logs-result' : '/admin/logs') +
+    (sourceQ ? '?source=' + encodeURIComponent(sourceQ) : '');
+  const qsJoin = base.indexOf('?') >= 0 ? '&' : '?';
+  const index = parseInt(req.body.index, 10);
+  const merchantId = String(req.body.merchantId || '').trim();
+  if (Number.isNaN(index) || index < 0 || index >= NOTI_LOGS.length || !merchantId) {
+    return res.redirect(base + qsJoin + 'err=invalid');
+  }
+  const log = NOTI_LOGS[index];
+  const memberResend = getMemberForAccessControl(req);
+  if (memberResend && !filterLogByMemberInternalTarget(log, memberResend)) {
+    return res.redirect(base + qsJoin + 'err=forbidden');
+  }
+  const sourcePg = normalizeAdminPgSource(req.body.source) || getNotiLogPgAcquirer(log) || '';
+  const resolvedAssign = resolveMerchantEntry(merchantId, sourcePg);
+  const resolvedMerchantId = (resolvedAssign && resolvedAssign.merchantId) || merchantId;
+  const merchant = (resolvedAssign && resolvedAssign.merchant) || MERCHANTS.get(merchantId);
+  if (!merchant) {
+    return res.redirect(
+      base + qsJoin + 'resend=fail&reason=' + encodeURIComponent(t(locale, 'relay_no_merchant') || 'Merchant not found'),
+    );
+  }
+  const targetUrl = String(merchant.callbackUrl || '').trim();
+  if (!targetUrl) {
+    return res.redirect(
+      base + qsJoin + 'err=no_target&reason=' + encodeURIComponent(t(locale, 'relay_no_url') || 'No merchant URL'),
+    );
+  }
+  const compId =
+    String((merchant.icopayProvisionMeta && merchant.icopayProvisionMeta.compId) || resolvedMerchantId.split('#')[0] || resolvedMerchantId).trim();
+  let bodyToSend =
+    log.body && typeof log.body === 'object'
+      ? { ...log.body }
+      : typeof log.body === 'string'
+        ? (() => {
+            try {
+              return JSON.parse(log.body);
+            } catch {
+              return {};
+            }
+          })()
+        : {};
+  bodyToSend = stampOmspayCompIdOnBody(bodyToSend, compId);
+  // JPAY /admin/logs/resend 와 동일: 일반=가맹점 수신형식(relayFormat), JSON/FORM=강제
+  const plan = resolveResendRelayPlan(log, merchant, {
+    forceJson: req.body.resendAsJson,
+    forceForm: req.body.resendAsForm,
+    bodyOverride: bodyToSend,
+    preferMerchantFormatOnPlain: true,
+  });
+  if (!plan.body && plan.rawBody == null) {
+    return res.redirect(
+      base + qsJoin + 'err=no_body&reason=' + encodeURIComponent(t(locale, 'err_no_body') || 'No body'),
+    );
+  }
+  try {
+    let relayRes;
+    if (plan.rawBody != null && plan.formatUsed === 'raw' && !plan.body) {
+      relayRes = await relayToMerchant(targetUrl, null, {
+        contentType: plan.contentType,
+        rawBody: plan.rawBody,
+      });
+    } else {
+      relayRes = await relayToMerchant(targetUrl, plan.body || bodyToSend, {
+        contentType: plan.contentType,
+      });
+    }
+    const ok = relayRes.status >= 200 && relayRes.status < 400;
+    if (NOTI_LOGS[index]) {
+      NOTI_LOGS[index].merchantId = resolvedMerchantId;
+      NOTI_LOGS[index].targetUrl = targetUrl;
+      NOTI_LOGS[index].body = bodyToSend;
+      NOTI_LOGS[index].relayStatus = ok ? 'ok' : 'fail';
+      NOTI_LOGS[index].relayFailReason = ok
+        ? ''
+        : 'HTTP ' +
+          relayRes.status +
+          (relayRes.data != null
+            ? ': ' +
+              (typeof relayRes.data === 'string' ? relayRes.data : JSON.stringify(relayRes.data)).slice(0, 200)
+            : '');
+      NOTI_LOGS[index].relayFormatUsed = plan.formatUsed;
+      NOTI_LOGS[index].manualMerchantAssign = true;
+      NOTI_LOGS[index].manualMerchantAssignAt = new Date().toISOString();
+    }
+    try {
+      fs.appendFile(
+        PG_NOTI_LOG_PATH,
+        JSON.stringify({
+          ...NOTI_LOGS[index],
+          receivedAtIso: new Date().toISOString(),
+          receivedAt: getThailandNowString(),
+          manualAssignResend: true,
+        }) + '\n',
+        () => {},
+      );
+    } catch (_) {}
+    if (ok) {
+      return res.redirect(base + qsJoin + 'resend=ok&resendKind=payment');
+    }
+    return res.redirect(
+      base +
+        qsJoin +
+        'resend=fail&reason=' +
+        encodeURIComponent(NOTI_LOGS[index].relayFailReason || 'fail') +
+        '&resendKind=payment',
+    );
+  } catch (err) {
+    return res.redirect(
+      base +
+        qsJoin +
+        'resend=fail&reason=' +
+        encodeURIComponent(err.code || err.message || String(err)) +
+        '&resendKind=payment',
+    );
+  }
+});
+
 app.post('/admin/logs/resend', requireAuth, requirePageAny(['pg_logs', 'pg_result']), async (req, res) => {
   const returnTo = (req.body.returnTo || '').trim() || 'logs';
   const base = returnTo === 'logs-result' ? '/admin/logs-result' : '/admin/logs';
@@ -29990,22 +30937,31 @@ app.post('/admin/logs/resend', requireAuth, requirePageAny(['pg_logs', 'pg_resul
   }
   const forceJson = req.body.resendAsJson === '1' || req.body.resendAsJson === 'true';
   const forceForm = req.body.resendAsForm === '1' || req.body.resendAsForm === 'true';
-  const contentType = forceJson ? 'application/json' : forceForm ? 'application/x-www-form-urlencoded' : ((log.contentType || '').toString().trim() || 'application/json');
+  const resendMerchantEntry = resolveMerchantEntry(
+    log.merchantId || resolveNotiLogMerchantId(log),
+    getNotiLogPgAcquirer(log),
+  );
+  const resendMerchant = (resendMerchantEntry && resendMerchantEntry.merchant) || null;
+  // JPAY와 동일: JSON/FORM 강제, 일반=원문(raw). 원문 없고 가맹점 수신형식이 있으면 그 형식 사용
+  const plan = resolveResendRelayPlan(log, resendMerchant, {
+    forceJson,
+    forceForm,
+    preferMerchantFormatOnPlain: !hasRawBody,
+  });
   try {
     let relayRes;
-    if (hasRawBody && !forceJson && !forceForm) {
-      // ChillPay에서 받은 원문 그대로 전송 (가공 없음)
-      relayRes = await relayToMerchant(targetUrl, null, { contentType, rawBody: log.rawBody });
+    if (plan.rawBody != null && !forceJson && !forceForm && plan.formatUsed === 'raw') {
+      // ChillPay/JPAY: 수신 원문 그대로 전송
+      relayRes = await relayToMerchant(targetUrl, null, {
+        contentType: plan.contentType,
+        rawBody: plan.rawBody,
+      });
     } else {
-      // rawBody 없음 또는 재전송(JSON)/재전송(FORM) 선택 시: body 객체로 전송
-      let bodyToSend = log.body;
-      if (typeof bodyToSend === 'string') {
-        try { bodyToSend = JSON.parse(bodyToSend); } catch { return res.redirect(base + '?err=no_body&reason=' + encodeURIComponent('노티 본문 파싱 실패')); }
-      }
+      let bodyToSend = plan.body;
       if (!bodyToSend || typeof bodyToSend !== 'object' || Array.isArray(bodyToSend)) {
         return res.redirect(base + '?err=no_body&reason=' + encodeURIComponent('노티 본문 형식 오류'));
       }
-      relayRes = await relayToMerchant(targetUrl, bodyToSend, { contentType });
+      relayRes = await relayToMerchant(targetUrl, bodyToSend, { contentType: plan.contentType });
     }
     const ok = relayRes.status >= 200 && relayRes.status < 300;
     const resendKind = (req.body.resendKind || '').toString().toLowerCase() || (() => {
@@ -30013,11 +30969,10 @@ app.post('/admin/logs/resend', requireAuth, requirePageAny(['pg_logs', 'pg_resul
       return isCancelNotiBody(b) ? 'cancel' : 'payment';
     })();
     if (ok) {
-      const formatUsed = forceJson ? 'json' : forceForm ? 'form' : 'raw';
       if (NOTI_LOGS[index]) {
         NOTI_LOGS[index].relayStatus = 'ok';
         NOTI_LOGS[index].relayFailReason = '';
-        NOTI_LOGS[index].relayFormatUsed = formatUsed;
+        NOTI_LOGS[index].relayFormatUsed = plan.formatUsed;
       }
       return res.redirect(base + '?resend=ok&resendKind=' + encodeURIComponent(resendKind));
     }
@@ -30343,8 +31298,20 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
       const resendKindLabel = resendKindVal === 'cancel' ? t(locale, 'status_cancel') : t(locale, 'status_payment');
       const notiKindClass = resendKindVal === 'cancel' ? 'noti-kind-cancel' : 'noti-kind-payment';
       const notiKindCell = `<span class="${notiKindClass}">${highlightLogSearchHtml(resendKindLabel, logSearchRaw, esc)}</span>`;
+      const resendMerchantResult =
+        resolveMerchantEntry(merchantIdDisp, logPgResult) ||
+        (log.merchantId ? { merchantId: log.merchantId, merchant: MERCHANTS.get(log.merchantId) } : null);
       const resendBtn = canResend
-        ? `<div class="resend-wrap" style="display:inline-flex;flex-direction:row;gap:6px;align-items:center;flex-wrap:nowrap;"><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><button type="submit" class="btn-resend" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_plain') || '').replace(/'/g, "\\'")}');">${t(locale, 'pg_logs_btn_plain')}</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsJson" value="1" /><button type="submit" class="btn-resend-json" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_json') || '').replace(/'/g, "\\'")}');">JSON</button></form><form method="post" action="/admin/logs/resend" style="display:inline;"><input type="hidden" name="index" value="${realIndex}" /><input type="hidden" name="returnTo" value="logs-result" /><input type="hidden" name="resendKind" value="${resendKindVal}" /><input type="hidden" name="resendAsForm" value="1" /><button type="submit" class="btn-resend-form" onclick="return confirm('${(t(locale, 'pg_logs_resend_confirm_form') || '').replace(/'/g, "\\'")}');">FORM</button></form></div>`
+        ? buildPgLogsResendFormatButtonsHtml(locale, esc, {
+            action: '/admin/logs/resend',
+            index: realIndex,
+            resendKind: resendKindVal,
+            source: logPgResult,
+            returnTo: 'logs-result',
+            preferredFormat: normalizeMerchantRelayFormat(
+              resendMerchantResult && resendMerchantResult.merchant,
+            ),
+          })
         : '-';
       const txId = notifBodyTxId(body) || '-';
       const orderNo = notifBodyOrderNo(body) || '-';
@@ -30368,7 +31335,16 @@ app.get('/admin/logs-result', requireAuth, requirePage('pg_result'), (req, res) 
           '<td>' + dualTimeCellInner(dt, esc, logSearchRaw) + '</td>',
         route: '<td>' + highlightLogSearchHtml(String(routeNo), logSearchRaw, esc) + '</td>',
         env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRaw, esc) + '</td>',
-        merchant_id: '<td>' + highlightLogSearchHtml(merchantIdDisp || '-', logSearchRaw, esc) + '</td>',
+        merchant_id:
+          '<td>' +
+          highlightLogSearchHtml(
+            formatNotiLogMerchantDisplay(locale, merchantIdDisp, logPgResult) ||
+              merchantIdDisp ||
+              '-',
+            logSearchRaw,
+            esc,
+          ) +
+          '</td>',
         transaction_id: '<td>' + highlightLogSearchHtml(String(txId), logSearchRaw, esc) + '</td>',
         order_no: '<td>' + highlightLogSearchHtml(String(orderNo), logSearchRaw, esc) + '</td>',
         amount: '<td>' + highlightLogSearchHtml(String(amtDisplay), logSearchRaw, esc) + '</td>',
@@ -33806,15 +34782,32 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
         internal_target: '<td class="col-narrow">' + highlightLogSearchHtml(internalTargetName, logSearchRawInternal, esc) + '</td>',
         internal_receive:
           '<td class="col-status"><span class="' + internalClass + '">' + highlightLogSearchHtml(internalLabel, logSearchRawInternal, esc) + '</span></td>',
-        header: '<td class="col-header"><pre>' + highlightLogSearchHtml(jsonHeader, logSearchRawInternal, esc) + '</pre></td>',
-        value: '<td class="col-json"><pre>' + highlightLogSearchHtml(jsonValue, logSearchRawInternal, esc) + '</pre></td>',
+        header: formatJsonCellCollapsedTdHtml(
+          locale,
+          esc,
+          jsonHeader || '-',
+          null,
+          logSearchRawInternal,
+          'col-header',
+        ),
+        value: formatJsonCellCollapsedTdHtml(
+          locale,
+          esc,
+          jsonValue || '-',
+          displayPayload,
+          logSearchRawInternal,
+        ),
         resend: '<td class="col-action">' + resendBtn + '</td>',
         delete:
           '<td class="col-action">' +
           renderNotiLogDeleteButtonHtml(locale, 'internal', log, esc, internalBackUrl, logPgInternal === 'jpay' ? 'jpay' : '') +
           '</td>',
       };
-      return '<tr>' + joinListColCells(internalColFiltered, rowCellsInternal) + '</tr>';
+      return (
+        '<tr class="log-json-row">' +
+        joinListColCells(internalColFiltered, rowCellsInternal) +
+        '</tr>'
+      );
     })
     .join('');
 
@@ -33832,7 +34825,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'internal_logs_title')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}${ADMIN_LOG_JSON_COLLAPSE_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
@@ -33881,6 +34874,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
       ${internalDeletedListLink}
       ${hubHtmlInternal}
       <p class="admin-page-desc">${t(locale, 'internal_logs_desc')}</p>
+      ${logJsonDblclickHintHtml(locale, esc)}
       ${(() => {
         const fh =
           (logPgInternal === 'jpay' || logPgInternal === 'elementpay' || logPgInternal === 'ox' ? '<input type="hidden" name="source" value="' + logPgInternal + '" />' : '') +
@@ -33914,6 +34908,7 @@ app.get('/admin/internal', requireAuth, requirePage('internal_logs'), (req, res)
         </tbody>
       </table>
       ${logPagerFooterInternal}
+      ${attachLogJsonRowToggleScript()}
       </div>
     </main>
   </div>
@@ -34071,7 +35066,16 @@ app.get('/admin/internal-result', requireAuth, requirePage('internal_result'), (
         route: '<td>' + highlightLogSearchHtml(formatLogsResultRouteDisplay(log.routeKey || log.routeNo || '', logPgIntRes), logSearchRawIntRes, esc) + '</td>',
         internal_target: '<td>' + highlightLogSearchHtml(internalTargetName, logSearchRawIntRes, esc) + '</td>',
         env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRawIntRes, esc) + '</td>',
-        merchant_id: '<td>' + highlightLogSearchHtml(log.merchantId || '-', logSearchRawIntRes, esc) + '</td>',
+        merchant_id:
+          '<td>' +
+          highlightLogSearchHtml(
+            formatNotiLogMerchantDisplay(locale, log.merchantId, logPgIntRes) ||
+              log.merchantId ||
+              '-',
+            logSearchRawIntRes,
+            esc,
+          ) +
+          '</td>',
         internal_delivery:
           '<td><span class="' + statusClass + '">' + highlightLogSearchHtml(label, logSearchRawIntRes, esc) + '</span></td>',
         fail_reason: '<td class="col-fail-reason">-</td>',
@@ -34349,16 +35353,36 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
           '<td class="col-time">' + dualTimeCellInner(dt, esc, logSearchRawDev) + '</td>',
         delivery:
           '<td class="col-status"><span class="' + internalClass + '">' + highlightLogSearchHtml(internalLabel, logSearchRawDev, esc) + '</span></td>',
-        upstream: '<td class="col-upstream"><pre class="cell-upstream-pre">' + (upStr ? esc(upStr) : '—') + '</pre></td>',
-        header: '<td class="col-header"><pre>' + highlightLogSearchHtml(jsonHeader, logSearchRawDev, esc) + '</pre></td>',
-        value: '<td class="col-json"><pre>' + highlightLogSearchHtml(jsonValue, logSearchRawDev, esc) + '</pre></td>',
+        upstream:
+          '<td class="col-upstream">' +
+          formatJsonCellCollapsedInnerHtml(locale, esc, upStr || '—', null, logSearchRawDev) +
+          '</td>',
+        header: formatJsonCellCollapsedTdHtml(
+          locale,
+          esc,
+          jsonHeader || '-',
+          null,
+          logSearchRawDev,
+          'col-header',
+        ),
+        value: formatJsonCellCollapsedTdHtml(
+          locale,
+          esc,
+          jsonValue || '-',
+          displayPayload,
+          logSearchRawDev,
+        ),
         resend: '<td class="col-action">' + resendBtn + '</td>',
         delete:
           '<td class="col-action">' +
           renderNotiLogDeleteButtonHtml(locale, 'dev_internal', log, esc, '/admin/dev-internal?' + buildQueryString({ ...qDev, page: pageNumDevInternal }), logPgDev === 'jpay' ? 'jpay' : '') +
           '</td>',
       };
-      return '<tr>' + joinListColCells(devIntColFiltered, rowCellsDevInt) + '</tr>';
+      return (
+        '<tr class="log-json-row">' +
+        joinListColCells(devIntColFiltered, rowCellsDevInt) +
+        '</tr>'
+      );
     })
     .join('');
 
@@ -34376,7 +35400,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'nav_dev_internal_noti_log')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}${ADMIN_LOG_JSON_COLLAPSE_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     h1 { margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; background:#fff; table-layout: fixed; }
@@ -34432,6 +35456,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
       <p class="admin-page-desc">${t(locale, 'dev_internal_delivery_legend')}</p>
       <p class="admin-page-desc">${t(locale, 'dev_internal_logs_retry_hint')}</p>
       <p class="admin-page-desc">${t(locale, 'dev_internal_dedup_hint')}</p>
+      ${logJsonDblclickHintHtml(locale, esc)}
       ${(() => {
         const fh =
           (logPgDev === 'jpay' || logPgDev === 'elementpay' || logPgDev === 'ox' ? '<input type="hidden" name="source" value="' + logPgDev + '" />' : '') +
@@ -34465,6 +35490,7 @@ app.get('/admin/dev-internal', requireAuth, requirePage('dev_internal_logs'), (r
         </tbody>
       </table>
       ${logPagerFooterDevInternal}
+      ${attachLogJsonRowToggleScript()}
       </div>
     </main>
   </div>
@@ -34684,7 +35710,10 @@ app.get('/admin/dealmai-webhook', requireAuth, requirePage('dealmai_webhook_logs
         received_date: '<td>' + esc(dt.date) + '</td>',
         received_time: '<td>' + esc(dt.timeTh) + '</td>',
         event: '<td>' + esc(event) + '</td>',
-        merchant: '<td>' + esc(log.merchantId || '') + '</td>',
+        merchant:
+          '<td>' +
+          esc(formatNotiLogMerchantDisplay(locale, log.merchantId, logPg) || log.merchantId || '') +
+          '</td>',
         transaction_id: '<td>' + esc(txId) + '</td>',
         delivery: '<td>' + esc(statusLabel) + '</td>',
         http_status: '<td>' + (log.webhookHttpStatus != null ? esc(String(log.webhookHttpStatus)) : '—') + '</td>',
@@ -34801,7 +35830,10 @@ app.get('/admin/dealmai-webhook-result', requireAuth, requirePage('dealmai_webho
       received_date: '<td>' + esc(dt.date) + '</td>',
       received_time: '<td>' + esc(dt.timeTh) + '</td>',
       event: '<td>' + esc(event) + '</td>',
-      merchant: '<td>' + esc(log.merchantId || '') + '</td>',
+      merchant:
+        '<td>' +
+        esc(formatNotiLogMerchantDisplay(locale, log.merchantId, logPg) || log.merchantId || '') +
+        '</td>',
       transaction_id: '<td>' + esc(txId) + '</td>',
       delivery: '<td>' + esc(statusLabel) + '</td>',
       http_status: '<td>' + (log.webhookHttpStatus != null ? esc(String(log.webhookHttpStatus)) : '—') + '</td>',
@@ -35156,17 +36188,32 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
           '<td>' + dualTimeCellInner(dt, esc, logSearchRawDevRes) + '</td>',
         route: '<td>' + highlightLogSearchHtml(formatLogsResultRouteDisplay(log.routeKey || log.routeNo || '', logPgDevRes), logSearchRawDevRes, esc) + '</td>',
         env: '<td>' + highlightLogSearchHtml(envLabel, logSearchRawDevRes, esc) + '</td>',
-        merchant_id: '<td>' + highlightLogSearchHtml(log.merchantId || '-', logSearchRawDevRes, esc) + '</td>',
+        merchant_id:
+          '<td>' +
+          highlightLogSearchHtml(
+            formatNotiLogMerchantDisplay(locale, log.merchantId, logPgDevRes) ||
+              log.merchantId ||
+              '-',
+            logSearchRawDevRes,
+            esc,
+          ) +
+          '</td>',
         delivery: '<td><span class="' + statusClass + '">' + highlightLogSearchHtml(label, logSearchRawDevRes, esc) + '</span></td>',
         upstream:
-          '<td class="col-fail-reason"><pre class="cell-upstream-pre">' + (upStrRes ? esc(upStrRes) : '—') + '</pre></td>',
+          '<td class="col-fail-reason">' +
+          formatJsonCellCollapsedInnerHtml(locale, esc, upStrRes || '—', null, logSearchRawDevRes) +
+          '</td>',
         resend: '<td>' + resendBtn + '</td>',
         delete:
           '<td>' +
           renderNotiLogDeleteButtonHtml(locale, 'dev_internal', log, esc, devResultBackUrl, logPgDevRes === 'jpay' ? 'jpay' : '') +
           '</td>',
       };
-      return '<tr>' + joinListColCells(devResColFiltered, rowCellsDevRes) + '</tr>';
+      return (
+        '<tr class="log-json-row">' +
+        joinListColCells(devResColFiltered, rowCellsDevRes) +
+        '</tr>'
+      );
     })
     .join('');
 
@@ -35184,7 +36231,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
 <head>
   <meta charset="UTF-8" />
   <title>${t(locale, 'nav_dev_result')}</title>
-  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}
+  <style>${ADMIN_PAGE_DESC_BOX_CSS}${ADMIN_LOG_FILTER_BAR_CSS}${ADMIN_LIST_COL_GUIDE_CSS}${ADMIN_LOG_JSON_COLLAPSE_CSS}
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background:#edf2f7; }
     table { border-collapse: collapse; width: 100%; background:#fff; font-size: 11px; }
     th, td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: middle; text-align: center; }
@@ -35194,7 +36241,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
     .status-skip { color: #b45309; font-weight: 700; }
     .status-fail { color: #dc2626; font-weight: 600; }
     .time-jp { color: #2563eb; }
-    .col-fail-reason { text-align: center; word-break: break-all; max-width: 200px; }
+    .col-fail-reason { text-align: left; word-break: break-all; max-width: 200px; }
     .cell-upstream-pre { font-family: ui-monospace, monospace; font-size: 11px; text-align: left; margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 100px; overflow: auto; }
     .btn-resend { padding: 4px 10px; font-size: 12px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
     .alert { padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
@@ -35238,6 +36285,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
       <p class="admin-page-desc">${t(locale, 'dev_internal_delivery_legend')}</p>
       <p class="admin-page-desc">${t(locale, 'noti_log_result_action_hint')}</p>
       <p class="admin-page-desc">${t(locale, 'dev_internal_logs_retry_hint')}</p>
+      ${logJsonDblclickHintHtml(locale, esc)}
       ${(() => {
         const fh =
           (logPgDevRes === 'jpay' || logPgDevRes === 'elementpay' || logPgDevRes === 'ox' ? '<input type="hidden" name="source" value="' + logPgDevRes + '" />' : '') +
@@ -35274,6 +36322,7 @@ app.get('/admin/dev-internal-result', requireAuth, requirePage('dev_result'), (r
         </tbody>
       </table>
       ${logPagerFooterDevResult}
+      ${attachLogJsonRowToggleScript()}
       </div>
     </main>
   </div>
