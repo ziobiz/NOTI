@@ -1,0 +1,27 @@
+---
+description: 종합거래 PG 탭/목록 필터 — 신규 PG 추가 시 필수 (회귀 방지)
+alwaysApply: true
+---
+
+# 종합거래 PG 목록 필터 (변경 불가)
+
+ICOPAY/NOTI에서 신규 결제대행사(PG) 탭을 넣을 때 **같은 오류가 재발하지 않도록** 아래를 지킨다.
+
+## 금지
+
+- `getTransactionListLogs` 안에 `if (src === 'omspay')` / `if (src === 'payso')` 처럼 **PG별 if 체인을 다시 늘리는 것**
+- 허브에 `omspayUrl` / `paysoUrl` 만 추가하고 목록 필터·`normalizeAdminPgSource` 를 빠뜨리는 것  
+  → 탭은 보이지만 클릭 시 ChillPay 목록으로 떨어지거나 비어 보임
+
+## 필수 (신규 PG 추가 시)
+
+1. `normalizeAdminPgSource` 에 코드명 추가
+2. `getNotiLogPgAcquirer` (explicit + routeKey) 에 동일 코드 추가
+3. `acquirerLabelFromLog` / locales `pg_provider_*` (ko/ja/en/th/zh)
+4. 허브 `pgSource.*Url` + `buildCrHubToolbarHtml` 표시
+5. **목록 필터는 `getTransactionListLogs`의 `ADMIN_PG_LIST_FILTER_V1` 공통 로직을 유지** — `normalizeAdminPgSource` 만 확장하면 자동 적용
+
+## 마커
+
+`server.js` 의 `getTransactionListLogs` 주석에 **`ADMIN_PG_LIST_FILTER_V1`** 이 있어야 한다.  
+배포 스크립트가 이 마커 없으면 실패시킨다.

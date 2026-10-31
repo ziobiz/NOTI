@@ -135,6 +135,19 @@ try {
         if (-not (Test-Path -LiteralPath $local)) {
             throw "로컬 파일 없음: $local"
         }
+        # 종합거래 PG 필터 회귀 방지: server.js 는 ADMIN_PG_LIST_FILTER_V1 필수
+        if (($rel -replace '\\', '/') -eq 'server.js') {
+            $serverText = Get-Content -LiteralPath $local -Raw -Encoding UTF8
+            if ($serverText -notmatch 'ADMIN_PG_LIST_FILTER_V1') {
+                throw "배포 거부: server.js 에 ADMIN_PG_LIST_FILTER_V1 마커 없음 (getTransactionListLogs 공통 필터 누락). PG별 if (src===) 체인으로 되돌리지 마세요."
+            }
+            $idxFn = $serverText.IndexOf('function getTransactionListLogs')
+            if ($idxFn -lt 0) { throw "배포 거부: getTransactionListLogs 함수를 찾지 못함" }
+            $fnSlice = $serverText.Substring($idxFn, [Math]::Min(2500, $serverText.Length - $idxFn))
+            if ($fnSlice -notmatch 'normalizeAdminPgSource\(src\)' -or $fnSlice -notmatch "known !== 'chillpay'") {
+                throw "배포 거부: getTransactionListLogs 가 ADMIN_PG_LIST_FILTER_V1 공통 필터 형태가 아님 (normalizeAdminPgSource 기반이어야 함)."
+            }
+        }
         $remoteRel = ($rel -replace '\\', '/')
         $remotePath = ($remoteDir.TrimEnd('/') + '/' + $remoteRel)
         $idx = $remotePath.LastIndexOf('/')
@@ -146,6 +159,36 @@ try {
         }
         Copy-ToRemote $c $local $remotePath
         Invoke-RemoteOrThrow $c "test -s '$remotePath' && ls -la '$remotePath'"
+    }
+
+    # 원격 server.js 도 동일 마커 검증 (다른 경로로 덮인 직후 재배포 시 감지)
+    if ($Files | Where-Object { ($_ -replace '\\', '/') -eq 'server.js' }) {
+        $verifyJs = @'
+const fs = require('fs');
+const s = fs.readFileSync(process.argv[1], 'utf8');
+if (!s.includes('ADMIN_PG_LIST_FILTER_V1')) {
+  console.error('REMOTE_MISSING_ADMIN_PG_LIST_FILTER_V1');
+  process.exit(2);
+}
+const idx = s.indexOf('function getTransactionListLogs');
+if (idx < 0) {
+  console.error('REMOTE_MISSING_getTransactionListLogs');
+  process.exit(3);
+}
+const fn = s.slice(idx, idx + 2500);
+if (!fn.includes('normalizeAdminPgSource(src)') || !fn.includes("known !== 'chillpay'")) {
+  console.error('REMOTE_getTransactionListLogs_NOT_GENERIC');
+  process.exit(4);
+}
+console.log('ADMIN_PG_LIST_FILTER_V1 ok');
+'@
+        $verifyLocal = Join-Path $env:TEMP 'noti-verify-pg-filter.js'
+        Set-Content -LiteralPath $verifyLocal -Value $verifyJs -Encoding UTF8
+        $remoteVerify = ($remoteDir.TrimEnd('/') + '/scripts/noti-verify-pg-filter.js')
+        Invoke-RemoteOrThrow $c "mkdir -p '$remoteDir/scripts'"
+        Copy-ToRemote $c $verifyLocal $remoteVerify
+        Invoke-RemoteOrThrow $c "node '$remoteVerify' '$remoteDir/server.js'"
+        Remove-Item -LiteralPath $verifyLocal -Force -ErrorAction SilentlyContinue
     }
 
     if (-not $SkipRestart) {

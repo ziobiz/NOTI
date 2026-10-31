@@ -287,6 +287,8 @@ const messages = {
     merchants_empty_qbang: '등록된 QBANG 가맹점이 없습니다.',
     merchants_pg_provider_omspay: 'OMSPAY',
     pg_provider_omspay: 'OMSPAY',
+    merchants_pg_provider_payso: 'PAYSO',
+    pg_provider_payso: 'PAYSO',
 
     merchants_crypto_ingress_hint:
       'CRYPTO는 ICOPAY 입금 확정 미러 입구가 본사 고정 1개입니다. 가맹 Callback/Result·relayFormat만 설정합니다.',
@@ -1828,6 +1830,8 @@ const messages = {
     merchants_empty_qbang: '登録されたQBANG加盟店はありません。',
     merchants_pg_provider_omspay: 'OMSPAY',
     pg_provider_omspay: 'OMSPAY',
+    merchants_pg_provider_payso: 'PAYSO',
+    pg_provider_payso: 'PAYSO',
     merchants_crypto_ingress_hint:
       'CRYPTOはICOPAY入金確定ミラー入口が本部固定1つです。加盟店Callback/Result・relayFormatのみ設定します。',
     merchants_crypto_result_hint:
@@ -3328,6 +3332,8 @@ const messages = {
     merchants_empty_qbang: 'No QBANG merchants registered.',
     merchants_pg_provider_omspay: 'OMSPAY',
     pg_provider_omspay: 'OMSPAY',
+    merchants_pg_provider_payso: 'PAYSO',
+    pg_provider_payso: 'PAYSO',
     merchants_crypto_ingress_hint:
       'CRYPTO uses one HQ-fixed ICOPAY deposit-confirm mirror ingress. Configure merchant Callback/Result and relayFormat only.',
     merchants_crypto_result_hint:
@@ -4855,6 +4861,8 @@ const messages = {
     merchants_empty_qbang: 'ยังไม่มีร้านค้า QBANG',
     merchants_pg_provider_omspay: 'OMSPAY',
     pg_provider_omspay: 'OMSPAY',
+    merchants_pg_provider_payso: 'PAYSO',
+    pg_provider_payso: 'PAYSO',
     merchants_crypto_ingress_hint:
       'CRYPTO ใช้ทางเข้ามิเรอร์ยืนยันฝาก ICOPAY คงที่ของสำนักงานใหญ่ 1 จุด ตั้งค่าเฉพาะ Callback/Result และ relayFormat ของร้าน',
     merchants_crypto_result_hint:
@@ -6337,6 +6345,8 @@ const messages = {
     merchants_empty_qbang: '尚无已注册的 QBANG 商户。',
     merchants_pg_provider_omspay: 'OMSPAY',
     pg_provider_omspay: 'OMSPAY',
+    merchants_pg_provider_payso: 'PAYSO',
+    pg_provider_payso: 'PAYSO',
     merchants_crypto_ingress_hint:
       'CRYPTO 使用总部固定的 ICOPAY 入金确认镜像入口。仅配置商户 Callback/Result 与 relayFormat。',
     merchants_crypto_result_hint:
