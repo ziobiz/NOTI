@@ -31,9 +31,15 @@ export INTERNAL_NOTI_URL=https://your-internal-api.com/noti
 
 # PM2로 백그라운드 실행 (재부팅 시 자동 재시작은 아래 참고)
 npx pm2 start server.js --name "pg-noti-relay"
-npx pm2 save
-npx pm2 startup   # 부팅 시 자동 실행 설정
+npx pm2 save          # 필수: 미저장 시 재부팅 후 목록에서 빠질 수 있음
+npx pm2 startup       # 부팅 시 자동 실행 (systemd pm2-root)
+# ICOPAY pg-app 과 동일: 5분 /health 워치독
+sudo bash scripts/ops/install-pg-noti-autostart.sh
 ```
+
+ICOPAY(`pg-app`)와 연동 쌍이므로 **부팅 자동 기동 + 워치독**을 NOTI에도 둔다.  
+자세한 내용: `docs/incident-parity-boot-autostart-with-pg-app.md`
+
 
 ### 3) (선택) Nginx 리버스 프록시 + HTTPS
 

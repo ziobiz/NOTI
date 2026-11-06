@@ -194,10 +194,20 @@ console.log('ADMIN_PG_LIST_FILTER_V1 ok');
     if (-not $SkipRestart) {
         Write-Host "[PM2] restart $pm2Name ..."
         # Prefer ecosystem/cwd restart; fall back to start if missing
+        # pm2 save 필수: dump 미갱신 시 재부팅 후 프로세스 목록에서 빠질 수 있음 (pg-app systemd 동등)
         $restartCmd = @"
-cd '$remoteDir' && (pm2 describe '$pm2Name' >/dev/null 2>&1 && pm2 restart '$pm2Name' --update-env || pm2 start server.js --name '$pm2Name') && pm2 save && pm2 list | head -30
+set -e
+cd '$remoteDir'
+if pm2 describe '$pm2Name' >/dev/null 2>&1; then pm2 restart '$pm2Name' --update-env; else pm2 start server.js --name '$pm2Name'; fi
+pm2 save
+systemctl is-enabled pm2-root.service 2>/dev/null || true
+pm2 list | head -30
 "@
         Invoke-RemoteOrThrow $c $restartCmd
+    } else {
+        # 재시작 생략이어도 부팅 dump 는 최신으로 고정
+        Write-Host "[PM2] save dump (SkipRestart)..."
+        Invoke-RemoteOrThrow $c "cd '$remoteDir' && pm2 save; systemctl is-enabled pm2-root.service 2>/dev/null || true"
     }
 
     Write-Host "=== NOTI 배포 완료 ==="
