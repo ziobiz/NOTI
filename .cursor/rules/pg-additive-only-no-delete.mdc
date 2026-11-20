@@ -1,0 +1,39 @@
+---
+description: 신규 PG 추가 시 기존 결제대행사 절대 삭제 금지 (additive only, 재발 방지 100%)
+alwaysApply: true
+---
+
+# PG 추가 = 보존 + 추가만 (변경 불가)
+
+기존 결제대행사(OMSPAY / PAYSO / KSNET / QBANG / ChillPay / JPAY 등)의
+라우트·탭·필터·locales·lib·ingress를 **절대 삭제·치환·축소하지 않는다.**
+신규 PG는 **옆에 붙이는 방식(additive)** 만 허용한다.
+
+## 절대 금지
+
+- 옛 `server.js` / 부분 브랜치 / 미완성 파일로 운영 `server.js` 덮어쓰기
+- 신규 PG 작업 중 기존 PG 블록(`handlePayso*`, `paysoUrl`, `/noti/payso` 등) 제거
+- “정리” 명목으로 기존 PG if/탭/require 삭제
+- `Deploy-Noti.ps1 -Files @('a','b')` 처럼 **배열이 일부만 업로드**되는 방식에 의존
+  → **파일은 한 번에 하나씩** 배포하거나, 배포 후 공존 검증 필수
+
+## 신규 PG 작업 순서 (필수)
+
+1. **현재 운영·로컬에 있는 모든 PG 목록을 먼저 확인** (omspay/payso/ksnet/qbang …)
+2. 신규 코드는 PAYSO/OMSPAY 패턴을 **복사해 옆에 추가** (치환 금지)
+3. `scripts/deploy/required-pg-coexistence.json` 에 **신규 code + needles 추가**
+4. 로컬에서 `node scripts/deploy/verify-pg-coexistence.js server.js` 통과
+5. `Deploy-Noti.ps1`로 배포 (server.js 배포 시 게이트가 공존 검사)
+6. 배포 직후 운영에서 **기존 PG + 신규 PG 전부** 라우트·`*Url`·lib 존재 확인
+7. 하나라도 빠지면 **즉시 배포 중단·롤백/재배포**. “나중에” 금지
+
+## 배포 게이트
+
+- `Deploy-Noti.ps1` + `verify-pg-coexistence.js` 가
+  `required-pg-coexistence.json` 의 **모든** PG needles 를 검사한다.
+- 검사 실패 시 배포 **거부**. 게이트를 우회·완화하지 않는다.
+- 신규 PG를 넣은 뒤 required 목록을 안 늘리면, 다음 배포부터 그 PG도 보호되지 않으므로 **반드시 목록 확장**.
+
+## 완료 보고
+
+응답 말미에 공존 검증 결과를 명시한다: 예) `omspay+payso+ksnet+qbang(+신규) OK`.

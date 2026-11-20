@@ -3,5 +3,5 @@
   "icopayNotifyUrl": "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/PAYSO",
   "icopayOrderLookupUrl": "https://api.icopay.co.kr/api/middleware/notify/v1/order-lookup?order={order}",
   "timeoutMs": 25000,
-  "note": "Payso → POST https://noti.icopay.net/noti/payso (form postback). Comp-Id from X-Icopay-Comp-Id or order-lookup. Register Control Panel postback to this fixed URL."
+  "note": "PAYSO Webhooks -> POST https://noti.icopay.net/noti/payso . Default forward Content-Type is application/x-www-form-urlencoded. Merchant relay uses Comp-Id from X-Icopay-Comp-Id (notify response) or order-lookup fallback."
 }

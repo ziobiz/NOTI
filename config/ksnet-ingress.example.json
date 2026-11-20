@@ -1,7 +1,7 @@
 {
-    "enabled":  true,
-    "icopayNotifyUrl":  "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/KSNET",
-    "icopayOrderLookupUrl":  "https://api.icopay.co.kr/api/middleware/notify/v1/order-lookup?order={order}",
-    "timeoutMs":  25000,
-    "note":  "KSNET (overseas, USD only) approve notify from ICOPAY -> POST https://noti.icopay.net/noti/ksnet (JSON: authyn, trno, amt, authno, ordno, resultcd, Comp-Id, orderNo, currency=USD). Forwarded to ICOPAY pg-notify .../KSNET. Merchant name uses Comp-Id from payload / X-Icopay-Comp-Id or order-lookup fallback."
+  "enabled": true,
+  "icopayNotifyUrl": "https://api.icopay.co.kr/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/KSNET",
+  "icopayOrderLookupUrl": "https://api.icopay.co.kr/api/middleware/notify/v1/order-lookup?order={order}",
+  "timeoutMs": 25000,
+  "note": "KSNET overseas USD (showCard C/25) mirror JSON -> POST https://noti.icopay.net/noti/ksnet . Content-Type application/json. Comp-Id via X-Icopay-Comp-Id or order-lookup."
 }

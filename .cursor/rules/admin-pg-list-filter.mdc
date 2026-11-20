@@ -25,3 +25,9 @@ ICOPAY/NOTI에서 신규 결제대행사(PG) 탭을 넣을 때 **같은 오류�
 
 `server.js` 의 `getTransactionListLogs` 주석에 **`ADMIN_PG_LIST_FILTER_V1`** 이 있어야 한다.  
 배포 스크립트가 이 마커 없으면 실패시킨다.
+
+## 공존 (필수)
+
+기존 PG 탭/라우트 삭제 금지. 자세한 규칙은 `pg-additive-only-no-delete.mdc`.  
+배포 전후: `node scripts/deploy/verify-pg-coexistence.js server.js`  
+필수 목록: `scripts/deploy/required-pg-coexistence.json` (신규 PG 추가 시 반드시 확장).

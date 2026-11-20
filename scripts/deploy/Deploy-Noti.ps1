@@ -135,18 +135,38 @@ try {
         if (-not (Test-Path -LiteralPath $local)) {
             throw "로컬 파일 없음: $local"
         }
-        # 종합거래 PG 필터 회귀 방지: server.js 는 ADMIN_PG_LIST_FILTER_V1 필수
+        # PG additive 공존 게이트: required-pg-coexistence.json 의 모든 PG가 없으면 배포 거부
         if (($rel -replace '\\', '/') -eq 'server.js') {
-            $serverText = Get-Content -LiteralPath $local -Raw -Encoding UTF8
-            if ($serverText -notmatch 'ADMIN_PG_LIST_FILTER_V1') {
-                throw "배포 거부: server.js 에 ADMIN_PG_LIST_FILTER_V1 마커 없음 (getTransactionListLogs 공통 필터 누락). PG별 if (src===) 체인으로 되돌리지 마세요."
+            $verifyScript = Join-Path $ScriptDir 'verify-pg-coexistence.js'
+            $requiredJson = Join-Path $ScriptDir 'required-pg-coexistence.json'
+            if (-not (Test-Path -LiteralPath $verifyScript)) {
+                throw "배포 거부: 공존 검증 스크립트 없음: $verifyScript"
             }
-            $idxFn = $serverText.IndexOf('function getTransactionListLogs')
-            if ($idxFn -lt 0) { throw "배포 거부: getTransactionListLogs 함수를 찾지 못함" }
-            $fnSlice = $serverText.Substring($idxFn, [Math]::Min(2500, $serverText.Length - $idxFn))
-            if ($fnSlice -notmatch 'normalizeAdminPgSource\(src\)' -or $fnSlice -notmatch "known !== 'chillpay'") {
-                throw "배포 거부: getTransactionListLogs 가 ADMIN_PG_LIST_FILTER_V1 공통 필터 형태가 아님 (normalizeAdminPgSource 기반이어야 함)."
+            if (-not (Test-Path -LiteralPath $requiredJson)) {
+                throw "배포 거부: 공존 필수 목록 없음: $requiredJson"
             }
+            Write-Host "[GATE] local PG coexistence check..."
+            & node $verifyScript $local $requiredJson
+            if ($LASTEXITCODE -ne 0) {
+                throw "배포 거부: 로컬 server.js PG 공존 검증 실패 (기존 PG 삭제/누락). additive만 허용. required-pg-coexistence.json 확인."
+            }
+        }
+        # locales.js: PG 등록/표시 키 누락 시 키 문자열이 화면에 그대로 노출됨 → 배포 거부
+        if (($rel -replace '\\', '/') -eq 'locales.js') {
+            $requiredJson = Join-Path $ScriptDir 'required-pg-coexistence.json'
+            $cfg = Get-Content -LiteralPath $requiredJson -Raw -Encoding UTF8 | ConvertFrom-Json
+            $locText = Get-Content -LiteralPath $local -Raw -Encoding UTF8
+            foreach ($needle in @($cfg.localeNeedles)) {
+                if (-not $needle) { continue }
+                if ($locText.IndexOf([string]$needle) -lt 0) {
+                    throw ("배포 거부: locales.js 에 {0} 없음 (화면에 키 문자열이 노출됨)." -f $needle)
+                }
+                $hits = ([regex]::Matches($locText, [regex]::Escape([string]$needle))).Count
+                if ($hits -lt 5) {
+                    throw ("배포 거부: locales.js 의 {0} 가 {1}회만 있음 (ko/ja/en/th/zh 5개 언어 필요)." -f $needle, $hits)
+                }
+            }
+            Write-Host "[GATE] locales PG keys ok"
         }
         $remoteRel = ($rel -replace '\\', '/')
         $remotePath = ($remoteDir.TrimEnd('/') + '/' + $remoteRel)
@@ -161,34 +181,15 @@ try {
         Invoke-RemoteOrThrow $c "test -s '$remotePath' && ls -la '$remotePath'"
     }
 
-    # 원격 server.js 도 동일 마커 검증 (다른 경로로 덮인 직후 재배포 시 감지)
+    # 원격 server.js 도 동일 공존 검증 (업로드 직후·재시작 전)
     if ($Files | Where-Object { ($_ -replace '\\', '/') -eq 'server.js' }) {
-        $verifyJs = @'
-const fs = require('fs');
-const s = fs.readFileSync(process.argv[1], 'utf8');
-if (!s.includes('ADMIN_PG_LIST_FILTER_V1')) {
-  console.error('REMOTE_MISSING_ADMIN_PG_LIST_FILTER_V1');
-  process.exit(2);
-}
-const idx = s.indexOf('function getTransactionListLogs');
-if (idx < 0) {
-  console.error('REMOTE_MISSING_getTransactionListLogs');
-  process.exit(3);
-}
-const fn = s.slice(idx, idx + 2500);
-if (!fn.includes('normalizeAdminPgSource(src)') || !fn.includes("known !== 'chillpay'")) {
-  console.error('REMOTE_getTransactionListLogs_NOT_GENERIC');
-  process.exit(4);
-}
-console.log('ADMIN_PG_LIST_FILTER_V1 ok');
-'@
-        $verifyLocal = Join-Path $env:TEMP 'noti-verify-pg-filter.js'
-        Set-Content -LiteralPath $verifyLocal -Value $verifyJs -Encoding UTF8
-        $remoteVerify = ($remoteDir.TrimEnd('/') + '/scripts/noti-verify-pg-filter.js')
-        Invoke-RemoteOrThrow $c "mkdir -p '$remoteDir/scripts'"
-        Copy-ToRemote $c $verifyLocal $remoteVerify
-        Invoke-RemoteOrThrow $c "node '$remoteVerify' '$remoteDir/server.js'"
-        Remove-Item -LiteralPath $verifyLocal -Force -ErrorAction SilentlyContinue
+        $verifyScript = Join-Path $ScriptDir 'verify-pg-coexistence.js'
+        $requiredJson = Join-Path $ScriptDir 'required-pg-coexistence.json'
+        Invoke-RemoteOrThrow $c "mkdir -p '$remoteDir/scripts/deploy'"
+        Copy-ToRemote $c $verifyScript ($remoteDir.TrimEnd('/') + '/scripts/deploy/verify-pg-coexistence.js')
+        Copy-ToRemote $c $requiredJson ($remoteDir.TrimEnd('/') + '/scripts/deploy/required-pg-coexistence.json')
+        Write-Host "[GATE] remote PG coexistence check..."
+        Invoke-RemoteOrThrow $c "node '$remoteDir/scripts/deploy/verify-pg-coexistence.js' '$remoteDir/server.js' '$remoteDir/scripts/deploy/required-pg-coexistence.json'"
     }
 
     if (-not $SkipRestart) {

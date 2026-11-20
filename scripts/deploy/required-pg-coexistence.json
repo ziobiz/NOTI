@@ -1,0 +1,59 @@
+{
+  "note": "신규 PG 추가 시 여기에도 항목을 추가한다. Deploy-Noti.ps1 이 이 목록을 검사하며, 하나라도 없으면 배포를 거부한다. 기존 PG 삭제 금지.",
+  "required": [
+    {
+      "code": "omspay",
+      "needles": [
+        "app.post('/noti/omspay",
+        "omspayUrl:",
+        "lib/omspayNoti",
+        "p === 'omspay'",
+        "merchantsRegisterLink('omspay'"
+      ]
+    },
+    {
+      "code": "payso",
+      "needles": [
+        "app.post('/noti/payso",
+        "paysoUrl:",
+        "lib/paysoNoti",
+        "p === 'payso'",
+        "merchantsRegisterLink('payso'"
+      ]
+    },
+    {
+      "code": "ksnet",
+      "needles": [
+        "app.post('/noti/ksnet",
+        "ksnetUrl:",
+        "lib/ksnetNoti",
+        "p === 'ksnet'",
+        "merchantsRegisterLink('ksnet'"
+      ]
+    },
+    {
+      "code": "qbang",
+      "needles": [
+        "app.post('/noti/qbang",
+        "qbangUrl:",
+        "p === 'qbang'",
+        "merchantsRegisterLink('qbang'"
+      ]
+    }
+  ],
+  "globalNeedles": [
+    "ADMIN_PG_LIST_FILTER_V1",
+    "function normalizeAdminPgSource",
+    "function getNotiLogPgAcquirer"
+  ],
+  "localeNeedles": [
+    "merchants_nav_register_omspay",
+    "merchants_nav_register_payso",
+    "merchants_nav_register_ksnet",
+    "merchants_nav_register_qbang",
+    "pg_provider_omspay",
+    "pg_provider_payso",
+    "pg_provider_ksnet",
+    "pg_provider_qbang"
+  ]
+}

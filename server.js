@@ -23,9 +23,8 @@ const oxNoti = require('./lib/oxNoti');
 const ilkNoti = require('./lib/ilkNoti');
 const qxipayNoti = require('./lib/qxipayNoti');
 const omspayNoti = require('./lib/omspayNoti');
-const ksnetNoti = require('./lib/ksnetNoti');
 const paysoNoti = require('./lib/paysoNoti');
-const { createPaysoIngress } = require('./lib/paysoIngress');
+const ksnetNoti = require('./lib/ksnetNoti');
 const cryptoNoti = require('./lib/cryptoNoti');
 const qbangNoti = require('./lib/qbangNoti');
 const opsManual = require('./lib/opsManual');
@@ -645,8 +644,8 @@ const OX_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'ox-ingress.json');
 const ILK_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'ilk-ingress.json');
 const QXIPAY_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'qxipay-ingress.json');
 const OMSPAY_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'omspay-ingress.json');
-const KSNET_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'ksnet-ingress.json');
 const PAYSO_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'payso-ingress.json');
+const KSNET_INGRESS_CONFIG_PATH = path.join(CONFIG_DIR, 'ksnet-ingress.json');
 const TURNSTILE_CONFIG_PATH = path.join(CONFIG_DIR, 'turnstile.json');
 const TURNSTILE_SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const DEFAULT_SIDEBAR_TITLE = 'PG 노티 관리자';
@@ -1992,6 +1991,7 @@ function normalizeInternalTargetPgProvider(raw) {
   if (p === 'qxipay' || p === 'qxpay') return 'qxipay';
   if (p === 'qbang' || p === 'qbank' || p === 'qrbank') return 'qbang';
   if (p === 'omspay' || p === 'oms' || p === 'waylar') return 'omspay';
+  if (p === 'payso' || p === 'paysolutions' || p === 'paysolution') return 'payso';
   if (p === 'ksnet') return 'ksnet';
   return 'chillpay';
 }
@@ -2369,6 +2369,7 @@ function buildIcopayInternalTargetsCatalog(filterRaw) {
   else if (filter === 'qxipay' || filter === 'qxpay') want = 'qxipay';
   else if (filter === 'qbang' || filter === 'qbank' || filter === 'qrbank') want = 'qbang';
   else if (filter === 'omspay' || filter === 'oms' || filter === 'waylar') want = 'omspay';
+  else if (filter === 'payso' || filter === 'paysolutions' || filter === 'paysolution') want = 'payso';
   else if (filter === 'ksnet') want = 'ksnet';
   const list = getInternalTargetsList();
   const out = [];
@@ -2382,7 +2383,7 @@ function buildIcopayInternalTargetsCatalog(filterRaw) {
       id: String(t.id).trim(),
       name: String(t.name || t.id).trim(),
       pgProvider: pg,
-      label: [pg === 'ox' ? 'OXPAY' : pg === 'qxipay' ? 'QXIPAY' : pg === 'qbang' ? 'QBANG' : pg === 'omspay' ? 'OMSPAY' : pg === 'ksnet' ? 'KSNET' : pg === 'ilk' ? 'ILKPAY' : pg === 'elementpay' ? 'ElementPay' : pg === 'jpay' ? 'JPAY' : 'ChillPay', currency, t.id, t.name]
+      label: [pg === 'ox' ? 'OXPAY' : pg === 'qxipay' ? 'QXIPAY' : pg === 'qbang' ? 'QBANG' : pg === 'omspay' ? 'OMSPAY' : pg === 'payso' ? 'PAYSO' : pg === 'ksnet' ? 'KSNET' : pg === 'ilk' ? 'ILKPAY' : pg === 'elementpay' ? 'ElementPay' : pg === 'jpay' ? 'JPAY' : 'ChillPay', currency, t.id, t.name]
         .filter(Boolean)
         .join(' · '),
     };
@@ -6372,6 +6373,10 @@ function provisionFixedIngressMerchant(kind, body, meta) {
         resultIngressUrl: base + '/noti/result/' + pgKind,
         omspayWebhookUrl: pgKind === 'omspay' ? base + '/noti/omspay' : undefined,
         omspayResultUrl: pgKind === 'omspay' ? base + '/noti/result/omspay' : undefined,
+        paysoWebhookUrl: pgKind === 'payso' ? base + '/noti/payso' : undefined,
+        paysoResultUrl: pgKind === 'payso' ? base + '/noti/result/payso' : undefined,
+        ksnetWebhookUrl: pgKind === 'ksnet' ? base + '/noti/ksnet' : undefined,
+        ksnetResultUrl: pgKind === 'ksnet' ? base + '/noti/result/ksnet' : undefined,
         provisionRequestId: requestId || undefined,
       },
     },
@@ -6384,7 +6389,20 @@ function getFixedIngressMerchantProvision(merchantId, pgKind) {
   const m = MERCHANTS.get(id);
   if (!m) return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
   const kind = String(pgKind || inferMerchantPgKind(m) || '').toLowerCase();
-  const norm = kind === 'ilkpay' ? 'ilk' : kind === 'qxpay' ? 'qxipay' : kind === 'oms' || kind === 'waylar' ? 'omspay' : kind === 'qbank' || kind === 'qrbank' ? 'qbang' : kind;
+  const norm =
+    kind === 'ilkpay'
+      ? 'ilk'
+      : kind === 'qxpay'
+        ? 'qxipay'
+        : kind === 'oms' || kind === 'waylar'
+          ? 'omspay'
+          : kind === 'payso' || kind === 'paysolutions' || kind === 'paysolution'
+            ? 'payso'
+            : kind === 'ksnet'
+              ? 'ksnet'
+            : kind === 'qbank' || kind === 'qrbank'
+              ? 'qbang'
+              : kind;
   if (inferMerchantPgKind(m) !== norm) return { ok: false, status: 404, errorCode: 'MERCHANT_NOT_FOUND' };
   const base = String(process.env.NOTI_PUBLIC_BASE_URL || 'https://noti.icopay.net').replace(/\/+$/, '');
   return {
@@ -7425,20 +7443,30 @@ async function handleOmspayBrowserResult(req, res) {
     );
 }
 
-// ========== KSNET (OVERSEAS · USD ONLY) — OMSPAY 패턴 복제 ==========
-// ICOPAY KSNET 승인 후 JSON(authyn, trno, amt, authno, ordno, resultcd, Comp-Id, orderNo, currency=USD)
-// → POST /noti/ksnet → ICOPAY pg-notify/{token}/KSNET → Comp-Id 가맹 릴레이.
-function loadKsnetIngressConfig() {
-  const fromFile = loadJsonConfig(KSNET_INGRESS_CONFIG_PATH, {}) || {};
-  const envUrl = String(process.env.KSNET_ICOPAY_NOTIFY_URL || '').trim();
-  const envLookup = String(process.env.KSNET_ICOPAY_ORDER_LOOKUP_URL || '').trim();
+
+function loadPaysoIngressConfig() {
+  const fromFile = loadJsonConfig(PAYSO_INGRESS_CONFIG_PATH, {}) || {};
+  const envUrl = String(process.env.PAYSO_ICOPAY_NOTIFY_URL || '').trim();
+  const envLookup = String(process.env.PAYSO_ICOPAY_ORDER_LOOKUP_URL || '').trim();
   let icopayNotifyUrl = envUrl || String(fromFile.icopayNotifyUrl || '').trim();
-  // 동일 토큰 경로 폴백: OMSPAY ingress → /KSNET
-  if (!icopayNotifyUrl) {
+  // 예시 토큰(YOUR_INGRESS_TOKEN)이면 미설정으로 보고 OMSPAY/QXIPAY 경로에서 /PAYSO 폴백
+  if (!icopayNotifyUrl || /YOUR_INGRESS_TOKEN/i.test(icopayNotifyUrl)) {
+    icopayNotifyUrl = '';
     try {
       const oms = loadOmspayIngressConfig();
       const omsUrl = String((oms && oms.icopayNotifyUrl) || '').trim();
-      if (omsUrl) icopayNotifyUrl = omsUrl.replace(/\/OMSPAY\b/i, '/KSNET');
+      if (omsUrl && !/YOUR_INGRESS_TOKEN/i.test(omsUrl)) {
+        icopayNotifyUrl = omsUrl.replace(/\/OMSPAY\b/i, '/PAYSO').replace(/\/QXIPAY\b/i, '/PAYSO');
+      }
+    } catch (_) {}
+  }
+  if (!icopayNotifyUrl) {
+    try {
+      const qx = loadQxipayIngressConfig();
+      const qxUrl = String((qx && qx.icopayNotifyUrl) || '').trim();
+      if (qxUrl && !/YOUR_INGRESS_TOKEN/i.test(qxUrl)) {
+        icopayNotifyUrl = qxUrl.replace(/\/QXIPAY\b/i, '/PAYSO').replace(/\/OMSPAY\b/i, '/PAYSO');
+      }
     } catch (_) {}
   }
   let icopayOrderLookupUrl = envLookup || String(fromFile.icopayOrderLookupUrl || '').trim();
@@ -7446,6 +7474,505 @@ function loadKsnetIngressConfig() {
     try {
       const oms = loadOmspayIngressConfig();
       icopayOrderLookupUrl = String((oms && oms.icopayOrderLookupUrl) || '').trim();
+    } catch (_) {}
+  }
+  if (!icopayOrderLookupUrl) {
+    try {
+      const qx = loadQxipayIngressConfig();
+      icopayOrderLookupUrl = String((qx && qx.icopayOrderLookupUrl) || '').trim();
+    } catch (_) {}
+  }
+  return {
+    enabled: fromFile.enabled !== false,
+    icopayNotifyUrl,
+    icopayOrderLookupUrl,
+    timeoutMs: Math.max(
+      3000,
+      Math.min(120000, Number(fromFile.timeoutMs) || Number(process.env.PAYSO_ICOPAY_TIMEOUT_MS) || 25000),
+    ),
+    note: String(fromFile.note || '').trim(),
+  };
+}
+
+function getPaysoPublicIngressUrls() {
+  const base = String(process.env.NOTI_PUBLIC_BASE_URL || 'https://noti.icopay.net').replace(/\/+$/, '');
+  return {
+    paysoWebhookUrl: base + '/noti/payso',
+    paysoResultUrl: base + '/noti/result/payso',
+  };
+}
+
+function stampPaysoCompIdOnBody(body, compId) {
+  const out = body && typeof body === 'object' ? { ...body } : {};
+  const id = paysoNoti.cleanCompId(compId);
+  if (id) {
+    out.compId = id;
+    out.CompId = id;
+    out['Comp-Id'] = id;
+    if (!out.merchantId) out.merchantId = id;
+  }
+  return out;
+}
+
+async function forwardPaysoToIcopay(rawBodyStr, contentType, attempt, extraHeaders) {
+  const cfg = loadPaysoIngressConfig();
+  if (!cfg.enabled) {
+    return { ok: false, status: 503, data: 'PAYSO ingress disabled', headers: {} };
+  }
+  if (!cfg.icopayNotifyUrl) {
+    return { ok: false, status: 503, data: 'PAYSO ICOPAY notify URL not configured', headers: {} };
+  }
+  const headers = {
+    'Content-Type':
+      contentType && String(contentType).trim()
+        ? String(contentType).split(';')[0].trim() + '; charset=utf-8'
+        : 'application/x-www-form-urlencoded; charset=utf-8',
+  };
+  if (extraHeaders && typeof extraHeaders === 'object') {
+    Object.assign(headers, extraHeaders);
+  }
+  applyIcopayPgNotifyIngressHeaders(headers, cfg.icopayNotifyUrl, attempt || 1);
+  if (!headers['X-Icopay-Notify-Delivery']) {
+    headers['X-Icopay-Notify-Delivery'] = (attempt || 1) <= 1 ? 'LIVE' : 'RETRY';
+    headers['X-Noti-Attempt'] = String(Math.max(1, Math.floor(Number(attempt) || 1)));
+  }
+  try {
+    const res = await axios.post(cfg.icopayNotifyUrl, rawBodyStr || '', {
+      headers,
+      timeout: cfg.timeoutMs,
+      validateStatus: () => true,
+      transformResponse: [(d) => d],
+      responseType: 'text',
+    });
+    return { ok: res.status >= 200 && res.status < 300, status: res.status, data: res.data, headers: res.headers || {} };
+  } catch (e) {
+    console.error('[PAYSO] forward error', e.message || e);
+    return { ok: false, status: 502, data: String(e.message || e), headers: {} };
+  }
+}
+
+async function relayPaysoMerchantNotify(merchantId, merchant, notifyBody, rawBody, incomingContentType) {
+  const enableRelay = !!(merchant && merchant.enableRelay);
+  const targetUrl = merchant && merchant.callbackUrl ? String(merchant.callbackUrl).trim() : '';
+  let relaySuccess = false;
+  let relayFailReason = '';
+  let relayFormat = 'json';
+  if (enableRelay && targetUrl) {
+    const rf = String((merchant && merchant.relayFormat) || 'json').toLowerCase();
+    relayFormat = rf === 'form' ? 'form' : 'json';
+    let relayOpts = { contentType: 'application/json', rawBody: JSON.stringify(notifyBody || {}) };
+    if (relayFormat === 'form') {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v === undefined || v === null) continue;
+        params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      relayOpts = {
+        contentType: 'application/x-www-form-urlencoded',
+        rawBody: params.toString(),
+      };
+    }
+    try {
+      let relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+      relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+      if (!relaySuccess) {
+        relayFailReason =
+          'HTTP ' +
+          relayRes.status +
+          (relayRes.data && typeof relayRes.data === 'string' ? ': ' + String(relayRes.data).slice(0, 200) : '');
+        await new Promise((r) => setTimeout(r, 2000));
+        relayRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = relayRes.status >= 200 && relayRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      }
+    } catch (err) {
+      relayFailReason = err.code || err.message || String(err);
+      try {
+        await new Promise((r) => setTimeout(r, 2000));
+        const retryRes = await relayToMerchant(targetUrl, notifyBody, relayOpts);
+        relaySuccess = retryRes.status >= 200 && retryRes.status < 400;
+        if (relaySuccess) relayFailReason = '';
+      } catch (err2) {
+        if (!relayFailReason) relayFailReason = err2.code || err2.message || String(err2);
+      }
+    }
+  } else if (enableRelay && !targetUrl) {
+    relayFailReason = '가맹점 URL 없음';
+  }
+
+  appendPgNotiLog({
+    routeKey: 'payso/webhook',
+    merchantId,
+    kind: 'callback',
+    body: notifyBody,
+    rawBody: rawBody || undefined,
+    targetUrl: enableRelay ? targetUrl || '' : '',
+    contentType: incomingContentType,
+    env: 'live',
+    relayStatus: enableRelay ? (relaySuccess ? 'ok' : 'fail') : 'skip',
+    relayFailReason: relaySuccess ? '' : relayFailReason || '',
+    relayFormatUsed: enableRelay && relaySuccess ? relayFormat : undefined,
+    pgProvider: 'payso',
+  });
+  return { relaySuccess, relayFailReason };
+}
+
+async function handlePaysoWebhook(req, res) {
+  const cfg = loadPaysoIngressConfig();
+  const rawBodyStr = req.rawBodyBuffer ? req.rawBodyBuffer.toString('utf8') : '';
+  const incomingContentType =
+    (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
+  let body = req.body;
+  if (!body || typeof body !== 'object') body = {};
+  if (Object.keys(body).length === 0 && req.rawBodyBuffer && req.rawBodyBuffer.length) {
+    try {
+      body = JSON.parse(req.rawBodyBuffer.toString('utf8'));
+    } catch (_) {
+      const parsed = parseNotiRawBodyToObject(req.rawBodyBuffer, incomingContentType);
+      if (Object.keys(parsed).length) body = parsed;
+    }
+  }
+  const refno = String(paysoNoti.pick(body, ['refno', 'refNo', 'referenceNo']) || '').trim();
+  const merchantRef = String(paysoNoti.pick(body, ['merchantid', 'merchantId', 'merchantID']) || '').trim();
+  const order = String(paysoNoti.pick(body, ['orderNo', 'orderno', 'order', 'ref1']) || refno || merchantRef).trim();
+  console.log('[PAYSO] webhook', 'refno=', refno || '-', 'order=', order || '-');
+
+  if (!cfg.enabled) {
+    return res.status(503).send('PAYSO ingress disabled');
+  }
+  if (!cfg.icopayNotifyUrl) {
+    console.error('[PAYSO] icopayNotifyUrl not configured');
+    appendPgNotiLog({
+      routeKey: 'payso/webhook',
+      merchantId: '',
+      kind: 'callback',
+      body: Object.assign({ pgKind: 'payso' }, body),
+      rawBody: rawBodyStr || undefined,
+      targetUrl: '',
+      contentType: incomingContentType,
+      env: 'live',
+      relayStatus: 'fail',
+      relayFailReason: 'icopayNotifyUrl_missing',
+      pgProvider: 'payso',
+    });
+    return res.status(503).send('PAYSO ICOPAY URL not configured');
+  }
+
+  let forwardBody = rawBodyStr && String(rawBodyStr).trim() ? rawBodyStr : '';
+  if (!forwardBody) {
+    if ((incomingContentType || '').toLowerCase().includes('json')) {
+      forwardBody = JSON.stringify(body || {});
+    } else {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(body || {})) {
+        if (v === undefined || v === null) continue;
+        params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      forwardBody = params.toString();
+    }
+  }
+
+  const ico = await forwardPaysoToIcopay(
+    forwardBody,
+    incomingContentType || 'application/x-www-form-urlencoded',
+    1,
+  );
+  const extracted = extractIcopayCompIdAndOrderFromNotifyResult(ico);
+  const compIdHdr = paysoNoti.cleanCompId(extracted.compId);
+  const orderHdr = extracted.orderNo;
+
+  const outStatus = ico.status && Number.isFinite(Number(ico.status)) ? Number(ico.status) : 502;
+  const outCt =
+    paysoNoti.headerGetIgnoreCase(ico.headers, 'content-type') || 'application/json; charset=utf-8';
+  const outBody = ico.data != null ? ico.data : '';
+  console.log(
+    '[PAYSO] passthrough',
+    'refno=',
+    refno || '-',
+    'order=',
+    order || '-',
+    'http=',
+    outStatus,
+    'compId=',
+    compIdHdr || '(none)',
+  );
+  res.status(outStatus);
+  res.set('Content-Type', outCt);
+  res.send(outBody);
+
+  const baseNotifyBody = stampPaysoCompIdOnBody(
+    paysoNoti.mapPaysoToMerchantNotifyBody(body, orderHdr || order, { compId: compIdHdr, trnId: refno }),
+    compIdHdr,
+  );
+  if (!paysoNoti.paysoShouldNotifyMerchant(body)) {
+    appendPgNotiLog({
+      routeKey: 'payso/webhook',
+      merchantId: compIdHdr || '',
+      kind: 'callback',
+      body: baseNotifyBody,
+      rawBody: forwardBody || undefined,
+      targetUrl: '',
+      contentType: incomingContentType,
+      env: 'live',
+      relayStatus: 'skip',
+      relayFailReason: 'event_skip',
+      pgProvider: 'payso',
+    });
+    return;
+  }
+
+  setImmediate(() => {
+    Promise.resolve()
+      .then(async () => {
+        let compId = compIdHdr || paysoNoti.cleanCompId(paysoNoti.pick(body, ['compId', 'CompId', 'Comp-Id']));
+        const lookupCandidates = [];
+        const pushLookupCand = (c) => {
+          const v = String(c || '').trim();
+          if (!v) return;
+          if (lookupCandidates.indexOf(v) < 0) lookupCandidates.push(v);
+        };
+        pushLookupCand(orderHdr);
+        pushLookupCand(refno);
+        pushLookupCand(merchantRef);
+        pushLookupCand(paysoNoti.pick(body, ['orderNo', 'orderno', 'order']));
+        pushLookupCand(order);
+        const orderForComp = lookupCandidates[0] || refno || merchantRef || order || '';
+        if (!compId && cfg.icopayOrderLookupUrl) {
+          for (const cand of lookupCandidates) {
+            try {
+              const lookupUrl = String(cfg.icopayOrderLookupUrl).replace(
+                /{order}/gi,
+                encodeURIComponent(cand),
+              );
+              const lr = await axios.get(lookupUrl, { timeout: 8000, validateStatus: () => true });
+              const looked = extractIcopayCompIdAndOrderFromNotifyResult({
+                headers: lr.headers || {},
+                data: lr.data,
+              });
+              let fromData = looked.compId;
+              if (!fromData && lr.data && typeof lr.data === 'object') {
+                const nest = lr.data.data && typeof lr.data.data === 'object' ? lr.data.data : lr.data;
+                fromData = String(nest.compId || nest.CompId || nest.merchantId || '').trim();
+              }
+              if (fromData) {
+                compId = paysoNoti.cleanCompId(fromData);
+                console.log('[PAYSO] order-lookup hit', 'cand=', cand, 'compId=', compId);
+                break;
+              }
+            } catch (_) {}
+          }
+        }
+        const compIdBase = paysoNoti.cleanCompId(compId);
+        let match = findMerchantByCompIdForCrypto(compIdBase);
+        if (compIdBase) {
+          const paysoSlot = MERCHANTS.get(compIdBase + '#payso');
+          if (paysoSlot && String(paysoSlot.callbackUrl || paysoSlot.resultUrl || '').trim()) {
+            match = { merchantId: compIdBase + '#payso', merchant: paysoSlot, via: 'payso-slot' };
+          }
+        }
+        if (!match) {
+          console.warn(
+            '[PAYSO] merchant notify skipped',
+            'compId=',
+            compIdBase || '(none)',
+            'order=',
+            orderForComp || '-',
+          );
+          appendPgNotiLog({
+            routeKey: 'payso/webhook',
+            merchantId: compIdBase || '',
+            kind: 'callback',
+            body: stampPaysoCompIdOnBody(
+              paysoNoti.mapPaysoToMerchantNotifyBody(body, orderHdr || orderForComp, { compId: compIdBase, trnId: refno }),
+              compIdBase,
+            ),
+            rawBody: forwardBody || undefined,
+            targetUrl: '',
+            contentType: incomingContentType,
+            env: 'live',
+            relayStatus: 'fail',
+            relayFailReason: compIdBase ? 'Merchant not found for Comp-Id' : 'Missing X-Icopay-Comp-Id',
+            pgProvider: 'payso',
+          });
+          return;
+        }
+        const notifyBody = stampPaysoCompIdOnBody(
+          paysoNoti.mapPaysoToMerchantNotifyBody(body, orderHdr || orderForComp, { compId: compIdBase, trnId: refno }),
+          compIdBase,
+        );
+        try {
+          await relayPaysoMerchantNotify(
+            match.merchantId,
+            match.merchant,
+            notifyBody,
+            forwardBody,
+            incomingContentType,
+          );
+        } catch (e) {
+          console.error('[PAYSO] merchant relay error', e.message || e);
+          appendPgNotiLog({
+            routeKey: 'payso/webhook',
+            merchantId: match.merchantId || compIdBase || '',
+            kind: 'callback',
+            body: notifyBody,
+            rawBody: forwardBody || undefined,
+            targetUrl: String((match.merchant && match.merchant.callbackUrl) || '').trim(),
+            contentType: incomingContentType,
+            env: 'live',
+            relayStatus: 'fail',
+            relayFailReason: e.message || String(e),
+            pgProvider: 'payso',
+          });
+        }
+      })
+      .catch((e) => {
+        console.error('[PAYSO] merchant notify async error', e && e.message ? e.message : e);
+        appendPgNotiLog({
+          routeKey: 'payso/webhook',
+          merchantId: compIdHdr || '',
+          kind: 'callback',
+          body: baseNotifyBody,
+          rawBody: forwardBody || undefined,
+          targetUrl: '',
+          contentType: incomingContentType,
+          env: 'live',
+          relayStatus: 'fail',
+          relayFailReason: e && e.message ? e.message : String(e),
+          pgProvider: 'payso',
+        });
+      });
+  });
+}
+
+function extractPaysoBrowserPayload(req) {
+  const q = req.query && typeof req.query === 'object' ? req.query : {};
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  const body = Object.assign({}, q, b);
+  const refno = String(paysoNoti.pick(body, ['refno', 'refNo', 'referenceNo']) || '').trim();
+  const merchantRef = String(paysoNoti.pick(body, ['merchantid', 'merchantId', 'merchantID']) || '').trim();
+  const order = String(paysoNoti.pick(body, ['orderNo', 'orderno', 'order', 'ref1']) || refno || merchantRef).trim();
+  const compId = paysoNoti.cleanCompId(paysoNoti.pick(body, ['compId', 'CompId', 'Comp-Id']));
+  const incomingContentType =
+    (req.get && req.get('Content-Type')) ||
+    (req.headers && req.headers['content-type']) ||
+    'application/json';
+  return { body, refno, merchantRef, order, compId, incomingContentType };
+}
+
+async function handlePaysoBrowserResult(req, res) {
+  const payload = extractPaysoBrowserPayload(req);
+  let compId = String(payload.compId || '').trim();
+  const orderForComp = String(payload.order || payload.refno || payload.merchantRef || '').trim();
+  const cfg = loadPaysoIngressConfig();
+  if (!compId && orderForComp && cfg.icopayOrderLookupUrl) {
+    try {
+      const lookupUrl = String(cfg.icopayOrderLookupUrl).replace(
+        /{order}/gi,
+        encodeURIComponent(orderForComp),
+      );
+      const lr = await axios.get(lookupUrl, { timeout: 8000, validateStatus: () => true });
+      const looked = extractIcopayCompIdAndOrderFromNotifyResult({
+        headers: lr.headers || {},
+        data: lr.data,
+      });
+      if (looked.compId) compId = paysoNoti.cleanCompId(looked.compId);
+    } catch (_) {}
+  }
+  let match = compId ? findMerchantByCompIdForCrypto(compId) : null;
+  if (compId && (!match || !String(match.merchantId || '').includes('#payso'))) {
+    const paysoSlot = MERCHANTS.get(String(compId) + '#payso');
+    if (paysoSlot && String(paysoSlot.callbackUrl || paysoSlot.resultUrl || '').trim()) {
+      match = { merchantId: String(compId) + '#payso', merchant: paysoSlot, via: 'payso-slot' };
+    }
+  }
+  const notifyBody = stampPaysoCompIdOnBody(
+    paysoNoti.mapPaysoToMerchantNotifyBody(payload.body, orderForComp, {
+      compId: (match && match.merchantId) || compId || '',
+      trnId: payload.refno || '',
+    }),
+    (match && match.merchantId) || compId || '',
+  );
+  let targetUrl = '';
+  if (match && match.merchant) {
+    const enableRelay = match.merchant.enableRelay !== false;
+    targetUrl =
+      (typeof resolveJpayResultBrowserForwardUrl === 'function'
+        ? resolveJpayResultBrowserForwardUrl(match.merchant, enableRelay)
+        : '') || String(match.merchant.resultUrl || '').trim();
+  }
+  appendPgNotiLog({
+    routeKey: 'payso/result',
+    merchantId: (match && match.merchantId) || compId || '',
+    kind: 'result',
+    body: notifyBody,
+    targetUrl: targetUrl || '',
+    contentType: payload.incomingContentType || '',
+    env: typeof APP_ENV !== 'undefined' && APP_ENV === 'test' ? 'sandbox' : 'production',
+    pgProvider: 'payso',
+    relayStatus: targetUrl ? 'ok' : 'skip',
+    relayFailReason: targetUrl ? '' : compId ? 'resultUrl_empty' : 'Missing Comp-Id',
+  });
+  if (targetUrl && String(req.method || 'GET').toUpperCase() === 'GET') {
+    try {
+      const url = new URL(targetUrl.trim());
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v === undefined || v === null || v === '') continue;
+        url.searchParams.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      return res.redirect(302, url.toString());
+    } catch (_) {
+      const sep = targetUrl.includes('?') ? '&' : '?';
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(notifyBody || {})) {
+        if (v == null || v === '') continue;
+        qs.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      return res.redirect(302, targetUrl + sep + qs.toString());
+    }
+  }
+  res
+    .status(200)
+    .type('html')
+    .send(
+      '<!DOCTYPE html><html><head><meta charset="utf-8"><title>PAYSO</title></head><body style="font-family:sans-serif;padding:24px"><h2>Payment</h2><p>OK</p></body></html>',
+    );
+}
+
+function loadKsnetIngressConfig() {
+  const fromFile = loadJsonConfig(KSNET_INGRESS_CONFIG_PATH, {}) || {};
+  const envUrl = String(process.env.KSNET_ICOPAY_NOTIFY_URL || '').trim();
+  const envLookup = String(process.env.KSNET_ICOPAY_ORDER_LOOKUP_URL || '').trim();
+  let icopayNotifyUrl = envUrl || String(fromFile.icopayNotifyUrl || '').trim();
+  if (!icopayNotifyUrl || /YOUR_INGRESS_TOKEN/i.test(icopayNotifyUrl)) {
+    icopayNotifyUrl = '';
+    try {
+      const oms = loadOmspayIngressConfig();
+      const omsUrl = String((oms && oms.icopayNotifyUrl) || '').trim();
+      if (omsUrl && !/YOUR_INGRESS_TOKEN/i.test(omsUrl)) {
+        icopayNotifyUrl = omsUrl.replace(/\/OMSPAY\b/i, '/KSNET').replace(/\/QXIPAY\b/i, '/KSNET');
+      }
+    } catch (_) {}
+  }
+  if (!icopayNotifyUrl) {
+    try {
+      const qx = loadQxipayIngressConfig();
+      const qxUrl = String((qx && qx.icopayNotifyUrl) || '').trim();
+      if (qxUrl && !/YOUR_INGRESS_TOKEN/i.test(qxUrl)) {
+        icopayNotifyUrl = qxUrl.replace(/\/QXIPAY\b/i, '/KSNET').replace(/\/OMSPAY\b/i, '/KSNET');
+      }
+    } catch (_) {}
+  }
+  let icopayOrderLookupUrl = envLookup || String(fromFile.icopayOrderLookupUrl || '').trim();
+  if (!icopayOrderLookupUrl) {
+    try {
+      const oms = loadOmspayIngressConfig();
+      icopayOrderLookupUrl = String((oms && oms.icopayOrderLookupUrl) || '').trim();
+    } catch (_) {}
+  }
+  if (!icopayOrderLookupUrl) {
+    try {
+      const qx = loadQxipayIngressConfig();
+      icopayOrderLookupUrl = String((qx && qx.icopayOrderLookupUrl) || '').trim();
     } catch (_) {}
   }
   return {
@@ -7469,7 +7996,15 @@ function getKsnetPublicIngressUrls() {
 }
 
 function stampKsnetCompIdOnBody(body, compId) {
-  return stampOmspayCompIdOnBody(body, compId);
+  const out = body && typeof body === 'object' ? { ...body } : {};
+  const id = ksnetNoti.cleanCompId(compId);
+  if (id) {
+    out.compId = id;
+    out.CompId = id;
+    out['Comp-Id'] = id;
+    if (!out.merchantId) out.merchantId = id;
+  }
+  return out;
 }
 
 async function forwardKsnetToIcopay(rawBodyStr, contentType, attempt, extraHeaders) {
@@ -7495,7 +8030,7 @@ async function forwardKsnetToIcopay(rawBodyStr, contentType, attempt, extraHeade
     headers['X-Noti-Attempt'] = String(Math.max(1, Math.floor(Number(attempt) || 1)));
   }
   try {
-    const res = await axios.post(cfg.icopayNotifyUrl, rawBodyStr || '', {
+    const res = await axios.post(cfg.icopayNotifyUrl, rawBodyStr || '{}', {
       headers,
       timeout: cfg.timeoutMs,
       validateStatus: () => true,
@@ -7590,9 +8125,20 @@ async function handleKsnetWebhook(req, res) {
       if (Object.keys(parsed).length) body = parsed;
     }
   }
-  const trno = String(ksnetNoti.pick(body, ['trno', 'Trno', 'TRNO']) || '').trim();
-  const order = String(ksnetNoti.pick(body, ['orderNo', 'OrderNo', 'ordno', 'Ordno', 'order']) || '').trim();
-  console.log('[KSNET] webhook', 'trno=', trno || '-', 'order=', order || '-');
+  const trno = String(ksnetNoti.pick(body, ['trno', 'TrNo', 'TRNO', 'transactionId']) || '').trim();
+  const ordno = String(ksnetNoti.pick(body, ['ordno', 'OrdNo', 'ORDNO', 'orderNo', 'order', 'ref1']) || '').trim();
+  const amt = String(ksnetNoti.pick(body, ['amt', 'Amt', 'AMT', 'amount', 'Amount']) || '').trim();
+  const authyn = String(ksnetNoti.pick(body, ['authyn', 'authYn', 'AUTHYN']) || '').trim();
+  const order = ordno || trno;
+  const compIdBody = ksnetNoti.cleanCompId(
+    ksnetNoti.pick(body, ['compId', 'CompId', 'Comp-Id', 'merchantId']),
+  );
+  const compIdReqHdr = ksnetNoti.cleanCompId(
+    ksnetNoti.headerGetIgnoreCase(req.headers, 'x-icopay-comp-id') ||
+      ksnetNoti.headerGetIgnoreCase(req.headers, 'x-comp-id') ||
+      ksnetNoti.headerGetIgnoreCase(req.headers, 'Comp-Id'),
+  );
+  console.log('[KSNET] webhook', 'trno=', trno || '-', 'order=', order || '-', 'amt=', amt || '-', 'authyn=', authyn || '-');
 
   if (!cfg.enabled) {
     return res.status(503).send('KSNET ingress disabled');
@@ -7601,7 +8147,7 @@ async function handleKsnetWebhook(req, res) {
     console.error('[KSNET] icopayNotifyUrl not configured');
     appendPgNotiLog({
       routeKey: 'ksnet/webhook',
-      merchantId: '',
+      merchantId: compIdReqHdr || compIdBody || '',
       kind: 'callback',
       body: Object.assign({ pgKind: 'ksnet' }, body),
       rawBody: rawBodyStr || undefined,
@@ -7615,21 +8161,16 @@ async function handleKsnetWebhook(req, res) {
     return res.status(503).send('KSNET ICOPAY URL not configured');
   }
 
-  const forwardBody =
-    rawBodyStr && String(rawBodyStr).trim() ? rawBodyStr : JSON.stringify(body || {});
-  const passHeaders = {};
-  const bodyCompId = String(
-    ksnetNoti.pick(body, ['Comp-Id', 'compId', 'CompId', 'merchantId']) || '',
-  ).trim();
+  let forwardBody = rawBodyStr && String(rawBodyStr).trim() ? rawBodyStr : '';
+  if (!forwardBody) forwardBody = JSON.stringify(body || {});
 
   const ico = await forwardKsnetToIcopay(
     forwardBody,
     incomingContentType || 'application/json',
     1,
-    passHeaders,
   );
   const extracted = extractIcopayCompIdAndOrderFromNotifyResult(ico);
-  const compIdHdr = extracted.compId || bodyCompId;
+  const compIdHdr = ksnetNoti.cleanCompId(extracted.compId || compIdReqHdr || compIdBody);
   const orderHdr = extracted.orderNo;
 
   const outStatus = ico.status && Number.isFinite(Number(ico.status)) ? Number(ico.status) : 502;
@@ -7651,8 +8192,10 @@ async function handleKsnetWebhook(req, res) {
   res.set('Content-Type', outCt);
   res.send(outBody);
 
-  // 로그분석·노티거래내역에 즉시 반영 (가맹 릴레이는 비동기)
-  const baseNotifyBody = stampKsnetCompIdOnBody(ksnetNoti.mapKsnetToMerchantNotifyBody(body), compIdHdr);
+  const baseNotifyBody = stampKsnetCompIdOnBody(
+    ksnetNoti.mapKsnetToMerchantNotifyBody(body, orderHdr || order, { compId: compIdHdr, trnId: trno }),
+    compIdHdr,
+  );
   if (!ksnetNoti.ksnetShouldNotifyMerchant(body)) {
     appendPgNotiLog({
       routeKey: 'ksnet/webhook',
@@ -7673,18 +8216,18 @@ async function handleKsnetWebhook(req, res) {
   setImmediate(() => {
     Promise.resolve()
       .then(async () => {
-        let compId = compIdHdr || String(body.compId || body.CompId || body['Comp-Id'] || '').trim();
+        let compId = compIdHdr || compIdBody;
         const lookupCandidates = [];
         const pushLookupCand = (c) => {
           const v = String(c || '').trim();
           if (!v) return;
           if (lookupCandidates.indexOf(v) < 0) lookupCandidates.push(v);
         };
-        pushLookupCand(ksnetNoti.pick(body, ['orderNo', 'OrderNo', 'ordno', 'Ordno', 'order']));
         pushLookupCand(orderHdr);
-        pushLookupCand(order);
+        pushLookupCand(ordno);
         pushLookupCand(trno);
-        const orderForComp = lookupCandidates[0] || trno || '';
+        pushLookupCand(order);
+        const orderForComp = lookupCandidates[0] || trno || order || '';
         if (!compId && cfg.icopayOrderLookupUrl) {
           for (const cand of lookupCandidates) {
             try {
@@ -7703,20 +8246,19 @@ async function handleKsnetWebhook(req, res) {
                 fromData = String(nest.compId || nest.CompId || nest.merchantId || '').trim();
               }
               if (fromData) {
-                compId = String(fromData).split('#')[0].trim();
+                compId = ksnetNoti.cleanCompId(fromData);
                 console.log('[KSNET] order-lookup hit', 'cand=', cand, 'compId=', compId);
                 break;
               }
             } catch (_) {}
           }
         }
-        // Comp-Id 본문에는 base Comp-Id 만 (…#ksnet 슬롯 ID는 가맹 본문에 넣지 않음)
-        const compIdBase = String(compId || '').split('#')[0].trim();
+        const compIdBase = ksnetNoti.cleanCompId(compId);
         let match = findMerchantByCompIdForCrypto(compIdBase);
         if (compIdBase) {
-          const ksSlot = MERCHANTS.get(compIdBase + '#ksnet');
-          if (ksSlot && String(ksSlot.callbackUrl || ksSlot.resultUrl || '').trim()) {
-            match = { merchantId: compIdBase + '#ksnet', merchant: ksSlot, via: 'ksnet-slot' };
+          const ksnetSlot = MERCHANTS.get(compIdBase + '#ksnet');
+          if (ksnetSlot && String(ksnetSlot.callbackUrl || ksnetSlot.resultUrl || '').trim()) {
+            match = { merchantId: compIdBase + '#ksnet', merchant: ksnetSlot, via: 'ksnet-slot' };
           }
         }
         if (!match) {
@@ -7731,7 +8273,10 @@ async function handleKsnetWebhook(req, res) {
             routeKey: 'ksnet/webhook',
             merchantId: compIdBase || '',
             kind: 'callback',
-            body: stampKsnetCompIdOnBody(ksnetNoti.mapKsnetToMerchantNotifyBody(body), compIdBase),
+            body: stampKsnetCompIdOnBody(
+              ksnetNoti.mapKsnetToMerchantNotifyBody(body, orderHdr || orderForComp, { compId: compIdBase, trnId: trno }),
+              compIdBase,
+            ),
             rawBody: forwardBody || undefined,
             targetUrl: '',
             contentType: incomingContentType,
@@ -7743,7 +8288,7 @@ async function handleKsnetWebhook(req, res) {
           return;
         }
         const notifyBody = stampKsnetCompIdOnBody(
-          ksnetNoti.mapKsnetToMerchantNotifyBody(body),
+          ksnetNoti.mapKsnetToMerchantNotifyBody(body, orderHdr || orderForComp, { compId: compIdBase, trnId: trno }),
           compIdBase,
         );
         try {
@@ -7758,7 +8303,7 @@ async function handleKsnetWebhook(req, res) {
           console.error('[KSNET] merchant relay error', e.message || e);
           appendPgNotiLog({
             routeKey: 'ksnet/webhook',
-            merchantId: match.merchantId || compId || '',
+            merchantId: match.merchantId || compIdBase || '',
             kind: 'callback',
             body: notifyBody,
             rawBody: forwardBody || undefined,
@@ -7775,7 +8320,7 @@ async function handleKsnetWebhook(req, res) {
         console.error('[KSNET] merchant notify async error', e && e.message ? e.message : e);
         appendPgNotiLog({
           routeKey: 'ksnet/webhook',
-          merchantId: compIdHdr || '',
+          merchantId: compIdHdr || compIdBody || '',
           kind: 'callback',
           body: baseNotifyBody,
           rawBody: forwardBody || undefined,
@@ -7794,23 +8339,20 @@ function extractKsnetBrowserPayload(req) {
   const q = req.query && typeof req.query === 'object' ? req.query : {};
   const b = req.body && typeof req.body === 'object' ? req.body : {};
   const body = Object.assign({}, q, b);
-  const order = String(
-    ksnetNoti.pick(body, ['orderNo', 'OrderNo', 'ordno', 'Ordno', 'order', 'trno']) || '',
-  ).trim();
-  const compId = String(
-    ksnetNoti.pick(body, ['compId', 'CompId', 'Comp-Id', 'merchantId']) || '',
-  ).trim();
+  const trno = String(ksnetNoti.pick(body, ['trno', 'TrNo', 'TRNO', 'transactionId']) || '').trim();
+  const ordno = String(ksnetNoti.pick(body, ['ordno', 'OrdNo', 'ORDNO', 'orderNo', 'order', 'ref1']) || '').trim();
+  const compId = ksnetNoti.cleanCompId(ksnetNoti.pick(body, ['compId', 'CompId', 'Comp-Id', 'merchantId']));
   const incomingContentType =
     (req.get && req.get('Content-Type')) ||
     (req.headers && req.headers['content-type']) ||
     'application/json';
-  return { body, order, compId, incomingContentType };
+  return { body, trno, ordno, order: ordno || trno, compId, incomingContentType };
 }
 
 async function handleKsnetBrowserResult(req, res) {
   const payload = extractKsnetBrowserPayload(req);
   let compId = String(payload.compId || '').trim();
-  const orderForComp = String(payload.order || '').trim();
+  const orderForComp = String(payload.order || payload.trno || '').trim();
   const cfg = loadKsnetIngressConfig();
   if (!compId && orderForComp && cfg.icopayOrderLookupUrl) {
     try {
@@ -7823,19 +8365,21 @@ async function handleKsnetBrowserResult(req, res) {
         headers: lr.headers || {},
         data: lr.data,
       });
-      if (looked.compId) compId = looked.compId;
+      if (looked.compId) compId = ksnetNoti.cleanCompId(looked.compId);
     } catch (_) {}
   }
   let match = compId ? findMerchantByCompIdForCrypto(compId) : null;
-  // KSNET 전용 슬롯(#ksnet) 우선
   if (compId && (!match || !String(match.merchantId || '').includes('#ksnet'))) {
-    const ksSlot = MERCHANTS.get(String(compId) + '#ksnet');
-    if (ksSlot && String(ksSlot.callbackUrl || ksSlot.resultUrl || '').trim()) {
-      match = { merchantId: String(compId) + '#ksnet', merchant: ksSlot, via: 'ksnet-slot' };
+    const ksnetSlot = MERCHANTS.get(String(compId) + '#ksnet');
+    if (ksnetSlot && String(ksnetSlot.callbackUrl || ksnetSlot.resultUrl || '').trim()) {
+      match = { merchantId: String(compId) + '#ksnet', merchant: ksnetSlot, via: 'ksnet-slot' };
     }
   }
   const notifyBody = stampKsnetCompIdOnBody(
-    ksnetNoti.mapKsnetToMerchantNotifyBody(payload.body),
+    ksnetNoti.mapKsnetToMerchantNotifyBody(payload.body, orderForComp, {
+      compId: (match && match.merchantId) || compId || '',
+      trnId: payload.trno || '',
+    }),
     (match && match.merchantId) || compId || '',
   );
   let targetUrl = '';
@@ -7884,21 +8428,6 @@ async function handleKsnetBrowserResult(req, res) {
     );
 }
 
-/** PAYSO — Control Panel postback → ICOPAY …/PAYSO + 노티거래내역 적재 */
-const paysoIngress = createPaysoIngress({
-  CONFIG_DIR,
-  loadJsonConfig,
-  loadOmspayIngressConfig,
-  applyIcopayPgNotifyIngressHeaders,
-  extractIcopayCompIdAndOrderFromNotifyResult,
-  parseNotiRawBodyToObject,
-  findMerchantByCompIdForCrypto,
-  MERCHANTS,
-  relayToMerchant,
-  appendPgNotiLog,
-  stampOmspayCompIdOnBody,
-});
-const handlePaysoWebhook = (req, res) => paysoIngress.handlePaysoWebhook(req, res);
 
 async function handleQxipayWebhook(req, res) {
   const cfg = loadQxipayIngressConfig();
@@ -9857,8 +10386,8 @@ function getNotiLogPgAcquirer(log) {
   if (explicit === 'qxipay' || explicit === 'qxpay') return 'qxipay';
   if (explicit === 'qbang' || explicit === 'qbank' || explicit === 'qrbank') return 'qbang';
   if (explicit === 'omspay' || explicit === 'oms' || explicit === 'waylar') return 'omspay';
-  if (explicit === 'ksnet') return 'ksnet';
   if (explicit === 'payso' || explicit === 'paysolutions' || explicit === 'paysolution') return 'payso';
+  if (explicit === 'ksnet') return 'ksnet';
   if (explicit === 'elementpay' || explicit === 'ep') return 'elementpay';
   if (explicit === 'jpay') return 'jpay';
   if (explicit === 'chillpay' || explicit === 'chill') return 'chillpay';
@@ -9869,8 +10398,8 @@ function getNotiLogPgAcquirer(log) {
   if (rk.startsWith('qxipay/') || rk === 'qxipay') return 'qxipay';
   if (rk.startsWith('qbang/') || rk === 'qbang') return 'qbang';
   if (rk.startsWith('omspay/') || rk === 'omspay') return 'omspay';
-  if (rk.startsWith('ksnet/') || rk === 'ksnet') return 'ksnet';
   if (rk.startsWith('payso/') || rk === 'payso') return 'payso';
+  if (rk.startsWith('ksnet/') || rk === 'ksnet') return 'ksnet';
   if (rk.startsWith('elementpay/') || rk === 'elementpay') return 'elementpay';
   if (rk.startsWith('jpay/')) return 'jpay';
   return 'chillpay';
@@ -9887,8 +10416,8 @@ function icopayAmountPgKeyFromLog(log) {
     p === 'qxipay' ||
     p === 'qbang' ||
     p === 'omspay' ||
-    p === 'ksnet' ||
-    p === 'payso'
+    p === 'payso' ||
+    p === 'ksnet'
     ? 'jpay'
     : 'chillpay';
 }
@@ -9903,8 +10432,8 @@ function normalizeAdminPgSource(raw) {
   if (p === 'qxipay' || p === 'qxpay') return 'qxipay';
   if (p === 'qbang' || p === 'qbank' || p === 'qrbank') return 'qbang';
   if (p === 'omspay' || p === 'oms' || p === 'waylar') return 'omspay';
-  if (p === 'ksnet') return 'ksnet';
   if (p === 'payso' || p === 'paysolutions' || p === 'paysolution') return 'payso';
+  if (p === 'ksnet') return 'ksnet';
   if (p === 'elementpay' || p === 'ep' || p === 'element') return 'elementpay';
   if (p === 'jpay') return 'jpay';
   if (p === 'chillpay' || p === 'chill') return 'chillpay';
@@ -9912,18 +10441,41 @@ function normalizeAdminPgSource(raw) {
 }
 
 function acquirerLabelFromLog(locale, log) {
-  const pg = getNotiLogPgAcquirer(log);
+  return pgProviderDisplayLabel(locale, getNotiLogPgAcquirer(log));
+}
+
+/**
+ * UI 표시용 PG 라벨 (전산대상 목록·가맹 CSV·요약 등 공통).
+ * omspay/payso/ksnet 등을 빠뜨리면 ChillPay로 잘못 보이는 회귀를 막는다.
+ */
+function pgProviderDisplayLabel(locale, pgRaw) {
+  const pg =
+    normalizeAdminPgSource(pgRaw) ||
+    normalizeInternalTargetPgProvider(pgRaw) ||
+    'chillpay';
   if (pg === 'crypto') return t(locale, 'pg_provider_crypto') || 'CRYPTO';
   if (pg === 'ox') return t(locale, 'pg_provider_ox') || 'OXPAY';
   if (pg === 'ilk') return t(locale, 'pg_provider_ilk') || 'ILKPAY';
   if (pg === 'qxipay') return t(locale, 'pg_provider_qxipay') || 'QXIPAY';
   if (pg === 'qbang') return t(locale, 'pg_provider_qbang') || 'QBANG';
   if (pg === 'omspay') return t(locale, 'pg_provider_omspay') || 'OMSPAY';
-  if (pg === 'ksnet') return t(locale, 'pg_provider_ksnet') || 'KSNET';
   if (pg === 'payso') return t(locale, 'pg_provider_payso') || 'PAYSO';
+  if (pg === 'ksnet') return t(locale, 'pg_provider_ksnet') || 'KSNET';
   if (pg === 'elementpay') return t(locale, 'pg_provider_elementpay') || 'ElementPay';
   if (pg === 'jpay') return t(locale, 'pg_provider_jpay') || 'JPAY';
   return t(locale, 'pg_provider_chillpay') || 'ChillPay';
+}
+
+/** 가맹점 목록/CSV용 PG 라벨 (merchants_pg_provider_* 우선) */
+function merchantPgProviderDisplayLabel(locale, pgRaw) {
+  const pg =
+    normalizeAdminPgSource(pgRaw) ||
+    normalizeInternalTargetPgProvider(pgRaw) ||
+    'chillpay';
+  const key = 'merchants_pg_provider_' + pg;
+  const v = t(locale, key);
+  if (v && v !== key) return v;
+  return pgProviderDisplayLabel(locale, pg);
 }
 
 /** 전산/개발 노티 로그 행의 PG: 저장된 pgProvider 또는 전산 대상 설정 */
@@ -9935,6 +10487,7 @@ function getInternalLogPgAcquirer(log) {
   if (explicit === 'qxipay' || explicit === 'qxpay') return 'qxipay';
   if (explicit === 'qbang' || explicit === 'qbank' || explicit === 'qrbank') return 'qbang';
   if (explicit === 'omspay' || explicit === 'oms' || explicit === 'waylar') return 'omspay';
+  if (explicit === 'payso' || explicit === 'paysolutions' || explicit === 'paysolution') return 'payso';
   if (explicit === 'ksnet') return 'ksnet';
   if (explicit === 'elementpay' || explicit === 'ep') return 'elementpay';
   if (explicit === 'jpay') return 'jpay';
@@ -9946,6 +10499,7 @@ function getInternalLogPgAcquirer(log) {
   if (rk.startsWith('qxipay/') || rk === 'qxipay') return 'qxipay';
   if (rk.startsWith('qbang/') || rk === 'qbang') return 'qbang';
   if (rk.startsWith('omspay/') || rk === 'omspay') return 'omspay';
+  if (rk.startsWith('payso/') || rk === 'payso') return 'payso';
   if (rk.startsWith('ksnet/') || rk === 'ksnet') return 'ksnet';
   if (rk.startsWith('elementpay/') || rk === 'elementpay') return 'elementpay';
   if (rk.startsWith('jpay/')) return 'jpay';
@@ -9960,6 +10514,7 @@ function getInternalLogPgAcquirer(log) {
     if (ip === 'qxipay' || ip === 'qxpay') return 'qxipay';
     if (ip === 'qbang' || ip === 'qbank' || ip === 'qrbank') return 'qbang';
     if (ip === 'omspay' || ip === 'oms' || ip === 'waylar') return 'omspay';
+    if (ip === 'payso' || ip === 'paysolutions' || ip === 'paysolution') return 'payso';
     if (ip === 'ksnet') return 'ksnet';
     if (ip === 'elementpay' || ip === 'ep') return 'elementpay';
     if (ip === 'jpay') return 'jpay';
@@ -15460,65 +16015,6 @@ app.post('/noti/webhook/ox', async (req, res) => {
 
 
 
-// KSNET (overseas · USD only) — OMSPAY 패턴
-app.post('/noti/ksnet', async (req, res) => {
-  try {
-    await handleKsnetWebhook(req, res);
-  } catch (e) {
-    console.error('[KSNET] route error', e);
-    if (!res.headersSent) res.status(500).send('KSNET error');
-  }
-});
-app.post('/noti/webhook/ksnet', async (req, res) => {
-  try {
-    await handleKsnetWebhook(req, res);
-  } catch (e) {
-    console.error('[KSNET] route error', e);
-    if (!res.headersSent) res.status(500).send('KSNET error');
-  }
-});
-app.get('/noti/result/ksnet', async (req, res) => {
-  try {
-    await handleKsnetBrowserResult(req, res);
-  } catch (e) {
-    console.error('[KSNET] result error', e.message || e);
-    if (!res.headersSent) res.status(200).type('html').send('<html><body>KSNET result unavailable</body></html>');
-  }
-});
-app.post('/noti/result/ksnet', async (req, res) => {
-  try {
-    await handleKsnetBrowserResult(req, res);
-  } catch (e) {
-    console.error('[KSNET] result error', e.message || e);
-    if (!res.headersSent) res.status(200).type('html').send('<html><body>KSNET result unavailable</body></html>');
-  }
-});
-
-app.post('/noti/payso', async (req, res) => {
-  try {
-    await handlePaysoWebhook(req, res);
-  } catch (e) {
-    console.error('[PAYSO] route error', e);
-    if (!res.headersSent) res.status(500).send('PAYSO error');
-  }
-});
-app.get('/noti/payso', async (req, res) => {
-  try {
-    await handlePaysoWebhook(req, res);
-  } catch (e) {
-    console.error('[PAYSO] route error', e);
-    if (!res.headersSent) res.status(500).send('PAYSO error');
-  }
-});
-app.post('/noti/webhook/payso', async (req, res) => {
-  try {
-    await handlePaysoWebhook(req, res);
-  } catch (e) {
-    console.error('[PAYSO] route error', e);
-    if (!res.headersSent) res.status(500).send('PAYSO error');
-  }
-});
-
 app.post('/noti/omspay', async (req, res) => {
   try {
     await handleOmspayWebhook(req, res);
@@ -15549,6 +16045,72 @@ app.post('/noti/result/omspay', async (req, res) => {
   } catch (e) {
     console.error('[OMSPAY] result error', e.message || e);
     if (!res.headersSent) res.status(200).type('html').send('<html><body>OMSPAY result unavailable</body></html>');
+  }
+});
+
+app.post('/noti/payso', async (req, res) => {
+  try {
+    await handlePaysoWebhook(req, res);
+  } catch (e) {
+    console.error('[PAYSO] route error', e);
+    if (!res.headersSent) res.status(500).send('PAYSO error');
+  }
+});
+app.post('/noti/webhook/payso', async (req, res) => {
+  try {
+    await handlePaysoWebhook(req, res);
+  } catch (e) {
+    console.error('[PAYSO] route error', e);
+    if (!res.headersSent) res.status(500).send('PAYSO error');
+  }
+});
+app.get('/noti/result/payso', async (req, res) => {
+  try {
+    await handlePaysoBrowserResult(req, res);
+  } catch (e) {
+    console.error('[PAYSO] result error', e.message || e);
+    if (!res.headersSent) res.status(200).type('html').send('<html><body>PAYSO result unavailable</body></html>');
+  }
+});
+app.post('/noti/result/payso', async (req, res) => {
+  try {
+    await handlePaysoBrowserResult(req, res);
+  } catch (e) {
+    console.error('[PAYSO] result error', e.message || e);
+    if (!res.headersSent) res.status(200).type('html').send('<html><body>PAYSO result unavailable</body></html>');
+  }
+});
+
+app.post('/noti/ksnet', async (req, res) => {
+  try {
+    await handleKsnetWebhook(req, res);
+  } catch (e) {
+    console.error('[KSNET] route error', e);
+    if (!res.headersSent) res.status(500).send('KSNET error');
+  }
+});
+app.post('/noti/webhook/ksnet', async (req, res) => {
+  try {
+    await handleKsnetWebhook(req, res);
+  } catch (e) {
+    console.error('[KSNET] route error', e);
+    if (!res.headersSent) res.status(500).send('KSNET error');
+  }
+});
+app.get('/noti/result/ksnet', async (req, res) => {
+  try {
+    await handleKsnetBrowserResult(req, res);
+  } catch (e) {
+    console.error('[KSNET] result error', e.message || e);
+    if (!res.headersSent) res.status(200).type('html').send('<html><body>KSNET result unavailable</body></html>');
+  }
+});
+app.post('/noti/result/ksnet', async (req, res) => {
+  try {
+    await handleKsnetBrowserResult(req, res);
+  } catch (e) {
+    console.error('[KSNET] result error', e.message || e);
+    if (!res.headersSent) res.status(200).type('html').send('<html><body>KSNET result unavailable</body></html>');
   }
 });
 
@@ -16058,7 +16620,7 @@ function createAdminSidebarNavHelpers(locale, currentPath, req, member) {
           k = new URLSearchParams(qs).get('kind') || 'chillpay';
         } catch (_) {}
       }
-      if (k !== 'jpay' && k !== 'elementpay' && k !== 'ox' && k !== 'crypto' && k !== 'ilk' && k !== 'qxipay' && k !== 'omspay' && k !== 'qbang' && k !== 'ksnet') k = 'chillpay';
+      if (k !== 'jpay' && k !== 'elementpay' && k !== 'ox' && k !== 'crypto' && k !== 'ilk' && k !== 'qxipay' && k !== 'omspay' && k !== 'payso' && k !== 'ksnet' && k !== 'qbang') k = 'chillpay';
       isActive = k === kind;
     }
     const clsAttr = isActive ? ' class="active"' : '';
@@ -16083,8 +16645,9 @@ function buildAdminSidebarNavItems(h) {
           merchantsRegisterLink('ilk', t(locale, 'merchants_nav_register_ilk')) +
           merchantsRegisterLink('qxipay', t(locale, 'merchants_nav_register_qxipay')) +
           merchantsRegisterLink('omspay', t(locale, 'merchants_nav_register_omspay')) +
-          merchantsRegisterLink('qbang', t(locale, 'merchants_nav_register_qbang')) +
-          merchantsRegisterLink('ksnet', t(locale, 'merchants_nav_register_ksnet')),
+          merchantsRegisterLink('payso', t(locale, 'merchants_nav_register_payso')) +
+          merchantsRegisterLink('ksnet', t(locale, 'merchants_nav_register_ksnet')) +
+          merchantsRegisterLink('qbang', t(locale, 'merchants_nav_register_qbang')),
         'merchants',
       ),
     );
@@ -19275,11 +19838,13 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
                 ? t(locale, 'merchants_nav_register_qxipay')
                 : registerKind === 'omspay'
                   ? t(locale, 'merchants_nav_register_omspay')
+                  : registerKind === 'payso'
+                    ? t(locale, 'merchants_nav_register_payso')
+                  : registerKind === 'ksnet'
+                    ? t(locale, 'merchants_nav_register_ksnet')
                   : registerKind === 'qbang'
                     ? t(locale, 'merchants_nav_register_qbang')
-                    : registerKind === 'ksnet'
-                      ? t(locale, 'merchants_nav_register_ksnet')
-                      : t(locale, 'merchants_nav_register_chillpay');
+                    : t(locale, 'merchants_nav_register_chillpay');
   const registerJpay = registerKind === 'jpay';
   const registerElementPay = registerKind === 'elementpay';
   const registerOx = registerKind === 'ox';
@@ -19287,10 +19852,11 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   const registerIlk = registerKind === 'ilk';
   const registerQxipay = registerKind === 'qxipay';
   const registerOmspay = registerKind === 'omspay';
-  const registerQbang = registerKind === 'qbang';
+  const registerPayso = registerKind === 'payso';
   const registerKsnet = registerKind === 'ksnet';
+  const registerQbang = registerKind === 'qbang';
   const registerFixedIngress =
-    registerElementPay || registerOx || registerCrypto || registerIlk || registerQxipay || registerOmspay || registerQbang || registerKsnet;
+    registerElementPay || registerOx || registerCrypto || registerIlk || registerQxipay || registerOmspay || registerPayso || registerKsnet || registerQbang;
 
   const sortType = (req.query.sort || 'recent').toString();
   const sortedEntries = getSortedMerchantEntries(sortType).filter(
@@ -19323,11 +19889,13 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
                 ? t(locale, 'merchants_empty_qxipay') || t(locale, 'merchants_empty')
                 : registerKind === 'omspay'
                   ? t(locale, 'merchants_empty_omspay') || t(locale, 'merchants_empty')
+                  : registerKind === 'payso'
+                    ? t(locale, 'merchants_empty_payso') || t(locale, 'merchants_empty')
+                  : registerKind === 'ksnet'
+                    ? t(locale, 'merchants_empty_ksnet') || t(locale, 'merchants_empty')
                   : registerKind === 'qbang'
                     ? t(locale, 'merchants_empty_qbang') || t(locale, 'merchants_empty')
-                    : registerKind === 'ksnet'
-                      ? t(locale, 'merchants_empty_ksnet') || t(locale, 'merchants_empty')
-                      : t(locale, 'merchants_empty_chillpay') || t(locale, 'merchants_empty');
+                    : t(locale, 'merchants_empty_chillpay') || t(locale, 'merchants_empty');
   const merchantsListQueryBase = `kind=${registerKind}`;
   const merchantsSortHref = (sort) => `/admin/merchants?${merchantsListQueryBase}&sort=${sort}`;
   const merchantsColResizeTitle = escAttr(t(locale, 'tx_col_resize_title') || '드래그하여 열 너비 조절');
@@ -19417,28 +19985,24 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         <td>${m.internalCustomerId || ''}</td>
         <td>${internalTargetId}</td>
         <td class="cell-pg-acquirer" style="font-weight:600;color:${
-          listPg === 'jpay' ? '#7c3aed' : listPg === 'elementpay' ? '#0f766e' : listPg === 'ox' ? '#9a3412' : listPg === 'crypto' ? '#5b21b6' : '#0369a1'
-        };">${
           listPg === 'jpay'
-            ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
+            ? '#7c3aed'
             : listPg === 'elementpay'
-              ? (t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay')
+              ? '#0f766e'
               : listPg === 'ox'
-                ? (t(locale, 'merchants_pg_provider_ox') || 'OXPAY')
+                ? '#9a3412'
                 : listPg === 'crypto'
-                  ? (t(locale, 'merchants_pg_provider_crypto') || 'CRYPTO')
-                  : listPg === 'ilk'
-                    ? (t(locale, 'merchants_pg_provider_ilk') || 'ILKPAY')
-                    : listPg === 'qxipay'
-                      ? (t(locale, 'merchants_pg_provider_qxipay') || 'QXIPAY')
-                      : listPg === 'omspay'
-                        ? (t(locale, 'merchants_pg_provider_omspay') || 'OMSPAY')
+                  ? '#5b21b6'
+                  : listPg === 'omspay'
+                    ? '#166534'
+                    : listPg === 'payso'
+                      ? '#047857'
+                      : listPg === 'ksnet'
+                        ? '#1e3a8a'
                         : listPg === 'qbang'
-                          ? (t(locale, 'merchants_pg_provider_qbang') || 'QBANG')
-                          : listPg === 'ksnet'
-                            ? (t(locale, 'merchants_pg_provider_ksnet') || 'KSNET')
-                        : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY')
-        }</td>
+                          ? '#134e4a'
+                          : '#0369a1'
+        };">${merchantPgProviderDisplayLabel(locale, listPg)}</td>
         <td class="cell-noti-mode">${merchantNotiStyleCellHtml(locale, m)}</td>
         <td>${String(merchantChillpayRecurringCell(m))
           .replace(/&/g, '&amp;')
@@ -19650,17 +20214,23 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           <div style="margin-top:6px;font-size:12px;color:#166534;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/omspay</div>
           <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_omspay_result_hint')}</p>
         </div>
+        <div id="merch-pg-payso-block" style="display:${registerPayso ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#ecfdf5;border:1px solid #86efac;border-radius:8px;">
+          <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_payso_ingress_hint')}</p>
+          <div style="margin-top:8px;font-size:12px;color:#166534;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/payso</div>
+          <div style="margin-top:6px;font-size:12px;color:#166534;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/payso</div>
+          <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_payso_result_hint')}</p>
+        </div>
+        <div id="merch-pg-ksnet-block" style="display:${registerKsnet ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#eff6ff;border:1px solid #93c5fd;border-radius:8px;">
+          <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_ksnet_ingress_hint')}</p>
+          <div style="margin-top:8px;font-size:12px;color:#1e3a8a;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/ksnet</div>
+          <div style="margin-top:6px;font-size:12px;color:#1e3a8a;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/ksnet</div>
+          <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_ksnet_result_hint')}</p>
+        </div>
         <div id="merch-pg-qbang-block" style="display:${registerQbang ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#ecfdf5;border:1px solid #5eead4;border-radius:8px;">
           <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_qbang_ingress_hint')}</p>
           <div style="margin-top:8px;font-size:12px;color:#0f766e;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/qbang</div>
           <div style="margin-top:6px;font-size:12px;color:#0f766e;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/qbang</div>
           <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_qbang_result_hint')}</p>
-        </div>
-        <div id="merch-pg-ksnet-block" style="display:${registerKsnet ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;">
-          <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_ksnet_ingress_hint')}</p>
-          <div style="margin-top:8px;font-size:12px;color:#92400e;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/ksnet</div>
-          <div style="margin-top:6px;font-size:12px;color:#92400e;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/ksnet</div>
-          <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_ksnet_result_hint')}</p>
         </div>
         <div id="merch-pg-elementpay-block" style="display:${registerElementPay ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;">
           <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_elementpay_ingress_hint')}</p>
@@ -20081,12 +20651,15 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var ilk = kind === 'ilk';
         var qx = kind === 'qxipay';
         var oms = kind === 'omspay';
+        var payso = kind === 'payso';
+        var ksnet = kind === 'ksnet';
         var qb = kind === 'qbang';
-        var ks = kind === 'ksnet';
-        var fixedIngress = ep || ox || cr || ilk || qx || oms || qb || ks;
+        var fixedIngress = ep || ox || cr || ilk || qx || oms || payso || ksnet || qb;
         var blockIlk = document.getElementById('merch-pg-ilk-block');
         var blockQx = document.getElementById('merch-pg-qxipay-block');
         var blockOms = document.getElementById('merch-pg-omspay-block');
+        var blockPayso = document.getElementById('merch-pg-payso-block');
+        var blockKsnet = document.getElementById('merch-pg-ksnet-block');
         var blockQb = document.getElementById('merch-pg-qbang-block');
         if (blockChill) blockChill.style.display = j || fixedIngress ? 'none' : 'block';
         if (blockJpay) blockJpay.style.display = j ? 'block' : 'none';
@@ -20096,9 +20669,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         if (blockIlk) blockIlk.style.display = ilk ? 'block' : 'none';
         if (blockQx) blockQx.style.display = qx ? 'block' : 'none';
         if (blockOms) blockOms.style.display = oms ? 'block' : 'none';
+        if (blockPayso) blockPayso.style.display = payso ? 'block' : 'none';
+        if (blockKsnet) blockKsnet.style.display = ksnet ? 'block' : 'none';
         if (blockQb) blockQb.style.display = qb ? 'block' : 'none';
-        var blockKs = document.getElementById('merch-pg-ksnet-block');
-        if (blockKs) blockKs.style.display = ks ? 'block' : 'none';
         if (chillSlotNo) chillSlotNo.disabled = !!(j || fixedIngress);
         if (jpaySlotNo) jpaySlotNo.disabled = !j;
         var wrapRoute = document.getElementById('merch-chillpay-route-fields');
@@ -20272,8 +20845,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           : pgKindRaw === 'ilk' || pgKindRaw === 'ilkpay' ? 'ilk'
           : pgKindRaw === 'qxipay' || pgKindRaw === 'qxpay' ? 'qxipay'
           : pgKindRaw === 'omspay' || pgKindRaw === 'oms' || pgKindRaw === 'waylar' ? 'omspay'
-          : pgKindRaw === 'qbang' || pgKindRaw === 'qbank' || pgKindRaw === 'qrbank' ? 'qbang'
+          : pgKindRaw === 'payso' || pgKindRaw === 'paysolutions' || pgKindRaw === 'paysolution' ? 'payso'
           : pgKindRaw === 'ksnet' ? 'ksnet'
+          : pgKindRaw === 'qbang' || pgKindRaw === 'qbank' || pgKindRaw === 'qrbank' ? 'qbang'
           : 'chillpay';
         if (pgKindHidden) pgKindHidden.value = pgKind;
         var registerHeadingEl = document.getElementById('merchant-register-section');
@@ -20286,8 +20860,9 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             ilk: '${(t(locale, 'merchants_nav_register_ilk') || 'ILKPAY 등록').replace(/'/g, "\\'")}',
             qxipay: '${(t(locale, 'merchants_nav_register_qxipay') || 'QXIPAY 등록').replace(/'/g, "\\'")}',
             omspay: '${(t(locale, 'merchants_nav_register_omspay') || 'OMSPAY 등록').replace(/'/g, "\\'")}',
-            qbang: '${(t(locale, 'merchants_nav_register_qbang') || 'QBANG 등록').replace(/'/g, "\\'")}',
+            payso: '${(t(locale, 'merchants_nav_register_payso') || 'PAYSO 등록').replace(/'/g, "\\'")}',
             ksnet: '${(t(locale, 'merchants_nav_register_ksnet') || 'KSNET 등록').replace(/'/g, "\\'")}',
+            qbang: '${(t(locale, 'merchants_nav_register_qbang') || 'QBANG 등록').replace(/'/g, "\\'")}',
             chillpay: '${(t(locale, 'merchants_nav_register_chillpay') || 'CHILLPAY 등록').replace(/'/g, "\\'")}'
           };
           registerHeadingEl.textContent = headingMap[pgKind] || headingMap.chillpay;
@@ -20404,8 +20979,9 @@ function parseMerchantsRegisterKind(req) {
   if (raw === 'ilk' || raw === 'ilkpay') return 'ilk';
   if (raw === 'qxipay' || raw === 'qxpay') return 'qxipay';
   if (raw === 'omspay' || raw === 'oms' || raw === 'waylar') return 'omspay';
-  if (raw === 'qbang' || raw === 'qbank' || raw === 'qrbank') return 'qbang';
+  if (raw === 'payso' || raw === 'paysolutions' || raw === 'paysolution') return 'payso';
   if (raw === 'ksnet') return 'ksnet';
+  if (raw === 'qbang' || raw === 'qbank' || raw === 'qrbank') return 'qbang';
   return 'chillpay';
 }
 
@@ -20418,8 +20994,9 @@ function merchantsRegisterKindUrl(kind) {
   if (k === 'ilk' || k === 'ilkpay') return '/admin/merchants?kind=ilk';
   if (k === 'qxipay' || k === 'qxpay') return '/admin/merchants?kind=qxipay';
   if (k === 'omspay' || k === 'oms' || k === 'waylar') return '/admin/merchants?kind=omspay';
-  if (k === 'qbang' || k === 'qbank' || k === 'qrbank') return '/admin/merchants?kind=qbang';
+  if (k === 'payso' || k === 'paysolutions' || k === 'paysolution') return '/admin/merchants?kind=payso';
   if (k === 'ksnet') return '/admin/merchants?kind=ksnet';
+  if (k === 'qbang' || k === 'qbank' || k === 'qrbank') return '/admin/merchants?kind=qbang';
   return '/admin/merchants?kind=chillpay';
 }
 
@@ -20446,6 +21023,9 @@ function inferMerchantPgKind(m) {
     saved === 'omspay' ||
     saved === 'oms' ||
     saved === 'waylar' ||
+    saved === 'payso' ||
+    saved === 'paysolutions' ||
+    saved === 'paysolution' ||
     saved === 'ksnet'
   ) {
     if (saved === 'oxpay') return 'ox';
@@ -20453,6 +21033,7 @@ function inferMerchantPgKind(m) {
     if (saved === 'qxpay') return 'qxipay';
     if (saved === 'qbank' || saved === 'qrbank') return 'qbang';
     if (saved === 'oms' || saved === 'waylar') return 'omspay';
+    if (saved === 'paysolutions' || saved === 'paysolution') return 'payso';
     return saved;
   }
   const jpayCb = String(m.jpayRouteCallbackKey || '').trim();
@@ -20470,13 +21051,17 @@ function inferMerchantPgKind(m) {
   if (rn.toLowerCase() === 'qxipay' || rn.toLowerCase() === 'qxpay') return 'qxipay';
   if (rn.toLowerCase() === 'qbang' || rn.toLowerCase() === 'qbank' || rn.toLowerCase() === 'qrbank') return 'qbang';
   if (rn.toLowerCase() === 'omspay' || rn.toLowerCase() === 'oms' || rn.toLowerCase() === 'waylar') return 'omspay';
+  if (rn.toLowerCase() === 'payso' || rn.toLowerCase() === 'paysolutions' || rn.toLowerCase() === 'paysolution') return 'payso';
   if (rn.toLowerCase() === 'ksnet') return 'ksnet';
   const tid = String(m.internalTargetId || '').trim();
   if (tid && INTERNAL_TARGETS.has(tid)) {
     const pg = String(INTERNAL_TARGETS.get(tid).pgProvider || '').toLowerCase().trim();
-    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay' || pg === 'ox' || pg === 'oxpay' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'qxpay') {
+    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay' || pg === 'ox' || pg === 'oxpay' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'qxpay' || pg === 'omspay' || pg === 'oms' || pg === 'waylar' || pg === 'payso' || pg === 'paysolutions' || pg === 'paysolution' || pg === 'ksnet' || pg === 'qbang' || pg === 'qbank' || pg === 'qrbank') {
       if (pg === 'oxpay') return 'ox';
       if (pg === 'qxpay') return 'qxipay';
+      if (pg === 'oms' || pg === 'waylar') return 'omspay';
+      if (pg === 'paysolutions' || pg === 'paysolution') return 'payso';
+      if (pg === 'qbank' || pg === 'qrbank') return 'qbang';
       return pg;
     }
   }
@@ -20489,7 +21074,7 @@ function resolveMerchantListPgAcquirer(m) {
 /** 가맹점 목록: ChillPay 결제 방식(A/B). JPAY/ElementPay는 표시용 대시 */
 function merchantChillpayPayModeLabel(locale, m) {
   const pg = resolveMerchantListPgAcquirer(m);
-  if (pg === 'jpay' || pg === 'elementpay' || pg === 'ox' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'omspay' || pg === 'qbang' || pg === 'ksnet') return t(locale, 'merchants_mode_jpay_dash');
+  if (pg === 'jpay' || pg === 'elementpay' || pg === 'ox' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'omspay' || pg === 'payso' || pg === 'ksnet' || pg === 'qbang') return t(locale, 'merchants_mode_jpay_dash');
   const cb = String(m.routeCallbackKey || '').trim();
   if (isChillpayRedirectHostedPayment(cb)) return t(locale, 'merchants_mode_a_redirect');
   return t(locale, 'merchants_mode_b_inline');
@@ -20498,7 +21083,7 @@ function merchantChillpayPayModeLabel(locale, m) {
 /** 가맹점 목록: Recurring Y/N (ChillPay만; JPAY/EP는 —) */
 function merchantChillpayRecurringCell(m) {
   const pg = resolveMerchantListPgAcquirer(m);
-  if (pg === 'jpay' || pg === 'elementpay' || pg === 'ox' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'omspay' || pg === 'qbang' || pg === 'ksnet') return '—';
+  if (pg === 'jpay' || pg === 'elementpay' || pg === 'ox' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'omspay' || pg === 'payso' || pg === 'ksnet' || pg === 'qbang') return '—';
   return m.chillpayRecurring === 'Y' ? 'Y' : 'N';
 }
 
@@ -20674,9 +21259,7 @@ app.get('/admin/merchants/export', requireAuth, requirePage('merchants'), (req, 
         merchantListRouteNoCell(m),
         m.internalCustomerId || '',
         m.internalTargetId || '',
-        pgKind === 'jpay'
-          ? (t(locale, 'merchants_pg_provider_jpay') || 'JPAY')
-          : (t(locale, 'merchants_pg_provider_chillpay') || 'CHILLPAY'),
+        merchantPgProviderDisplayLabel(locale, pgKind),
         merchantNotiStyleCsvSummary(locale, m),
         merchantChillpayRecurringCell(m),
         relay,
@@ -20742,11 +21325,13 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
                 ? 'qxipay'
                 : pgKindRaw === 'omspay' || pgKindRaw === 'oms' || pgKindRaw === 'waylar'
                   ? 'omspay'
+                  : pgKindRaw === 'payso' || pgKindRaw === 'paysolutions' || pgKindRaw === 'paysolution'
+                    ? 'payso'
+                  : pgKindRaw === 'ksnet'
+                    ? 'ksnet'
                   : pgKindRaw === 'qbang' || pgKindRaw === 'qbank' || pgKindRaw === 'qrbank'
                     ? 'qbang'
-                    : pgKindRaw === 'ksnet'
-                      ? 'ksnet'
-                      : 'chillpay';
+                    : 'chillpay';
   const isFixedIngressPg =
     pgKind === 'elementpay' ||
     pgKind === 'ox' ||
@@ -20754,8 +21339,9 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     pgKind === 'ilk' ||
     pgKind === 'qxipay' ||
     pgKind === 'omspay' ||
-    pgKind === 'qbang' ||
-    pgKind === 'ksnet';
+    pgKind === 'payso' ||
+    pgKind === 'ksnet' ||
+    pgKind === 'qbang';
   let chillCb = '';
   let chillRs = '';
   let jpayCb = '';
@@ -20949,7 +21535,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
         compName: String((prev && (prev.name || prev.label)) || '').trim() || undefined,
       },
     });
-  } else if (pgKind === 'ilk' || pgKind === 'qxipay' || pgKind === 'omspay' || pgKind === 'qbang' || pgKind === 'ksnet') {
+  } else if (pgKind === 'ilk' || pgKind === 'qxipay' || pgKind === 'omspay' || pgKind === 'payso' || pgKind === 'ksnet' || pgKind === 'qbang') {
     merchantRecord = buildFixedIngressMerchantObject(pgKind, {
       merchantId,
       callbackUrl: cbSaved,
@@ -21164,6 +21750,8 @@ app.post('/api/v1/icopay/merchants/provision', (req, res) => {
         ? provisionFixedIngressMerchant('qxipay', req.body, provisionMeta)
       : pgKindIn === 'omspay' || pgKindIn === 'oms' || pgKindIn === 'waylar'
         ? provisionFixedIngressMerchant('omspay', req.body, provisionMeta)
+      : pgKindIn === 'payso' || pgKindIn === 'paysolutions' || pgKindIn === 'paysolution'
+        ? provisionFixedIngressMerchant('payso', req.body, provisionMeta)
       : pgKindIn === 'ksnet'
         ? provisionFixedIngressMerchant('ksnet', req.body, provisionMeta)
       : pgKindIn === 'ox' || pgKindIn === 'oxpay'
@@ -21205,14 +21793,17 @@ app.get('/api/v1/icopay/merchants/:merchantId', (req, res) => {
     pgKind !== 'omspay' &&
     pgKind !== 'oms' &&
     pgKind !== 'waylar' &&
+    pgKind !== 'payso' &&
+    pgKind !== 'paysolutions' &&
+    pgKind !== 'paysolution' &&
+    pgKind !== 'ksnet' &&
     pgKind !== 'qbang' &&
     pgKind !== 'qbank' &&
-    pgKind !== 'qrbank' &&
-    pgKind !== 'ksnet'
+    pgKind !== 'qrbank'
   ) {
     return sendProvisionJson(res, 400, { success: false, errorCode: pgKind ? 'INVALID_PG_KIND' : 'INVALID_REQUEST' }, locale);
   }
-  const fixedGetKinds = ['ilk','ilkpay','qxipay','qxpay','omspay','oms','waylar','qbang','qbank','qrbank','ksnet'];
+  const fixedGetKinds = ['ilk','ilkpay','qxipay','qxpay','omspay','oms','waylar','payso','paysolutions','paysolution','ksnet','qbang','qbank','qrbank'];
   const result =
     pgKind === 'crypto'
       ? getCryptoMerchantProvision(req.params.merchantId)
@@ -21471,6 +22062,7 @@ app.get('/admin/logs', requireAuth, requirePage('pg_logs'), (req, res) => {
         !relayHasTarget &&
         (log.body || log.rawBody) &&
         (logPg === 'omspay' ||
+          logPg === 'payso' ||
           logPg === 'ksnet' ||
           logPg === 'qxipay' ||
           logPg === 'ilk' ||
@@ -22344,10 +22936,10 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#134e4a;color:#fff;border:1px solid #115e59';
   const omspayOn =
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#166534;color:#fff;border:1px solid #14532d';
-  const ksnetOn =
-    'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#b45309;color:#fff;border:1px solid #92400e';
   const paysoOn =
-    'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#0369a1;color:#fff;border:1px solid #075985';
+    'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#047857;color:#fff;border:1px solid #065f46';
+  const ksnetOn =
+    'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#1e3a8a;color:#fff;border:1px solid #1e40af';
   const pillInactive =
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:600;font-size:13px;background:#f3f4f6;color:#6b7280;border:1px solid #d1d5db;';
   const withNavEnv = (path) => {
@@ -22373,11 +22965,11 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
                   ? 'qbang'
                 : pgCfg.active === 'omspay'
                   ? 'omspay'
-                  : pgCfg.active === 'ksnet'
-                    ? 'ksnet'
-                    : pgCfg.active === 'payso'
-                      ? 'payso'
-                    : 'chillpay';
+                  : pgCfg.active === 'payso'
+                    ? 'payso'
+                    : pgCfg.active === 'ksnet'
+                      ? 'ksnet'
+                  : 'chillpay';
   const envOn =
     envTone === 'jpay'
       ? jpayOn
@@ -22395,11 +22987,11 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
                   ? qbangOn
                 : envTone === 'omspay'
                   ? omspayOn
-                  : envTone === 'ksnet'
-                    ? ksnetOn
-                    : envTone === 'payso'
-                      ? paysoOn
-                    : chillOn;
+                  : envTone === 'payso'
+                    ? paysoOn
+                    : envTone === 'ksnet'
+                      ? ksnetOn
+                  : chillOn;
   const envOff = pillInactive;
   const envCfg = c.env || {};
   let envSeg = '';
@@ -22499,26 +23091,26 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
       const hideQxipay = !!pgCfg.hideQxipay;
       const hideQbang = !!pgCfg.hideQbang;
       const hideOmspay = !!pgCfg.hideOmspay;
-      const hideKsnet = !!pgCfg.hideKsnet;
       const hidePayso = !!pgCfg.hidePayso;
-      const ksnetActive = pgCfg.active === 'ksnet';
-      const paysoActive = pgCfg.active === 'payso';
-      const ksnetHref = withNavEnv(pgCfg.ksnetUrl || '#');
-      const paysoHref = withNavEnv(pgCfg.paysoUrl || '#');
-      const ksnetLabel = esc(t(locale, 'pg_provider_ksnet') || 'KSNET');
-      const paysoLabel = esc(t(locale, 'pg_provider_payso') || 'PAYSO');
+      const hideKsnet = !!pgCfg.hideKsnet;
       const ilkActive = pgCfg.active === 'ilk';
       const qxipayActive = pgCfg.active === 'qxipay';
       const qbangActive = pgCfg.active === 'qbang';
       const omspayActive = pgCfg.active === 'omspay';
+      const paysoActive = pgCfg.active === 'payso';
+      const ksnetActive = pgCfg.active === 'ksnet';
       const ilkHref = withNavEnv(pgCfg.ilkUrl || '#');
       const qxipayHref = withNavEnv(pgCfg.qxipayUrl || '#');
       const qbangHref = withNavEnv(pgCfg.qbangUrl || '#');
       const omspayHref = withNavEnv(pgCfg.omspayUrl || '#');
+      const paysoHref = withNavEnv(pgCfg.paysoUrl || '#');
+      const ksnetHref = withNavEnv(pgCfg.ksnetUrl || '#');
       const ilkLabel = esc(t(locale, 'pg_provider_ilk') || 'ILKPAY');
       const qxipayLabel = esc(t(locale, 'pg_provider_qxipay') || 'QXIPAY');
       const qbangLabel = esc(t(locale, 'pg_provider_qbang') || 'QBANG');
       const omspayLabel = esc(t(locale, 'pg_provider_omspay') || 'OMSPAY');
+      const paysoLabel = esc(t(locale, 'pg_provider_payso') || 'PAYSO');
+      const ksnetLabel = esc(t(locale, 'pg_provider_ksnet') || 'KSNET');
       if (!hideIlk && pgCfg.ilkUrl) {
         pgSeg +=
           '<span style="color:#94a3b8;font-weight:500;">|</span>' +
@@ -22563,17 +23155,6 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
           omspayLabel +
           '</a>';
       }
-      if (!hideKsnet && pgCfg.ksnetUrl) {
-        pgSeg +=
-          '<span style="color:#94a3b8;font-weight:500;">|</span>' +
-          '<a href="' +
-          esc(ksnetHref) +
-          '" style="' +
-          (ksnetActive ? ksnetOn : pillInactive) +
-          '">' +
-          ksnetLabel +
-          '</a>';
-      }
       if (!hidePayso && pgCfg.paysoUrl) {
         pgSeg +=
           '<span style="color:#94a3b8;font-weight:500;">|</span>' +
@@ -22583,6 +23164,17 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
           (paysoActive ? paysoOn : pillInactive) +
           '">' +
           paysoLabel +
+          '</a>';
+      }
+      if (!hideKsnet && pgCfg.ksnetUrl) {
+        pgSeg +=
+          '<span style="color:#94a3b8;font-weight:500;">|</span>' +
+          '<a href="' +
+          esc(ksnetHref) +
+          '" style="' +
+          (ksnetActive ? ksnetOn : pillInactive) +
+          '">' +
+          ksnetLabel +
           '</a>';
       }
       pgSeg += '</span>';
@@ -22622,8 +23214,8 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
   const qQxipay = logPgQueryWithBase(q, 'qxipay', { page: 1 });
   const qQbang = logPgQueryWithBase(q, 'qbang', { page: 1 });
   const qOmspay = logPgQueryWithBase(q, 'omspay', { page: 1 });
-  const qKsnet = logPgQueryWithBase(q, 'ksnet', { page: 1 });
   const qPayso = logPgQueryWithBase(q, 'payso', { page: 1 });
+  const qKsnet = logPgQueryWithBase(q, 'ksnet', { page: 1 });
   const envLive = logPgQueryWithBase(q, logPg, { env: 'live', page: 1 });
   const envSand = logPgQueryWithBase(q, logPg, { env: 'sandbox', page: 1 });
   const currentEnv = (o.getEnv && o.getEnv()) || 'live';
@@ -22651,8 +23243,8 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
       qxipayUrl: pathname + '?' + buildQueryString(qQxipay),
       qbangUrl: pathname + '?' + buildQueryString(qQbang),
       omspayUrl: pathname + '?' + buildQueryString(qOmspay),
-      ksnetUrl: pathname + '?' + buildQueryString(qKsnet),
       paysoUrl: pathname + '?' + buildQueryString(qPayso),
+      ksnetUrl: pathname + '?' + buildQueryString(qKsnet),
     },
   });
 }
@@ -23052,6 +23644,7 @@ function resolveMerchantEntry(merchantId, preferPg) {
   if (prefer) pushId(baseId + '#' + prefer);
   for (const s of [
     'omspay',
+    'payso',
     'ksnet',
     'crypto',
     'ox',
@@ -24656,8 +25249,8 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       qxipayUrl: baseUrl + qs({ source: 'qxipay', page: 1 }),
       qbangUrl: baseUrl + qs({ source: 'qbang', page: 1 }),
       omspayUrl: baseUrl + qs({ source: 'omspay', page: 1 }),
-      ksnetUrl: baseUrl + qs({ source: 'ksnet', page: 1 }),
       paysoUrl: baseUrl + qs({ source: 'payso', page: 1 }),
+      ksnetUrl: baseUrl + qs({ source: 'ksnet', page: 1 }),
     },
   });
   const LEGEND_MAX_DESC = 80;
@@ -25514,8 +26107,8 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
       qxipayUrl: baseUrl + qs({ source: 'qxipay' }),
       qbangUrl: baseUrl + qs({ source: 'qbang' }),
       omspayUrl: baseUrl + qs({ source: 'omspay' }),
-      ksnetUrl: baseUrl + qs({ source: 'ksnet' }),
       paysoUrl: baseUrl + qs({ source: 'payso' }),
+      ksnetUrl: baseUrl + qs({ source: 'ksnet' }),
     },
   });
   const thead =
@@ -27375,6 +27968,8 @@ function inferTransactionNotiCallbackResultFromRouteKey(routeKey) {
   if (rk === 'qxipay/webhook' || rk.startsWith('qxipay/webhook')) return 'callback';
   if (rk === 'omspay/result' || rk.startsWith('omspay/result')) return 'result';
   if (rk === 'omspay/webhook' || rk.startsWith('omspay/webhook')) return 'callback';
+  if (rk === 'payso/result' || rk.startsWith('payso/result')) return 'result';
+  if (rk === 'payso/webhook' || rk.startsWith('payso/webhook')) return 'callback';
   if (rk === 'ksnet/result' || rk.startsWith('ksnet/result')) return 'result';
   if (rk === 'ksnet/webhook' || rk.startsWith('ksnet/webhook')) return 'callback';
   if (rk === 'qbang/result' || rk.startsWith('qbang/result')) return 'result';
@@ -27844,8 +28439,8 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       qxipayUrl: cancelPgUrl('qxipay'),
       qbangUrl: cancelPgUrl('qbang'),
       omspayUrl: cancelPgUrl('omspay'),
-      ksnetUrl: cancelPgUrl('ksnet'),
       paysoUrl: cancelPgUrl('payso'),
+      ksnetUrl: cancelPgUrl('ksnet'),
     },
   });
   const cancelColDefs = getCrCancelListColumnDefs(locale, cancelPg);
@@ -28251,6 +28846,11 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
       const p = String(e.pgProvider || '').toLowerCase();
       return p === 'omspay' || p === 'oms' || p === 'waylar';
     });
+  } else if (pgFilter === 'payso' || pgFilter === 'paysolutions' || pgFilter === 'paysolution') {
+    filtered = filtered.filter((e) => {
+      const p = String(e.pgProvider || '').toLowerCase();
+      return p === 'payso' || p === 'paysolutions' || p === 'paysolution';
+    });
   } else if (pgFilter === 'ksnet') {
     filtered = filtered.filter((e) => String(e.pgProvider || '').toLowerCase() === 'ksnet');
   } else if (pgFilter === 'chillpay') {
@@ -28273,6 +28873,9 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
         p !== 'omspay' &&
         p !== 'oms' &&
         p !== 'waylar' &&
+        p !== 'payso' &&
+        p !== 'paysolutions' &&
+        p !== 'paysolution' &&
         p !== 'ksnet'
       );
     });
@@ -28324,27 +28927,7 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
   const rows = displayFilteredNoti.map((e) => {
     const dt = e.sentAtIso ? new Date(e.sentAtIso).toLocaleString('ko-KR', { hour12: false }) : '-';
     const typeLabel = e.type === 'void' ? t(locale, 'cr_type_void') : e.type === 'refund' ? t(locale, 'cr_type_refund') : e.type || '-';
-    const pgProvRaw = String(e.pgProvider || 'chillpay').toLowerCase();
-    const pgProvLabel =
-      pgProvRaw === 'jpay'
-        ? t(locale, 'pg_provider_jpay')
-        : pgProvRaw === 'elementpay' || pgProvRaw === 'ep'
-          ? t(locale, 'pg_provider_elementpay') || 'ElementPay'
-          : pgProvRaw === 'ox' || pgProvRaw === 'oxpay'
-            ? t(locale, 'pg_provider_ox') || 'OXPAY'
-            : pgProvRaw === 'crypto'
-              ? t(locale, 'pg_provider_crypto') || 'CRYPTO'
-              : pgProvRaw === 'ilk' || pgProvRaw === 'ilkpay'
-                ? t(locale, 'pg_provider_ilk') || 'ILKPAY'
-                : pgProvRaw === 'qxipay' || pgProvRaw === 'qxpay'
-                  ? t(locale, 'pg_provider_qxipay') || 'QXIPAY'
-                  : pgProvRaw === 'qbang' || pgProvRaw === 'qbank' || pgProvRaw === 'qrbank'
-                    ? t(locale, 'pg_provider_qbang') || 'QBANG'
-                    : pgProvRaw === 'omspay' || pgProvRaw === 'oms' || pgProvRaw === 'waylar'
-                      ? t(locale, 'pg_provider_omspay') || 'OMSPAY'
-                      : pgProvRaw === 'ksnet'
-                        ? t(locale, 'pg_provider_ksnet') || 'KSNET'
-              : t(locale, 'pg_provider_chillpay');
+    const pgProvLabel = pgProviderDisplayLabel(locale, e.pgProvider || 'chillpay');
     const notiMerchant = e.merchantId ? MERCHANTS.get(e.merchantId) : null;
     const internalTargetName = getInternalTargetName(notiMerchant && notiMerchant.internalTargetId);
     const resendForm =
@@ -28389,6 +28972,7 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
   const pgFilterQxipayLabel = t(locale, 'cr_filter_pg_qxipay') || t(locale, 'pg_provider_qxipay') || 'QXIPAY';
   const pgFilterQbangLabel = t(locale, 'cr_filter_pg_qbang') || t(locale, 'pg_provider_qbang') || 'QBANG';
   const pgFilterOmspayLabel = t(locale, 'cr_filter_pg_omspay') || t(locale, 'pg_provider_omspay') || 'OMSPAY';
+  const pgFilterPaysoLabel = t(locale, 'cr_filter_pg_payso') || t(locale, 'pg_provider_payso') || 'PAYSO';
   const pgFilterKsnetLabel = t(locale, 'cr_filter_pg_ksnet') || t(locale, 'pg_provider_ksnet') || 'KSNET';
   const filterLinks = `<div style="margin-bottom:12px;font-size:12px;color:#374151;">
     <a href="/admin/cancel-refund/noti?type=all&days=${days}${envParam}${pgParam}" style="padding:6px 12px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${typeFilter === 'all' ? '#2563eb' : '#e5e7eb'};color:${typeFilter === 'all' ? '#fff' : '#374151'};">${t(locale, 'cr_filter_all')}</a>
@@ -28405,7 +28989,8 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=qxipay" style="padding:6px 10px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'qxipay' || pgFilter === 'qxpay' ? '#be185d' : '#e5e7eb'};color:${pgFilter === 'qxipay' || pgFilter === 'qxpay' ? '#fff' : '#374151'};">${pgFilterQxipayLabel}</a>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=qbang" style="padding:6px 10px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'qbang' || pgFilter === 'qbank' ? '#134e4a' : '#e5e7eb'};color:${pgFilter === 'qbang' || pgFilter === 'qbank' ? '#fff' : '#374151'};">${pgFilterQbangLabel}</a>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=omspay" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'omspay' || pgFilter === 'oms' || pgFilter === 'waylar' ? '#166534' : '#e5e7eb'};color:${pgFilter === 'omspay' || pgFilter === 'oms' || pgFilter === 'waylar' ? '#fff' : '#374151'};">${pgFilterOmspayLabel}</a>
-    <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=ksnet" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'ksnet' ? '#b45309' : '#e5e7eb'};color:${pgFilter === 'ksnet' ? '#fff' : '#374151'};">${pgFilterKsnetLabel}</a>
+    <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=payso" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'payso' || pgFilter === 'paysolutions' || pgFilter === 'paysolution' ? '#047857' : '#e5e7eb'};color:${pgFilter === 'payso' || pgFilter === 'paysolutions' || pgFilter === 'paysolution' ? '#fff' : '#374151'};">${pgFilterPaysoLabel}</a>
+    <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=ksnet" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'ksnet' ? '#1e3a8a' : '#e5e7eb'};color:${pgFilter === 'ksnet' ? '#fff' : '#374151'};">${pgFilterKsnetLabel}</a>
     <span style="margin:0 8px;color:#9ca3af;">|</span>
     <span>${t(locale, 'cr_period_recent_label')}</span>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=7${envParam}${pgParam}" style="margin-left:6px;font-size:12px;">7${t(locale, 'cr_days')}</a>
@@ -29368,7 +29953,7 @@ app.get('/admin/cancel-refund/void-summary', requireAuth, requirePage('cr_void_s
   for (const e of notiEntries) {
     const cat = categorize(e.type, e.mode);
     const dt = formatDateAndTimeTHJP(e.sentAtIso || e.sentAt || '');
-    const pgTag = (e.pgProvider || 'chillpay') === 'jpay' ? t(locale, 'pg_provider_jpay') : t(locale, 'pg_provider_chillpay');
+    const pgTag = pgProviderDisplayLabel(locale, e.pgProvider || 'chillpay');
     rowsData.push({
       sentAt: dt,
       category: cat,
@@ -32213,8 +32798,9 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
   const pgIsIlk = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'ilk' || (editTarget.pgProvider || '').toLowerCase() === 'ilkpay'));
   const pgIsQxipay = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'qxipay' || (editTarget.pgProvider || '').toLowerCase() === 'qxpay'));
   const pgIsOmspay = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'omspay' || (editTarget.pgProvider || '').toLowerCase() === 'oms' || (editTarget.pgProvider || '').toLowerCase() === 'waylar'));
-  const pgIsQbang = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'qbang' || (editTarget.pgProvider || '').toLowerCase() === 'qbank' || (editTarget.pgProvider || '').toLowerCase() === 'qrbank'));
+  const pgIsPayso = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'payso' || (editTarget.pgProvider || '').toLowerCase() === 'paysolutions' || (editTarget.pgProvider || '').toLowerCase() === 'paysolution'));
   const pgIsKsnet = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'ksnet');
+  const pgIsQbang = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'qbang' || (editTarget.pgProvider || '').toLowerCase() === 'qbank' || (editTarget.pgProvider || '').toLowerCase() === 'qrbank'));
   const formTzMode = editTarget ? normalizeInternalTargetTimezoneMode(editTarget.timezoneMode) : 'global';
   const formTzStd = editTarget ? (editTarget.standardTimezone || DEFAULT_CHILLPAY_TIMEZONE) : DEFAULT_CHILLPAY_TIMEZONE;
   const formTzOp = editTarget ? (editTarget.operationalTimezone || DEFAULT_NOTI_OPERATIONAL_TIMEZONE) : DEFAULT_NOTI_OPERATIONAL_TIMEZONE;
@@ -32234,16 +32820,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
   const rows = Array.from(INTERNAL_TARGETS.values())
     .map((target) => {
       const pg = normalizeInternalTargetPgProvider(target.pgProvider);
-      const pgLabel =
-        pg === 'jpay'
-          ? t(locale, 'pg_provider_jpay') || 'JPAY'
-          :         pg === 'elementpay'
-            ? t(locale, 'pg_provider_elementpay') || t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay'
-            : pg === 'ox'
-              ? t(locale, 'pg_provider_ox') || 'OXPAY'
-              : pg === 'crypto'
-                ? t(locale, 'pg_provider_crypto') || 'CRYPTO'
-                      : t(locale, 'pg_provider_chillpay') || 'ChillPay';
+      const pgLabel = pgProviderDisplayLabel(locale, pg);
       const linkCell =
         pg === 'chillpay'
           ? escCell(getChillpayProductionMidForInternalLinked())
@@ -32368,7 +32945,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         <label>${t(locale, 'internal_targets_name')}<input type="text" name="name" required value="${formNameVal}" /></label>
         <label>${t(locale, 'internal_targets_pg_provider')}
           <select name="pgProvider" id="internal-target-pg" style="width:100%;max-width:320px;padding:8px 10px;margin-top:4px;border-radius:6px;border:1px solid #d1d5db;">
-            <option value="chillpay"${!pgIsJpay && !pgIsElementPay && !pgIsOx && !pgIsCrypto && !pgIsIlk && !pgIsQxipay && !pgIsOmspay && !pgIsQbang && !pgIsKsnet ? ' selected' : ''}>${t(locale, 'pg_provider_chillpay') || 'ChillPay'}</option>
+            <option value="chillpay"${!pgIsJpay && !pgIsElementPay && !pgIsOx && !pgIsCrypto && !pgIsIlk && !pgIsQxipay && !pgIsOmspay && !pgIsPayso && !pgIsKsnet && !pgIsQbang ? ' selected' : ''}>${t(locale, 'pg_provider_chillpay') || 'ChillPay'}</option>
             <option value="jpay"${pgIsJpay ? ' selected' : ''}>${t(locale, 'pg_provider_jpay') || 'JPAY'}</option>
             <option value="elementpay"${pgIsElementPay ? ' selected' : ''}>${t(locale, 'pg_provider_elementpay') || t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay'}</option>
             <option value="ox"${pgIsOx ? ' selected' : ''}>${t(locale, 'pg_provider_ox') || 'OXPAY'}</option>
@@ -32376,8 +32953,9 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
             <option value="ilk"${pgIsIlk ? ' selected' : ''}>${t(locale, 'pg_provider_ilk') || 'ILKPAY'}</option>
             <option value="qxipay"${pgIsQxipay ? ' selected' : ''}>${t(locale, 'pg_provider_qxipay') || 'QXIPAY'}</option>
             <option value="omspay"${pgIsOmspay ? ' selected' : ''}>${t(locale, 'pg_provider_omspay') || 'OMSPAY'}</option>
-            <option value="qbang"${pgIsQbang ? ' selected' : ''}>${t(locale, 'pg_provider_qbang') || 'QBANG'}</option>
+            <option value="payso"${pgIsPayso ? ' selected' : ''}>${t(locale, 'pg_provider_payso') || 'PAYSO'}</option>
             <option value="ksnet"${pgIsKsnet ? ' selected' : ''}>${t(locale, 'pg_provider_ksnet') || 'KSNET'}</option>
+            <option value="qbang"${pgIsQbang ? ' selected' : ''}>${t(locale, 'pg_provider_qbang') || 'QBANG'}</option>
           </select>
         </label>
         <p class="admin-page-desc" id="internal-pg-hint-jpay" style="display:${pgIsJpay ? 'block' : 'none'};">${t(locale, 'internal_targets_jpay_fields_hint')}</p>

@@ -1,0 +1,36 @@
+---
+description: 「새로운 결제 대행사 … 추가해줘」 시 NOTI PG 연동을 additive로 즉시 착수
+alwaysApply: true
+---
+
+# 신규 결제대행사(PG) NOTI 연동 트리거
+
+사용자가 아래와 같이 말하면 **추가 확인 없이** NOTI PG 연동 개발을 **즉시 시작**한다.
+
+- 「새로운 결제 대행사 {이름} 추가해줘」
+- 「{이름} PG 추가해」「{이름} NOTI 연동해」 등 동일 의도
+
+세부(postback 필드·Content-Type·ICOPAY path 등)는 사용자가 **추가로 적을 수 있다**. 없어도 OMSPAY/PAYSO 패턴으로 착수하고, 없는 값은 기존 패턴·placeholder/example로 두고 배포·공존 검증까지 진행한다.
+
+## 필수 구현 (additive only) — 기존 PG 삭제 절대 금지
+
+자세한 재발 방지: `pg-additive-only-no-delete.mdc` (항상 적용).
+
+1. `lib/{code}Noti.js` + `config/{code}-ingress.json` (+ example)
+2. `server.js`: require, `POST /noti/{code}` (+ 필요 시 `/noti/result/{code}`), 릴레이, `appendPgNotiLog` `pgProvider:'{code}'`
+3. 탭·URL: 노티거래내역·신규등록·로그분석·종합거래에 `{code}Url`
+4. `normalizeAdminPgSource` / `getNotiLogPgAcquirer` / `acquirerLabelFromLog` 에 `{code}`
+5. `ADMIN_PG_LIST_FILTER_V1` 유지
+6. `locales.js` ko/ja/en/th/zh
+7. **`scripts/deploy/required-pg-coexistence.json`에 신규 PG needles 추가**
+8. 배포 전: `node scripts/deploy/verify-pg-coexistence.js server.js` 통과
+9. `Deploy-Noti.ps1` — 파일은 **하나씩** 배포. 게이트 실패 시 배포 중단
+10. 배포 후 운영에서 **기존 PG + 신규 PG 전부** 공존 확인
+
+## 완료 기준
+
+관리자에 해당 PG 탭이 보이고, `POST /noti/{code}` 수신 건이 **그 탭에서만** 조회되면 완료.
+
+## 참고 구현
+
+- OMSPAY / PAYSO / KSNET / QBANG 패턴을 옆에 복사해 추가 (치환 금지)
