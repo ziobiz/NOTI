@@ -24,6 +24,7 @@ const ilkNoti = require('./lib/ilkNoti');
 const qxipayNoti = require('./lib/qxipayNoti');
 const omspayNoti = require('./lib/omspayNoti');
 const paysoNoti = require('./lib/paysoNoti');
+const { createPaysoIngress } = require('./lib/paysoIngress');
 const ksnetNoti = require('./lib/ksnetNoti');
 const cryptoNoti = require('./lib/cryptoNoti');
 const qbangNoti = require('./lib/qbangNoti');
@@ -7156,6 +7157,21 @@ async function handleOmspayWebhook(req, res) {
       if (Object.keys(parsed).length) body = parsed;
     }
   }
+  /* ICOPAY 가 PAYSO 실패/만료를 /noti/omspay 로 보내는 경우 → OMSPAY 목록에 쌓이지 않게 PAYSO 로 이관 */
+  if (
+    typeof paysoNoti.looksLikePaysoChannelNotify === 'function' &&
+    paysoNoti.looksLikePaysoChannelNotify(body, rawBodyStr)
+  ) {
+    console.warn(
+      '[OMSPAY] PAYSO payload on /noti/omspay — handoff to PAYSO',
+      'order=',
+      String((body && (body.orderNo || body.OrderNo)) || '-'),
+      'trn=',
+      String((body && (body.trnId || body.TransactionId)) || '-'),
+    );
+    req.body = body;
+    return handlePaysoWebhook(req, res);
+  }
   const so = String(omspayNoti.pick(body, ['so', 'So']) || '').trim();
   const order = String(omspayNoti.pick(body, ['note', 'orderNo', 'order', 'ref1']) || '').trim();
   console.log('[OMSPAY] webhook', 'so=', so || '-', 'order=', order || '-');
@@ -7681,348 +7697,25 @@ async function relayPaysoMerchantNotify(merchantId, merchant, notifyBody, rawBod
   return { relaySuccess, relayFailReason };
 }
 
+const paysoIngressRuntime = createPaysoIngress({
+  CONFIG_DIR,
+  loadJsonConfig,
+  loadOmspayIngressConfig,
+  applyIcopayPgNotifyIngressHeaders,
+  extractIcopayCompIdAndOrderFromNotifyResult,
+  parseNotiRawBodyToObject,
+  findMerchantByCompIdForCrypto,
+  MERCHANTS,
+  relayToMerchant,
+  appendPgNotiLog,
+  stampOmspayCompIdOnBody: stampPaysoCompIdOnBody,
+  pgIngressGuard,
+  respondPgIngressGuard,
+});
+
+/** PAYSO webhook: A) ICOPAY outbound / B) PAYSO origin — lib/paysoIngress.js */
 async function handlePaysoWebhook(req, res) {
-  const cfg = loadPaysoIngressConfig();
-  const rawBodyStr = req.rawBodyBuffer ? req.rawBodyBuffer.toString('utf8') : '';
-  const incomingContentType =
-    (req.get && req.get('Content-Type')) || (req.headers && req.headers['content-type']) || '';
-  let body = req.body;
-  if (!body || typeof body !== 'object') body = {};
-  if (Object.keys(body).length === 0 && req.rawBodyBuffer && req.rawBodyBuffer.length) {
-    try {
-      body = JSON.parse(req.rawBodyBuffer.toString('utf8'));
-    } catch (_) {
-      const parsed = parseNotiRawBodyToObject(req.rawBodyBuffer, incomingContentType);
-      if (Object.keys(parsed).length) body = parsed;
-    }
-  }
-  const isIcopayUnified = paysoNoti.looksLikeIcopayUnifiedNotify(body);
-  const refno = String(
-    paysoNoti.pick(body, ['refno', 'refNo', 'referenceNo', 'trnId', 'pgTxnId', 'transactionId']) || '',
-  ).trim();
-  const merchantRef = String(
-    paysoNoti.pick(body, ['merchantid', 'merchantId', 'merchantID', 'compId', 'CompId', 'Comp-Id']) || '',
-  ).trim();
-  const order = String(
-    paysoNoti.pick(body, ['orderNo', 'OrderNo', 'orderno', 'order', 'ref1']) || refno || merchantRef,
-  ).trim();
-  console.log(
-    '[PAYSO] webhook',
-    'unified=',
-    isIcopayUnified ? '1' : '0',
-    'refno=',
-    refno || '-',
-    'order=',
-    order || '-',
-  );
-
-  const guard = pgIngressGuard.beginInbound('payso', 'webhook', [refno, order, merchantRef]);
-  if (respondPgIngressGuard(res, guard, 'PAYSO')) return;
-
-  if (!cfg.enabled) {
-    pgIngressGuard.endInbound('payso', guard.key, { ok: false, httpStatus: 503 });
-    return res.status(503).send('PAYSO ingress disabled');
-  }
-
-  let forwardBody = rawBodyStr && String(rawBodyStr).trim() ? rawBodyStr : '';
-  if (!forwardBody) {
-    if ((incomingContentType || '').toLowerCase().includes('json') || isIcopayUnified) {
-      forwardBody = JSON.stringify(body || {});
-    } else {
-      const params = new URLSearchParams();
-      for (const [k, v] of Object.entries(body || {})) {
-        if (v === undefined || v === null) continue;
-        params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
-      }
-      forwardBody = params.toString();
-    }
-  }
-
-  /* ICOPAY 통합 JSON 이 /noti/payso 로 다시 들어오면 ICOPAY 재전달 금지(루프·폭주). 가맹 릴레이·로그만. */
-  if (isIcopayUnified) {
-    const compIdHdr = paysoNoti.cleanCompId(
-      paysoNoti.pick(body, ['compId', 'CompId', 'Comp-Id', 'merchantId']) || merchantRef,
-    );
-    const orderHdr = String(paysoNoti.pick(body, ['orderNo', 'OrderNo']) || order || '').trim();
-    pgIngressGuard.endInbound('payso', guard.key, { ok: true, httpStatus: 200 });
-    console.log(
-      '[PAYSO] icopay-unified (no re-forward)',
-      'trnId=',
-      refno || '-',
-      'order=',
-      orderHdr || '-',
-      'compId=',
-      compIdHdr || '(none)',
-      'paid=',
-      paysoNoti.paysoIsPaid(body) ? '1' : '0',
-    );
-    res.status(200).json({
-      ok: true,
-      accepted: true,
-      source: 'icopay-unified',
-      orderNo: orderHdr || '',
-      pgTxnId: refno || '',
-    });
-
-    const baseNotifyBody = stampPaysoCompIdOnBody(
-      paysoNoti.mapPaysoToMerchantNotifyBody(body, orderHdr || order, {
-        compId: compIdHdr,
-        trnId: refno,
-      }),
-      compIdHdr,
-    );
-    setImmediate(() => {
-      Promise.resolve()
-        .then(async () => {
-          let compId = compIdHdr;
-          let match = findMerchantByCompIdForCrypto(compId);
-          if (compId) {
-            const paysoSlot = MERCHANTS.get(compId + '#payso');
-            if (paysoSlot && String(paysoSlot.callbackUrl || paysoSlot.resultUrl || '').trim()) {
-              match = { merchantId: compId + '#payso', merchant: paysoSlot, via: 'payso-slot' };
-            }
-          }
-          if (!match) {
-            appendPgNotiLog({
-              routeKey: 'payso/webhook',
-              merchantId: compId || '',
-              kind: 'callback',
-              body: baseNotifyBody,
-              rawBody: forwardBody || undefined,
-              targetUrl: '',
-              contentType: incomingContentType,
-              env: 'live',
-              relayStatus: 'fail',
-              relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing Comp-Id',
-              pgProvider: 'payso',
-            });
-            return;
-          }
-          await relayPaysoMerchantNotify(
-            match.merchantId,
-            match.merchant,
-            stampPaysoCompIdOnBody(baseNotifyBody, compId),
-            forwardBody,
-            incomingContentType,
-          );
-        })
-        .catch((e) => {
-          console.error('[PAYSO] unified merchant notify error', e && e.message ? e.message : e);
-          appendPgNotiLog({
-            routeKey: 'payso/webhook',
-            merchantId: compIdHdr || '',
-            kind: 'callback',
-            body: baseNotifyBody,
-            rawBody: forwardBody || undefined,
-            targetUrl: '',
-            contentType: incomingContentType,
-            env: 'live',
-            relayStatus: 'fail',
-            relayFailReason: e && e.message ? e.message : String(e),
-            pgProvider: 'payso',
-          });
-        });
-    });
-    return;
-  }
-
-  if (!cfg.icopayNotifyUrl) {
-    console.error('[PAYSO] icopayNotifyUrl not configured');
-    appendPgNotiLog({
-      routeKey: 'payso/webhook',
-      merchantId: '',
-      kind: 'callback',
-      body: Object.assign({ pgKind: 'payso' }, body),
-      rawBody: rawBodyStr || undefined,
-      targetUrl: '',
-      contentType: incomingContentType,
-      env: 'live',
-      relayStatus: 'fail',
-      relayFailReason: 'icopayNotifyUrl_missing',
-      pgProvider: 'payso',
-    });
-    pgIngressGuard.endInbound('payso', guard.key, { ok: false, httpStatus: 503 });
-    return res.status(503).send('PAYSO ICOPAY URL not configured');
-  }
-
-  let ico;
-  try {
-    ico = await forwardPaysoToIcopay(
-      forwardBody,
-      incomingContentType || 'application/x-www-form-urlencoded',
-      1,
-    );
-  } catch (eFwd) {
-    pgIngressGuard.endInbound('payso', guard.key, { ok: false, httpStatus: 502 });
-    throw eFwd;
-  }
-  const extracted = extractIcopayCompIdAndOrderFromNotifyResult(ico);
-  const compIdHdr = paysoNoti.cleanCompId(extracted.compId);
-  const orderHdr = extracted.orderNo;
-
-  const outStatus = ico.status && Number.isFinite(Number(ico.status)) ? Number(ico.status) : 502;
-  const outCt =
-    paysoNoti.headerGetIgnoreCase(ico.headers, 'content-type') || 'application/json; charset=utf-8';
-  const outBody = ico.data != null ? ico.data : '';
-  const forwardOk = outStatus >= 200 && outStatus < 300;
-  pgIngressGuard.endInbound('payso', guard.key, { ok: forwardOk, httpStatus: outStatus });
-  console.log(
-    '[PAYSO] passthrough',
-    'refno=',
-    refno || '-',
-    'order=',
-    order || '-',
-    'http=',
-    outStatus,
-    'compId=',
-    compIdHdr || '(none)',
-  );
-  res.status(outStatus);
-  res.set('Content-Type', outCt);
-  res.send(outBody);
-
-  const baseNotifyBody = stampPaysoCompIdOnBody(
-    paysoNoti.mapPaysoToMerchantNotifyBody(body, orderHdr || order, { compId: compIdHdr, trnId: refno }),
-    compIdHdr,
-  );
-  if (!paysoNoti.paysoShouldNotifyMerchant(body)) {
-    appendPgNotiLog({
-      routeKey: 'payso/webhook',
-      merchantId: compIdHdr || '',
-      kind: 'callback',
-      body: baseNotifyBody,
-      rawBody: forwardBody || undefined,
-      targetUrl: '',
-      contentType: incomingContentType,
-      env: 'live',
-      relayStatus: 'skip',
-      relayFailReason: 'event_skip',
-      pgProvider: 'payso',
-    });
-    return;
-  }
-
-  setImmediate(() => {
-    Promise.resolve()
-      .then(async () => {
-        let compId = compIdHdr || paysoNoti.cleanCompId(paysoNoti.pick(body, ['compId', 'CompId', 'Comp-Id']));
-        const lookupCandidates = [];
-        const pushLookupCand = (c) => {
-          const v = String(c || '').trim();
-          if (!v) return;
-          if (lookupCandidates.indexOf(v) < 0) lookupCandidates.push(v);
-        };
-        pushLookupCand(orderHdr);
-        pushLookupCand(refno);
-        pushLookupCand(merchantRef);
-        pushLookupCand(paysoNoti.pick(body, ['orderNo', 'orderno', 'order']));
-        pushLookupCand(order);
-        const orderForComp = lookupCandidates[0] || refno || merchantRef || order || '';
-        if (!compId && cfg.icopayOrderLookupUrl) {
-          for (const cand of lookupCandidates) {
-            try {
-              const lookupUrl = String(cfg.icopayOrderLookupUrl).replace(
-                /{order}/gi,
-                encodeURIComponent(cand),
-              );
-              const lr = await axios.get(lookupUrl, { timeout: 8000, validateStatus: () => true });
-              const looked = extractIcopayCompIdAndOrderFromNotifyResult({
-                headers: lr.headers || {},
-                data: lr.data,
-              });
-              let fromData = looked.compId;
-              if (!fromData && lr.data && typeof lr.data === 'object') {
-                const nest = lr.data.data && typeof lr.data.data === 'object' ? lr.data.data : lr.data;
-                fromData = String(nest.compId || nest.CompId || nest.merchantId || '').trim();
-              }
-              if (fromData) {
-                compId = paysoNoti.cleanCompId(fromData);
-                console.log('[PAYSO] order-lookup hit', 'cand=', cand, 'compId=', compId);
-                break;
-              }
-            } catch (_) {}
-          }
-        }
-        const compIdBase = paysoNoti.cleanCompId(compId);
-        let match = findMerchantByCompIdForCrypto(compIdBase);
-        if (compIdBase) {
-          const paysoSlot = MERCHANTS.get(compIdBase + '#payso');
-          if (paysoSlot && String(paysoSlot.callbackUrl || paysoSlot.resultUrl || '').trim()) {
-            match = { merchantId: compIdBase + '#payso', merchant: paysoSlot, via: 'payso-slot' };
-          }
-        }
-        if (!match) {
-          console.warn(
-            '[PAYSO] merchant notify skipped',
-            'compId=',
-            compIdBase || '(none)',
-            'order=',
-            orderForComp || '-',
-          );
-          appendPgNotiLog({
-            routeKey: 'payso/webhook',
-            merchantId: compIdBase || '',
-            kind: 'callback',
-            body: stampPaysoCompIdOnBody(
-              paysoNoti.mapPaysoToMerchantNotifyBody(body, orderHdr || orderForComp, { compId: compIdBase, trnId: refno }),
-              compIdBase,
-            ),
-            rawBody: forwardBody || undefined,
-            targetUrl: '',
-            contentType: incomingContentType,
-            env: 'live',
-            relayStatus: 'fail',
-            relayFailReason: compIdBase ? 'Merchant not found for Comp-Id' : 'Missing X-Icopay-Comp-Id',
-            pgProvider: 'payso',
-          });
-          return;
-        }
-        const notifyBody = stampPaysoCompIdOnBody(
-          paysoNoti.mapPaysoToMerchantNotifyBody(body, orderHdr || orderForComp, { compId: compIdBase, trnId: refno }),
-          compIdBase,
-        );
-        try {
-          await relayPaysoMerchantNotify(
-            match.merchantId,
-            match.merchant,
-            notifyBody,
-            forwardBody,
-            incomingContentType,
-          );
-        } catch (e) {
-          console.error('[PAYSO] merchant relay error', e.message || e);
-          appendPgNotiLog({
-            routeKey: 'payso/webhook',
-            merchantId: match.merchantId || compIdBase || '',
-            kind: 'callback',
-            body: notifyBody,
-            rawBody: forwardBody || undefined,
-            targetUrl: String((match.merchant && match.merchant.callbackUrl) || '').trim(),
-            contentType: incomingContentType,
-            env: 'live',
-            relayStatus: 'fail',
-            relayFailReason: e.message || String(e),
-            pgProvider: 'payso',
-          });
-        }
-      })
-      .catch((e) => {
-        console.error('[PAYSO] merchant notify async error', e && e.message ? e.message : e);
-        appendPgNotiLog({
-          routeKey: 'payso/webhook',
-          merchantId: compIdHdr || '',
-          kind: 'callback',
-          body: baseNotifyBody,
-          rawBody: forwardBody || undefined,
-          targetUrl: '',
-          contentType: incomingContentType,
-          env: 'live',
-          relayStatus: 'fail',
-          relayFailReason: e && e.message ? e.message : String(e),
-          pgProvider: 'payso',
-        });
-      });
-  });
+  return paysoIngressRuntime.handlePaysoWebhook(req, res);
 }
 
 function extractPaysoBrowserPayload(req) {
@@ -10578,6 +10271,13 @@ function appendPgNotiLog(entry) {
 /** 노티 로그 행의 PG(대행사): 명시 필드 또는 routeKey(jpay/… · elementpay/…) */
 function getNotiLogPgAcquirer(log) {
   const explicit = log && log.pgProvider != null ? String(log.pgProvider).toLowerCase().trim() : '';
+  /* ICOPAY 가 PAYSO 만료/실패를 omspay 라우트로 보낸 경우 → PAYSO 탭(ICOPAY PAYSO 목록과 일치) */
+  if (
+    typeof paysoNoti.looksLikePaysoChannelNotify === 'function' &&
+    paysoNoti.looksLikePaysoChannelNotify(log && log.body, log && log.rawBody)
+  ) {
+    return 'payso';
+  }
   if (explicit === 'crypto') return 'crypto';
   if (explicit === 'ox' || explicit === 'oxpay') return 'ox';
   if (explicit === 'ilk' || explicit === 'ilkpay') return 'ilk';
@@ -13752,22 +13452,63 @@ function logMatchesCrVoidRefundDateRange(log, dateFrom, dateTo, tzFallback, isoT
 /** 노티거래내역·일일노티: ChillPay 타임존 기준 거래일(결제일)로 기간 필터. 결제일·수신일 중 하나라도 구간에 있으면 포함 */
 function logMatchesNotiTransactionDateRange(log, dateFrom, dateTo, tzFallback) {
   if (!dateFrom && !dateTo) return true;
-  const payYmd = getCrVoidRefundPaymentCalendarYmd(log, tzFallback);
   const inR = (ymd) => !!(ymd && (!dateFrom || ymd >= dateFrom) && (!dateTo || ymd <= dateTo));
-  if (inR(payYmd)) return true;
-  const recIso = log.receivedAtIso || log.receivedAt;
-  if (!recIso) return false;
-  try {
-    const recYmd = new Intl.DateTimeFormat('en-CA', {
-      timeZone: tzFallback || 'Asia/Bangkok',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).format(new Date(recIso));
-    return inR(recYmd);
-  } catch {
-    return false;
+  const ymdInTz = (iso, tz) => {
+    if (!iso) return '';
+    try {
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz || 'Asia/Bangkok',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date(iso));
+    } catch {
+      return '';
+    }
+  };
+  /* ICOPAY(JP) · NOTI(TH) 날짜 필터가 어긋나지 않도록 결제/수신 시각을 TH·JP 양쪽으로 판정 */
+  const zones = [];
+  const pushZ = (z) => {
+    const t = String(z || '').trim();
+    if (t && zones.indexOf(t) < 0) zones.push(t);
+  };
+  pushZ(tzFallback || 'Asia/Bangkok');
+  pushZ('Asia/Tokyo');
+  pushZ('Asia/Bangkok');
+  const body = typeof parseNotiBodyForDisplay === 'function' ? parseNotiBodyForDisplay(log) : parseNotiBody(log);
+  const payYmdPrimary = getCrVoidRefundPaymentCalendarYmd(log, tzFallback);
+  const payRaw = notifBodyPaymentDateForWindow(body);
+  const orderYmd =
+    typeof paysoNoti.paysoFsOrderCalendarYmd === 'function'
+      ? paysoNoti.paysoFsOrderCalendarYmd(body && (body.orderNo || body.OrderNo))
+      : '';
+  const orc = String((body && (body.outcomeReasonCode || body.outcome_reason_code)) || '')
+    .trim()
+    .toUpperCase();
+  const isPaysoPendingExpired = orc === 'PAYSO_PENDING_EXPIRED' || orc.startsWith('PAYSO_PENDING');
+  /* PAYSO: ICOPAY 거래일과 맞추기 — 결제일·FS주문일 우선. 앵커일이 기간 밖이면 수신일로 재포함하지 않음 */
+  if (getNotiLogPgAcquirer(log) === 'payso') {
+    if (inR(payYmdPrimary) || inR(orderYmd)) return true;
+    if (payRaw) {
+      for (const z of zones) {
+        const t = Date.parse(payRaw);
+        if (!Number.isNaN(t) && inR(ymdInTz(new Date(t).toISOString(), z))) return true;
+      }
+    }
+    if (payYmdPrimary || orderYmd) return false;
+    if (isPaysoPendingExpired) return false;
+  } else {
+    if (inR(payYmdPrimary)) return true;
   }
+  const recIso = log.receivedAtIso || log.receivedAt || '';
+  for (const z of zones) {
+    if (payRaw) {
+      const t = Date.parse(payRaw);
+      if (!Number.isNaN(t) && inR(ymdInTz(new Date(t).toISOString(), z))) return true;
+    }
+    if (recIso && inR(ymdInTz(recIso, z))) return true;
+  }
+  return false;
 }
 
 function formatNotiLogPaymentDateTimeTHJP(log, _tzFallback, merchant) {
@@ -28263,7 +28004,7 @@ function isPaysoOpsProbeLog(log) {
   ]
     .map((x) => String(x || '').toUpperCase())
     .join(' ');
-  return /HEALTHCHECK|DEDUP-TEST|DEDUP-ORDER|VERIFY001|VERIFYFAIL|PROBE1|COMMTEST|PAYSO-TEST|TEST-REF|TEST-PAYSO|PS-ALIAS|TESTICOPAYPROBE/.test(
+  return /HEALTHCHECK|DEDUP-TEST|DEDUP-ORDER|VERIFY001|VERIFYFAIL|PROBE1|COMMTEST|PAYSO-TEST|TEST-REF|TEST-PAYSO|PS-ALIAS|TESTICOPAYPROBE|SMOKEFAIL|SMOKECP|SMOKE/.test(
     blob,
   );
 }
@@ -28273,7 +28014,14 @@ function scorePaysoListLog(log) {
   const b = parseNotiBodyForDisplay(log);
   const tx = notifBodyTxId(b);
   const order = String(b.orderNo || b.OrderNo || '').trim();
+  const st = String(b.paymentStatus || '').toUpperCase();
+  const status = String(b.status || '');
+  const paid = (st === 'PAID' || status === '10') && st !== 'FAILED' && status !== '99';
+  const truePaid = !!(paid && notifBodyPaymentDateForWindow(b));
   let score = 0;
+  if (truePaid) score += 500;
+  else if (paid) score += 200;
+  else if (st === 'FAILED' || status === '99') score += 80;
   if (/^PS/i.test(tx)) score += 100;
   if (/^OM/i.test(order)) score += 50;
   else if (/^FS/i.test(order)) score += 40;
@@ -28305,8 +28053,9 @@ function dedupePaysoLogsForTransactionList(logs) {
     const amt = String(b.amount != null ? b.amount : b.Amount != null ? b.Amount : '').trim();
     const minute = String(log.receivedAtIso || log.receivedAt || '').slice(0, 16);
     let key = '';
-    if (/^PS/i.test(tx)) key = 'tx:' + tx.toLowerCase();
-    else if (/^(OM|FS)/i.test(order)) key = 'ord:' + order;
+    /* ICOPAY 1주문=1행: OM/FS 주문번호 우선 (form 숫자 refno 와 JSON PS… 를 같은 키로) */
+    if (/^(OM|FS)/i.test(order)) key = 'ord:' + order;
+    else if (/^PS/i.test(tx)) key = 'tx:' + tx.toLowerCase();
     else if (mid && amt && minute) key = 'fa:' + mid + '|' + amt + '|' + minute;
     else if (tx) key = 'tx:' + String(tx).toLowerCase();
     else if (order) key = 'ord:' + order;
@@ -28394,6 +28143,16 @@ function getTransactionListLogs(req) {
 // → 노티(콜백)에서는 0=성공, 2=취소 이므로, 0을 취소로 넣지 않고 2/3/Cancel 만 취소로 처리.
 function isSuccessPaymentBody(body) {
   if (!body || typeof body !== 'object') return false;
+  // PAYSO / ICOPAY 통합: status=99 · paymentStatus=FAILED · outcomeReasonCode → 성공 아님
+  if (typeof paysoNoti.paysoIsExplicitFailure === 'function' && paysoNoti.paysoIsExplicitFailure(body)) {
+    return false;
+  }
+  const payStEarly = String(body.paymentStatus ?? body.PaymentStatus ?? '')
+    .trim()
+    .toUpperCase();
+  if (payStEarly === 'FAILED' || payStEarly === 'FAIL') return false;
+  const stEarly = String(body.status ?? '').trim();
+  if (stEarly === '99' || stEarly.toUpperCase() === 'F0') return false;
   // ElementPay / ICOPAY mirror: 205 = Payment success (must not use ChillPay status=0 rules)
   if (elementPayNoti.looksLikeElementPayCallbackBody(body)) {
     if (elementPayNoti.elementPayIsSuccessCallbackStatus(body)) return true;
@@ -28566,22 +28325,60 @@ function buildCancelDetailCellText(locale, tFn, body) {
   return tFn(locale, 'tx_status_cancel') + ' / ' + buildCancelDetailReasonLine(locale, tFn, body);
 }
 
-/** 실패 건 내역/사유 (ElementPay status_message·status 코드 등) */
+/** ICOPAY/PAYSO outcomeReason 다국어 장문을 요점 한 줄로 */
+function shortenPgFailReasonText(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+  if (s.includes(' · ')) {
+    const parts = s.split(' · ');
+    s = (parts.slice(1).join(' · ') || parts[0] || '').trim();
+  }
+  if (s.includes(' / ')) s = s.split(' / ')[0].trim();
+  if (s.includes(' — ')) s = s.split(' — ')[0].trim();
+  if (s.includes(' – ')) s = s.split(' – ')[0].trim();
+  if (s.length > 48) s = s.slice(0, 48).trim();
+  return s;
+}
+
+/** outcomeReasonCode → 짧은 locale 키 */
+function resolvePaysoFailReasonShort(locale, tFn, body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const orc = String(b.outcomeReasonCode || b.outcome_reason_code || '')
+    .trim()
+    .toUpperCase();
+  const tryKey = (key) => {
+    const v = tFn(locale, key);
+    return v && v !== key ? v : '';
+  };
+  if (orc === 'PAYSO_PENDING_EXPIRED' || /PENDING_EXPIRED|TIMEOUT|EXPIRED/.test(orc)) {
+    return tryKey('tx_fail_reason_timeout_incomplete');
+  }
+  if (orc === 'PAYSO_BUYER_RETURN_FAIL' || /BUYER_RETURN|RETURN_FAIL/.test(orc)) {
+    return tryKey('tx_fail_reason_buyer_return');
+  }
+  if (/FALSE_PAID/.test(orc)) return tryKey('tx_fail_reason_false_paid');
+  const shortOr = shortenPgFailReasonText(b.outcomeReason || b.outcome_reason || '');
+  if (shortOr) return shortOr;
+  return '';
+}
+
+/** 실패 건 내역/사유 — `실패 / 시간초과(미완료)` 처럼 요점만 */
 function buildFailDetailCellText(locale, tFn, body) {
   const b = body && typeof body === 'object' ? body : {};
-  const sup = extractCancelSupplementFromNotiBody(b);
-  let reason = String(sup.primary || '').trim();
+  let reason = resolvePaysoFailReasonShort(locale, tFn, b);
   if (!reason) {
-    reason = String(b.status_message || b.statusMessage || b.message || '').trim();
+    const sup = extractCancelSupplementFromNotiBody(b);
+    reason = shortenPgFailReasonText(sup.primary || '');
   }
-  if (elementPayNoti.looksLikeElementPayCallbackBody(b)) {
+  if (!reason) {
+    reason = shortenPgFailReasonText(b.status_message || b.statusMessage || b.message || '');
+  }
+  if (!reason && elementPayNoti.looksLikeElementPayCallbackBody(b)) {
     const code = elementPayNoti.elementPayCallbackStatusCode(b);
-    if (code != null) {
-      reason = reason ? code + ' · ' + reason : String(code);
-    }
+    if (code != null) reason = String(code);
   }
   if (!reason) reason = tFn(locale, 'tx_fail_reason_none');
-  return tFn(locale, 'tx_status_fail') + ' / ' + tFn(locale, 'tx_reason_label') + ': ' + reason;
+  return tFn(locale, 'tx_status_fail') + ' / ' + reason;
 }
 
 /** 종합거래·노티거래내역·로그분석 공통: 왼쪽 한 번에 보기+총 건수, 가운데 페이지(최대 20블록 &lt; &gt;) */

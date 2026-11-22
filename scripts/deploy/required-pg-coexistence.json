@@ -17,6 +17,7 @@
         "app.post('/noti/payso",
         "paysoUrl:",
         "lib/paysoNoti",
+        "lib/paysoIngress",
         "p === 'payso'",
         "merchantsRegisterLink('payso'"
       ]
