@@ -7696,10 +7696,25 @@ async function handlePaysoWebhook(req, res) {
       if (Object.keys(parsed).length) body = parsed;
     }
   }
-  const refno = String(paysoNoti.pick(body, ['refno', 'refNo', 'referenceNo']) || '').trim();
-  const merchantRef = String(paysoNoti.pick(body, ['merchantid', 'merchantId', 'merchantID']) || '').trim();
-  const order = String(paysoNoti.pick(body, ['orderNo', 'orderno', 'order', 'ref1']) || refno || merchantRef).trim();
-  console.log('[PAYSO] webhook', 'refno=', refno || '-', 'order=', order || '-');
+  const isIcopayUnified = paysoNoti.looksLikeIcopayUnifiedNotify(body);
+  const refno = String(
+    paysoNoti.pick(body, ['refno', 'refNo', 'referenceNo', 'trnId', 'pgTxnId', 'transactionId']) || '',
+  ).trim();
+  const merchantRef = String(
+    paysoNoti.pick(body, ['merchantid', 'merchantId', 'merchantID', 'compId', 'CompId', 'Comp-Id']) || '',
+  ).trim();
+  const order = String(
+    paysoNoti.pick(body, ['orderNo', 'OrderNo', 'orderno', 'order', 'ref1']) || refno || merchantRef,
+  ).trim();
+  console.log(
+    '[PAYSO] webhook',
+    'unified=',
+    isIcopayUnified ? '1' : '0',
+    'refno=',
+    refno || '-',
+    'order=',
+    order || '-',
+  );
 
   const guard = pgIngressGuard.beginInbound('payso', 'webhook', [refno, order, merchantRef]);
   if (respondPgIngressGuard(res, guard, 'PAYSO')) return;
@@ -7708,6 +7723,109 @@ async function handlePaysoWebhook(req, res) {
     pgIngressGuard.endInbound('payso', guard.key, { ok: false, httpStatus: 503 });
     return res.status(503).send('PAYSO ingress disabled');
   }
+
+  let forwardBody = rawBodyStr && String(rawBodyStr).trim() ? rawBodyStr : '';
+  if (!forwardBody) {
+    if ((incomingContentType || '').toLowerCase().includes('json') || isIcopayUnified) {
+      forwardBody = JSON.stringify(body || {});
+    } else {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(body || {})) {
+        if (v === undefined || v === null) continue;
+        params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+      }
+      forwardBody = params.toString();
+    }
+  }
+
+  /* ICOPAY 통합 JSON 이 /noti/payso 로 다시 들어오면 ICOPAY 재전달 금지(루프·폭주). 가맹 릴레이·로그만. */
+  if (isIcopayUnified) {
+    const compIdHdr = paysoNoti.cleanCompId(
+      paysoNoti.pick(body, ['compId', 'CompId', 'Comp-Id', 'merchantId']) || merchantRef,
+    );
+    const orderHdr = String(paysoNoti.pick(body, ['orderNo', 'OrderNo']) || order || '').trim();
+    pgIngressGuard.endInbound('payso', guard.key, { ok: true, httpStatus: 200 });
+    console.log(
+      '[PAYSO] icopay-unified (no re-forward)',
+      'trnId=',
+      refno || '-',
+      'order=',
+      orderHdr || '-',
+      'compId=',
+      compIdHdr || '(none)',
+      'paid=',
+      paysoNoti.paysoIsPaid(body) ? '1' : '0',
+    );
+    res.status(200).json({
+      ok: true,
+      accepted: true,
+      source: 'icopay-unified',
+      orderNo: orderHdr || '',
+      pgTxnId: refno || '',
+    });
+
+    const baseNotifyBody = stampPaysoCompIdOnBody(
+      paysoNoti.mapPaysoToMerchantNotifyBody(body, orderHdr || order, {
+        compId: compIdHdr,
+        trnId: refno,
+      }),
+      compIdHdr,
+    );
+    setImmediate(() => {
+      Promise.resolve()
+        .then(async () => {
+          let compId = compIdHdr;
+          let match = findMerchantByCompIdForCrypto(compId);
+          if (compId) {
+            const paysoSlot = MERCHANTS.get(compId + '#payso');
+            if (paysoSlot && String(paysoSlot.callbackUrl || paysoSlot.resultUrl || '').trim()) {
+              match = { merchantId: compId + '#payso', merchant: paysoSlot, via: 'payso-slot' };
+            }
+          }
+          if (!match) {
+            appendPgNotiLog({
+              routeKey: 'payso/webhook',
+              merchantId: compId || '',
+              kind: 'callback',
+              body: baseNotifyBody,
+              rawBody: forwardBody || undefined,
+              targetUrl: '',
+              contentType: incomingContentType,
+              env: 'live',
+              relayStatus: 'fail',
+              relayFailReason: compId ? 'Merchant not found for Comp-Id' : 'Missing Comp-Id',
+              pgProvider: 'payso',
+            });
+            return;
+          }
+          await relayPaysoMerchantNotify(
+            match.merchantId,
+            match.merchant,
+            stampPaysoCompIdOnBody(baseNotifyBody, compId),
+            forwardBody,
+            incomingContentType,
+          );
+        })
+        .catch((e) => {
+          console.error('[PAYSO] unified merchant notify error', e && e.message ? e.message : e);
+          appendPgNotiLog({
+            routeKey: 'payso/webhook',
+            merchantId: compIdHdr || '',
+            kind: 'callback',
+            body: baseNotifyBody,
+            rawBody: forwardBody || undefined,
+            targetUrl: '',
+            contentType: incomingContentType,
+            env: 'live',
+            relayStatus: 'fail',
+            relayFailReason: e && e.message ? e.message : String(e),
+            pgProvider: 'payso',
+          });
+        });
+    });
+    return;
+  }
+
   if (!cfg.icopayNotifyUrl) {
     console.error('[PAYSO] icopayNotifyUrl not configured');
     appendPgNotiLog({
@@ -7725,20 +7843,6 @@ async function handlePaysoWebhook(req, res) {
     });
     pgIngressGuard.endInbound('payso', guard.key, { ok: false, httpStatus: 503 });
     return res.status(503).send('PAYSO ICOPAY URL not configured');
-  }
-
-  let forwardBody = rawBodyStr && String(rawBodyStr).trim() ? rawBodyStr : '';
-  if (!forwardBody) {
-    if ((incomingContentType || '').toLowerCase().includes('json')) {
-      forwardBody = JSON.stringify(body || {});
-    } else {
-      const params = new URLSearchParams();
-      for (const [k, v] of Object.entries(body || {})) {
-        if (v === undefined || v === null) continue;
-        params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
-      }
-      forwardBody = params.toString();
-    }
   }
 
   let ico;
@@ -10666,13 +10770,17 @@ function logPgQueryWithBase(q, pg, extra) {
   return o;
 }
 
-/** 노티 본문 거래 ID (ChillPay TransactionId / JPAY transaction_id / ElementPay id) */
+/** 노티 본문 거래 ID (ChillPay TransactionId / JPAY transaction_id / ElementPay id / PAYSO trnId·pgTxnId·refno) */
 function notifBodyTxId(body) {
   if (!body || typeof body !== 'object') return '';
   const v =
     body.TransactionId ??
     body.transactionId ??
     body.transaction_id ??
+    body.trnId ??
+    body.pgTxnId ??
+    body.refno ??
+    body.refNo ??
     body.id;
   return v != null && String(v).trim() !== '' ? String(v).trim() : '';
 }
@@ -10688,6 +10796,8 @@ function notifBodyPaymentDateForWindow(body) {
   return String(
     body.PaymentDate ||
       body.paymentDate ||
+      body.paidAt ||
+      body.paid_at ||
       body.TransactionDate ||
       body.transactionDate ||
       body.time_end ||
@@ -24120,6 +24230,13 @@ function parseNotiBodyForDisplay(log) {
   if (log && getNotiLogPgAcquirer(log) === 'elementpay') {
     return enrichElementPayNotiBodyForDisplay(body, log);
   }
+  if (log && getNotiLogPgAcquirer(log) === 'payso') {
+    try {
+      return paysoNoti.enrichPaysoBodyForDisplay(body, log.rawBody, log.contentType || '');
+    } catch (_) {
+      return body;
+    }
+  }
   return body;
 }
 
@@ -24792,13 +24909,13 @@ const TRANSACTION_LIST_COLUMNS = [
   { type: 'fixed', id: 'no' },
   { type: 'fixed', id: 'received_date' },
   { type: 'fixed', id: 'received_time' },
-  { type: 'body', keys: ['TransactionId', 'transactionId', 'transaction_id', 'id'] },
+  { type: 'body', keys: ['TransactionId', 'transactionId', 'transaction_id', 'trnId', 'pgTxnId', 'refno', 'refNo', 'id'] },
   { type: 'fixed', id: 'pg_acquirer' },
   { type: 'fixed', id: 'merchant' },
   { type: 'fixed', id: 'route_no' },
   { type: 'body', keys: ['CustomerId', 'customerId', 'email', 'Email', 'payEmailAddress'] },
   { type: 'body', keys: ['OrderNo', 'orderNo', 'orderid', 'orderID', 'order'] },
-  { type: 'body', keys: ['PaymentDate', 'paymentDate', 'datetime'] },
+  { type: 'body', keys: ['PaymentDate', 'paymentDate', 'paidAt', 'paid_at', 'datetime'] },
   { type: 'body', keys: ['Amount', 'amount', 'true_amount', 'trueAmount'] },
   { type: 'fixed', id: 'internal_amount' },
   { type: 'body', keys: ['Currency', 'currency'], display: 'currency' },
@@ -24985,8 +25102,20 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   }
   const rev = sortDir === 'asc' ? 1 : -1;
   const getReceivedTime = (log) => (Date.parse(log.receivedAtIso || log.receivedAt) || 0);
+  /** ICOPAY 결제요청시간과 맞추기: PaymentDate/paidAt 우선, 없으면 노티 수신시각 */
+  const getListSortTime = (log) => {
+    try {
+      const b = parseNotiBodyForDisplay(log);
+      const payRaw = notifBodyPaymentDateForWindow(b);
+      if (payRaw) {
+        const pt = Date.parse(payRaw);
+        if (!Number.isNaN(pt)) return pt;
+      }
+    } catch (_) {}
+    return getReceivedTime(log);
+  };
   const getReceivedDate = (log) => {
-    const t = getReceivedTime(log);
+    const t = getListSortTime(log);
     if (!t) return 0;
     const d = new Date(t);
     d.setHours(0, 0, 0, 0);
@@ -25030,8 +25159,8 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
   } else if (sortBy === 'date') {
     list.sort((a, b) => (getReceivedDate(a) - getReceivedDate(b)) * rev);
   } else {
-    // 기본: 시간별 (노티 수신 시각 전체)
-    list.sort((a, b) => (getReceivedTime(a) - getReceivedTime(b)) * rev);
+    // 기본: 결제 시각(PaymentDate/paidAt) → 없으면 노티 수신 시각 (ICOPAY 목록 순서에 맞춤)
+    list.sort((a, b) => (getListSortTime(a) - getListSortTime(b)) * rev);
   }
   // 요약: 성공/실패/무효/환불/기타 건수·금액 (색상 블록용) — slice 전 전체 목록 기준
   const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -25044,14 +25173,14 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
     other: { count: 0, byCurr: {} },
   };
   const getNotiStatusKind = (log) => {
-    const body = parseNotiBody(log);
+    const body = parseNotiBodyForDisplay(log);
     if (isJpaySaleAsyncNotifyBody(body)) {
       const rc = String(body.returncode).trim();
       if (rc !== '00' && rc !== '0') return 'fail';
     }
     const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
     const isSuccess = isSuccessPaymentBody(body);
-    const txId = body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '';
+    const txId = notifBodyTxId(body);
     const orderNo = body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID ?? '';
     const e = (txId && voidRefundByTxIdForFilter[txId]) || (orderNo && voidRefundByOrderNoForFilter[String(orderNo).trim()]) || null;
     if (isSuccess) {
@@ -28121,6 +28250,109 @@ function filterTransactionLogsByNotiKind(logs, mode) {
   });
 }
 
+/** PAYSO 운영 점검/검증 통보 — ICOPAY 거래목록과 맞추기 위해 노티거래내역에서 제외 */
+function isPaysoOpsProbeLog(log) {
+  if (!log || getNotiLogPgAcquirer(log) !== 'payso') return false;
+  const b = parseNotiBodyForDisplay(log);
+  const blob = [
+    notifBodyTxId(b),
+    b.orderNo,
+    b.OrderNo,
+    b.refno,
+    log.rawBody && String(log.rawBody).slice(0, 120),
+  ]
+    .map((x) => String(x || '').toUpperCase())
+    .join(' ');
+  return /HEALTHCHECK|DEDUP-TEST|DEDUP-ORDER|VERIFY001|VERIFYFAIL|PROBE1|COMMTEST|PAYSO-TEST|TEST-REF|TEST-PAYSO|PS-ALIAS|TESTICOPAYPROBE/.test(
+    blob,
+  );
+}
+
+/** PAYSO 목록 선호 점수: ICOPAY 통합(PS…·OM/FS·paidAt) 을 form(숫자 orderno) 보다 선호 */
+function scorePaysoListLog(log) {
+  const b = parseNotiBodyForDisplay(log);
+  const tx = notifBodyTxId(b);
+  const order = String(b.orderNo || b.OrderNo || '').trim();
+  let score = 0;
+  if (/^PS/i.test(tx)) score += 100;
+  if (/^OM/i.test(order)) score += 50;
+  else if (/^FS/i.test(order)) score += 40;
+  else if (order && !/^\d+$/.test(order)) score += 20;
+  if (notifBodyPaymentDateForWindow(b)) score += 25;
+  if (String(log.rawBody || '').trim().startsWith('{')) score += 10;
+  const t = Date.parse(log.receivedAtIso || log.receivedAt || '') || 0;
+  return score * 1e13 + t;
+}
+
+/**
+ * PAYSO form+ICOPAY JSON 이중 통보를 ICOPAY 거래 1건에 가깝게 한 줄로 합친다.
+ * 키: PS거래번호 → OM/FS 주문번호 → (가맹+금액+분) 근접 form.
+ */
+function dedupePaysoLogsForTransactionList(logs) {
+  const byKey = new Map();
+  const passthrough = [];
+  for (const log of logs || []) {
+    if (getNotiLogPgAcquirer(log) !== 'payso') {
+      passthrough.push(log);
+      continue;
+    }
+    if (String(log.kind || '') === 'result') continue;
+    if (isPaysoOpsProbeLog(log)) continue;
+    const b = parseNotiBodyForDisplay(log);
+    const tx = notifBodyTxId(b);
+    const order = String(b.orderNo || b.OrderNo || '').trim();
+    const mid = String(log.merchantId || b.compId || '').trim();
+    const amt = String(b.amount != null ? b.amount : b.Amount != null ? b.Amount : '').trim();
+    const minute = String(log.receivedAtIso || log.receivedAt || '').slice(0, 16);
+    let key = '';
+    if (/^PS/i.test(tx)) key = 'tx:' + tx.toLowerCase();
+    else if (/^(OM|FS)/i.test(order)) key = 'ord:' + order;
+    else if (mid && amt && minute) key = 'fa:' + mid + '|' + amt + '|' + minute;
+    else if (tx) key = 'tx:' + String(tx).toLowerCase();
+    else if (order) key = 'ord:' + order;
+    else {
+      passthrough.push(log);
+      continue;
+    }
+    const prev = byKey.get(key);
+    if (!prev || scorePaysoListLog(log) >= scorePaysoListLog(prev)) byKey.set(key, log);
+  }
+  // form(숫자 order) 이 OM/FS·PS 행과 같은 가맹+금액+분이면 버림
+  const preferred = Array.from(byKey.values());
+  const strong = preferred.filter((log) => {
+    const b = parseNotiBodyForDisplay(log);
+    const tx = notifBodyTxId(b);
+    const order = String(b.orderNo || b.OrderNo || '').trim();
+    return /^PS/i.test(tx) || /^(OM|FS)/i.test(order);
+  });
+  const strongFa = new Set(
+    strong.map((log) => {
+      const b = parseNotiBodyForDisplay(log);
+      const mid = String(log.merchantId || b.compId || '').trim();
+      const amt = String(b.amount != null ? b.amount : b.Amount != null ? b.Amount : '').trim();
+      const minute = String(log.receivedAtIso || log.receivedAt || '').slice(0, 16);
+      return mid && amt ? mid + '|' + amt + '|' + minute : '';
+    }),
+  );
+  const out = [];
+  for (const log of preferred) {
+    const b = parseNotiBodyForDisplay(log);
+    const tx = notifBodyTxId(b);
+    const order = String(b.orderNo || b.OrderNo || '').trim();
+    if (/^PS/i.test(tx) || /^(OM|FS)/i.test(order)) {
+      out.push(log);
+      continue;
+    }
+    const mid = String(log.merchantId || b.compId || '').trim();
+    const amt = String(b.amount != null ? b.amount : b.Amount != null ? b.Amount : '').trim();
+    const minute = String(log.receivedAtIso || log.receivedAt || '').slice(0, 16);
+    const fa = mid && amt ? mid + '|' + amt + '|' + minute : '';
+    if (fa && strongFa.has(fa)) continue;
+    out.push(log);
+  }
+  return passthrough.concat(out);
+}
+
 /**
  * 종합거래 PG 목록 필터 — ADMIN_PG_LIST_FILTER_V1
  * 신규 PG는 normalizeAdminPgSource / getNotiLogPgAcquirer 에만 추가한다.
@@ -28136,7 +28368,7 @@ function getTransactionListLogs(req) {
   const showSandbox = getEnvFromReq(req) === 'sandbox';
   const known = normalizeAdminPgSource(src) || 'chillpay';
   if (known !== 'chillpay') {
-    return logs.filter((log) => {
+    logs = logs.filter((log) => {
       if (getNotiLogPgAcquirer(log) !== known) return false;
       if (known === 'jpay') {
         if (showSandbox) return isJpayLogSandboxTier(log);
@@ -28144,6 +28376,8 @@ function getTransactionListLogs(req) {
       }
       return showSandbox ? isLogSandbox(log) : isLiveLog(log);
     });
+    if (known === 'payso') logs = dedupePaysoLogsForTransactionList(logs);
+    return logs;
   }
   logs = logs.filter((log) => (showSandbox ? isLogSandbox(log) : isLiveLog(log)));
   return logs.filter((log) => getNotiLogPgAcquirer(log) === 'chillpay');
@@ -28174,13 +28408,21 @@ function isSuccessPaymentBody(body) {
   const orderIdSync = body.orderID ?? body.orderid;
   if (body.paymentStatus != null && orderIdSync != null && body.PaymentStatus === undefined) {
     const st = String(body.paymentStatus).toLowerCase();
-    if (st === 'succeeded' || st === 'success') return true;
+    if (st === 'succeeded' || st === 'success' || st === 'paid' || st === 'complete' || st === 'completed') return true;
   }
   const ps = body.PaymentStatus ?? body.paymentStatus ?? body.status;
-  if (ps === 0 || ps === '0') return true;
+  if (ps === 0 || ps === '0' || ps === 10 || ps === '10') return true;
   if (typeof ps === 'string') {
     const lower = ps.toLowerCase();
-    if (lower === 'success' || lower === 'complete') return true;
+    if (
+      lower === 'success' ||
+      lower === 'complete' ||
+      lower === 'completed' ||
+      lower === 'succeeded' ||
+      lower === 'paid'
+    ) {
+      return true;
+    }
   }
   return false;
 }
@@ -28208,7 +28450,7 @@ function isDefinitelyRequestPaymentStatus(ps) {
  * ChillPay Request(5) 등은 other(기타). voidRefundByTxId / voidRefundByOrderNo 는 buildVoidRefundNotiMap(30) 결과
  */
 function getNotiTransactionFilterKind(log, voidRefundByTxId, voidRefundByOrderNo) {
-  const body = parseNotiBody(log);
+  const body = parseNotiBodyForDisplay(log);
   if (isJpaySaleAsyncNotifyBody(body)) {
     const rc = String(body.returncode).trim();
     if (rc !== '00' && rc !== '0') return 'fail';
@@ -28217,7 +28459,7 @@ function getNotiTransactionFilterKind(log, voidRefundByTxId, voidRefundByOrderNo
   const isSuccess = isSuccessPaymentBody(body);
   const isCancel = isDefinitelyCancelPaymentStatus(ps);
   const isRequest = isDefinitelyRequestPaymentStatus(ps);
-  const txId = body.TransactionId ?? body.transactionId ?? body.transaction_id ?? '';
+  const txId = notifBodyTxId(body);
   const orderNo = body.OrderNo ?? body.orderNo ?? body.orderid ?? body.orderID ?? '';
   const entry =
     (txId && voidRefundByTxId[txId]) || (orderNo && voidRefundByOrderNo[String(orderNo).trim()]) || null;
