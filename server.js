@@ -27,6 +27,7 @@ const paysoNoti = require('./lib/paysoNoti');
 const ksnetNoti = require('./lib/ksnetNoti');
 const cryptoNoti = require('./lib/cryptoNoti');
 const qbangNoti = require('./lib/qbangNoti');
+const pgIngressGuard = require('./lib/pgIngressGuard');
 const opsManual = require('./lib/opsManual');
 
 const app = express();
@@ -464,7 +465,20 @@ app.use(systemMonitorTrafficMiddleware);
 
 // Nginx/LB 업스트림 헬스(세션·설정 로드 없음). 구버전은 파일 하단에만 있어 순서 이슈 가능 → 상단 고정
 function sendLivenessJson(res) {
-  res.status(200).type('application/json').send(JSON.stringify({ status: 'ok', service: 'pg-notification-relay' }));
+  let ingressGuard = null;
+  try {
+    ingressGuard = pgIngressGuard.stats();
+  } catch (_) {}
+  res
+    .status(200)
+    .type('application/json')
+    .send(
+      JSON.stringify({
+        status: 'ok',
+        service: 'pg-notification-relay',
+        ingressGuard: ingressGuard || undefined,
+      }),
+    );
 }
 app.get('/health', (req, res) => sendLivenessJson(res));
 app.get('/healthz', (req, res) => sendLivenessJson(res));
@@ -7146,11 +7160,16 @@ async function handleOmspayWebhook(req, res) {
   const order = String(omspayNoti.pick(body, ['note', 'orderNo', 'order', 'ref1']) || '').trim();
   console.log('[OMSPAY] webhook', 'so=', so || '-', 'order=', order || '-');
 
+  const omsGuard = pgIngressGuard.beginInbound('omspay', 'webhook', [so, order]);
+  if (respondPgIngressGuard(res, omsGuard, 'OMSPAY')) return;
+
   if (!cfg.enabled) {
+    pgIngressGuard.endInbound('omspay', omsGuard.key, { ok: false, httpStatus: 503 });
     return res.status(503).send('OMSPAY ingress disabled');
   }
   if (!cfg.icopayNotifyUrl) {
     console.error('[OMSPAY] icopayNotifyUrl not configured');
+    pgIngressGuard.endInbound('omspay', omsGuard.key, { ok: false, httpStatus: 503 });
     appendPgNotiLog({
       routeKey: 'omspay/webhook',
       merchantId: '',
@@ -7193,6 +7212,10 @@ async function handleOmspayWebhook(req, res) {
   const outCt =
     omspayNoti.headerGetIgnoreCase(ico.headers, 'content-type') || 'application/json; charset=utf-8';
   const outBody = ico.data != null ? ico.data : '';
+  pgIngressGuard.endInbound('omspay', omsGuard.key, {
+    ok: outStatus >= 200 && outStatus < 300,
+    httpStatus: outStatus,
+  });
   console.log(
     '[OMSPAY] passthrough',
     'so=',
@@ -7488,10 +7511,51 @@ function loadPaysoIngressConfig() {
     icopayOrderLookupUrl,
     timeoutMs: Math.max(
       3000,
-      Math.min(120000, Number(fromFile.timeoutMs) || Number(process.env.PAYSO_ICOPAY_TIMEOUT_MS) || 25000),
+      Math.min(60000, Number(fromFile.timeoutMs) || Number(process.env.PAYSO_ICOPAY_TIMEOUT_MS) || 12000),
     ),
     note: String(fromFile.note || '').trim(),
   };
+}
+
+/** PG 고정입구 폭주 가드 응답 — ACK(200)로 재시도 폭풍을 끊고, reject는 Retry-After */
+function respondPgIngressGuard(res, guard, pgLabel) {
+  if (!guard || guard.action === 'process') return false;
+  if (guard.action === 'ack') {
+    console.warn(
+      '[' + (pgLabel || 'PG') + '] ingress dedupe ACK',
+      'reason=',
+      guard.reason,
+      'key=',
+      guard.key || '-',
+    );
+    res.status(200).json({
+      ok: true,
+      deduped: true,
+      reason: guard.reason,
+      pgTxnId: '',
+      orderNo: '',
+      compId: '',
+      compIdResolved: false,
+    });
+    return true;
+  }
+  const retryAfter = Math.max(1, Number(guard.retryAfterSec) || 5);
+  res.set('Retry-After', String(retryAfter));
+  console.warn(
+    '[' + (pgLabel || 'PG') + '] ingress reject',
+    'reason=',
+    guard.reason,
+    'retryAfter=',
+    retryAfter,
+    'key=',
+    guard.key || '-',
+  );
+  res.status(503).json({
+    ok: false,
+    error: guard.reason || 'ingress_busy',
+    retryAfterSec: retryAfter,
+  });
+  return true;
 }
 
 function getPaysoPublicIngressUrls() {
@@ -7637,7 +7701,11 @@ async function handlePaysoWebhook(req, res) {
   const order = String(paysoNoti.pick(body, ['orderNo', 'orderno', 'order', 'ref1']) || refno || merchantRef).trim();
   console.log('[PAYSO] webhook', 'refno=', refno || '-', 'order=', order || '-');
 
+  const guard = pgIngressGuard.beginInbound('payso', 'webhook', [refno, order, merchantRef]);
+  if (respondPgIngressGuard(res, guard, 'PAYSO')) return;
+
   if (!cfg.enabled) {
+    pgIngressGuard.endInbound('payso', guard.key, { ok: false, httpStatus: 503 });
     return res.status(503).send('PAYSO ingress disabled');
   }
   if (!cfg.icopayNotifyUrl) {
@@ -7655,6 +7723,7 @@ async function handlePaysoWebhook(req, res) {
       relayFailReason: 'icopayNotifyUrl_missing',
       pgProvider: 'payso',
     });
+    pgIngressGuard.endInbound('payso', guard.key, { ok: false, httpStatus: 503 });
     return res.status(503).send('PAYSO ICOPAY URL not configured');
   }
 
@@ -7672,11 +7741,17 @@ async function handlePaysoWebhook(req, res) {
     }
   }
 
-  const ico = await forwardPaysoToIcopay(
-    forwardBody,
-    incomingContentType || 'application/x-www-form-urlencoded',
-    1,
-  );
+  let ico;
+  try {
+    ico = await forwardPaysoToIcopay(
+      forwardBody,
+      incomingContentType || 'application/x-www-form-urlencoded',
+      1,
+    );
+  } catch (eFwd) {
+    pgIngressGuard.endInbound('payso', guard.key, { ok: false, httpStatus: 502 });
+    throw eFwd;
+  }
   const extracted = extractIcopayCompIdAndOrderFromNotifyResult(ico);
   const compIdHdr = paysoNoti.cleanCompId(extracted.compId);
   const orderHdr = extracted.orderNo;
@@ -7685,6 +7760,8 @@ async function handlePaysoWebhook(req, res) {
   const outCt =
     paysoNoti.headerGetIgnoreCase(ico.headers, 'content-type') || 'application/json; charset=utf-8';
   const outBody = ico.data != null ? ico.data : '';
+  const forwardOk = outStatus >= 200 && outStatus < 300;
+  pgIngressGuard.endInbound('payso', guard.key, { ok: forwardOk, httpStatus: outStatus });
   console.log(
     '[PAYSO] passthrough',
     'refno=',
@@ -7863,6 +7940,14 @@ async function handlePaysoBrowserResult(req, res) {
   const payload = extractPaysoBrowserPayload(req);
   let compId = String(payload.compId || '').trim();
   const orderForComp = String(payload.order || payload.refno || payload.merchantRef || '').trim();
+  const resultGuard = pgIngressGuard.beginInbound('payso', 'result', [
+    payload.refno,
+    orderForComp,
+    payload.merchantRef,
+    compId,
+  ]);
+  if (respondPgIngressGuard(res, resultGuard, 'PAYSO')) return;
+  pgIngressGuard.endInbound('payso', resultGuard.key, { ok: true, httpStatus: 200 });
   const cfg = loadPaysoIngressConfig();
   if (!compId && orderForComp && cfg.icopayOrderLookupUrl) {
     try {
@@ -8140,11 +8225,16 @@ async function handleKsnetWebhook(req, res) {
   );
   console.log('[KSNET] webhook', 'trno=', trno || '-', 'order=', order || '-', 'amt=', amt || '-', 'authyn=', authyn || '-');
 
+  const ksGuard = pgIngressGuard.beginInbound('ksnet', 'webhook', [trno, ordno, order, authyn]);
+  if (respondPgIngressGuard(res, ksGuard, 'KSNET')) return;
+
   if (!cfg.enabled) {
+    pgIngressGuard.endInbound('ksnet', ksGuard.key, { ok: false, httpStatus: 503 });
     return res.status(503).send('KSNET ingress disabled');
   }
   if (!cfg.icopayNotifyUrl) {
     console.error('[KSNET] icopayNotifyUrl not configured');
+    pgIngressGuard.endInbound('ksnet', ksGuard.key, { ok: false, httpStatus: 503 });
     appendPgNotiLog({
       routeKey: 'ksnet/webhook',
       merchantId: compIdReqHdr || compIdBody || '',
@@ -8188,6 +8278,10 @@ async function handleKsnetWebhook(req, res) {
     'compId=',
     compIdHdr || '(none)',
   );
+  pgIngressGuard.endInbound('ksnet', ksGuard.key, {
+    ok: outStatus >= 200 && outStatus < 300,
+    httpStatus: outStatus,
+  });
   res.status(outStatus);
   res.set('Content-Type', outCt);
   res.send(outBody);
@@ -16368,6 +16462,24 @@ function sendJpayBrowserResultRedirect(req, res, jpayRouteKey) {
 // ========== POST /noti/:kind/:no (신규: /noti/callback/1, /noti/result/1) — JPAY는 /noti/callback/j1 … /noti/result/j20 ==========
 app.post('/noti/:kind/:no', async (req, res) => {
   const { kind, no } = req.params;
+  // 고정입구 PG가 ChillPay 슬롯 경로(result/payso 등)로 오인되지 않게 전용 핸들러로 보냄
+  const fixedNo = String(no || '')
+    .toLowerCase()
+    .trim();
+  if ((kind === 'callback' || kind === 'result' || kind === 'webhook') && fixedNo) {
+    if (fixedNo === 'payso') {
+      if (kind === 'result') return handlePaysoBrowserResult(req, res);
+      return handlePaysoWebhook(req, res);
+    }
+    if (fixedNo === 'omspay' || fixedNo === 'oms' || fixedNo === 'waylar') {
+      if (kind === 'result') return handleOmspayBrowserResult(req, res);
+      return handleOmspayWebhook(req, res);
+    }
+    if (fixedNo === 'ksnet') {
+      if (kind === 'result') return handleKsnetBrowserResult(req, res);
+      return handleKsnetWebhook(req, res);
+    }
+  }
   if ((kind === 'callback' || kind === 'result') && isJpayNotiPathSegment(no)) {
     const routeKey = `jpay/${kind}/${no}`;
     await handleJpayNotiRequest(routeKey, req, res);
