@@ -40,6 +40,17 @@
         "p === 'qbang'",
         "merchantsRegisterLink('qbang'"
       ]
+    },
+    {
+      "code": "tazapay",
+      "needles": [
+        "app.post('/noti/tazapay",
+        "tazapayUrl:",
+        "lib/tazapayNoti",
+        "lib/tazapayIngress",
+        "p === 'tazapay'",
+        "merchantsRegisterLink('tazapay'"
+      ]
     }
   ],
   "globalNeedles": [
@@ -52,9 +63,11 @@
     "merchants_nav_register_payso",
     "merchants_nav_register_ksnet",
     "merchants_nav_register_qbang",
+    "merchants_nav_register_tazapay",
     "pg_provider_omspay",
     "pg_provider_payso",
     "pg_provider_ksnet",
-    "pg_provider_qbang"
+    "pg_provider_qbang",
+    "pg_provider_tazapay"
   ]
 }

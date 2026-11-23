@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "icopayNotifyUrl": "https://api.icopay.co.jp/api/middleware/notify/v1/pg-notify/YOUR_INGRESS_TOKEN/TAZAPAY",
+  "icopayOrderLookupUrl": "https://api.icopay.co.jp/api/middleware/notify/v1/order-lookup?order={order}",
+  "webhookSecret": "YOUR_TAZAPAY_WEBHOOK_SECRET",
+  "requireSignature": true,
+  "timeoutMs": 15000,
+  "note": "Tazapay JSON webhook -> POST https://noti.icopay.net/noti/tazapay | HMAC-SHA256 signature header | Comp-Id via X-Icopay-Comp-Id or order-lookup | ICOPAY outbound uses event=pg.payment.status (no re-forward)"
+}

@@ -26,6 +26,8 @@ const omspayNoti = require('./lib/omspayNoti');
 const paysoNoti = require('./lib/paysoNoti');
 const { createPaysoIngress } = require('./lib/paysoIngress');
 const ksnetNoti = require('./lib/ksnetNoti');
+const tazapayNoti = require('./lib/tazapayNoti');
+const { createTazapayIngress } = require('./lib/tazapayIngress');
 const cryptoNoti = require('./lib/cryptoNoti');
 const qbangNoti = require('./lib/qbangNoti');
 const pgIngressGuard = require('./lib/pgIngressGuard');
@@ -2008,6 +2010,7 @@ function normalizeInternalTargetPgProvider(raw) {
   if (p === 'omspay' || p === 'oms' || p === 'waylar') return 'omspay';
   if (p === 'payso' || p === 'paysolutions' || p === 'paysolution') return 'payso';
   if (p === 'ksnet') return 'ksnet';
+  if (p === 'tazapay' || p === 'taza') return 'tazapay';
   return 'chillpay';
 }
 
@@ -6392,6 +6395,8 @@ function provisionFixedIngressMerchant(kind, body, meta) {
         paysoResultUrl: pgKind === 'payso' ? base + '/noti/result/payso' : undefined,
         ksnetWebhookUrl: pgKind === 'ksnet' ? base + '/noti/ksnet' : undefined,
         ksnetResultUrl: pgKind === 'ksnet' ? base + '/noti/result/ksnet' : undefined,
+        tazapayWebhookUrl: pgKind === 'tazapay' ? base + '/noti/tazapay' : undefined,
+        tazapayResultUrl: pgKind === 'tazapay' ? base + '/noti/result/tazapay' : undefined,
         provisionRequestId: requestId || undefined,
       },
     },
@@ -6415,6 +6420,8 @@ function getFixedIngressMerchantProvision(merchantId, pgKind) {
             ? 'payso'
             : kind === 'ksnet'
               ? 'ksnet'
+              : kind === 'tazapay' || kind === 'taza'
+                ? 'tazapay'
             : kind === 'qbank' || kind === 'qrbank'
               ? 'qbang'
               : kind;
@@ -7716,6 +7723,30 @@ const paysoIngressRuntime = createPaysoIngress({
 /** PAYSO webhook: A) ICOPAY outbound / B) PAYSO origin — lib/paysoIngress.js */
 async function handlePaysoWebhook(req, res) {
   return paysoIngressRuntime.handlePaysoWebhook(req, res);
+}
+
+const tazapayIngressRuntime = createTazapayIngress({
+  CONFIG_DIR,
+  loadJsonConfig,
+  loadOmspayIngressConfig,
+  applyIcopayPgNotifyIngressHeaders,
+  extractIcopayCompIdAndOrderFromNotifyResult,
+  parseNotiRawBodyToObject,
+  findMerchantByCompIdForCrypto,
+  MERCHANTS,
+  relayToMerchant,
+  appendPgNotiLog,
+  stampOmspayCompIdOnBody,
+  pgIngressGuard,
+  respondPgIngressGuard,
+});
+
+/** TAZAPAY webhook: A) ICOPAY outbound / B) Tazapay origin — lib/tazapayIngress.js */
+async function handleTazapayWebhook(req, res) {
+  return tazapayIngressRuntime.handleTazapayWebhook(req, res);
+}
+async function handleTazapayBrowserResult(req, res) {
+  return tazapayIngressRuntime.handleTazapayBrowserResult(req, res);
 }
 
 function extractPaysoBrowserPayload(req) {
@@ -10286,6 +10317,7 @@ function getNotiLogPgAcquirer(log) {
   if (explicit === 'omspay' || explicit === 'oms' || explicit === 'waylar') return 'omspay';
   if (explicit === 'payso' || explicit === 'paysolutions' || explicit === 'paysolution') return 'payso';
   if (explicit === 'ksnet') return 'ksnet';
+  if (explicit === 'tazapay' || explicit === 'taza') return 'tazapay';
   if (explicit === 'elementpay' || explicit === 'ep') return 'elementpay';
   if (explicit === 'jpay') return 'jpay';
   if (explicit === 'chillpay' || explicit === 'chill') return 'chillpay';
@@ -10298,6 +10330,7 @@ function getNotiLogPgAcquirer(log) {
   if (rk.startsWith('omspay/') || rk === 'omspay') return 'omspay';
   if (rk.startsWith('payso/') || rk === 'payso') return 'payso';
   if (rk.startsWith('ksnet/') || rk === 'ksnet') return 'ksnet';
+  if (rk.startsWith('tazapay/') || rk === 'tazapay') return 'tazapay';
   if (rk.startsWith('elementpay/') || rk === 'elementpay') return 'elementpay';
   if (rk.startsWith('jpay/')) return 'jpay';
   return 'chillpay';
@@ -10315,7 +10348,8 @@ function icopayAmountPgKeyFromLog(log) {
     p === 'qbang' ||
     p === 'omspay' ||
     p === 'payso' ||
-    p === 'ksnet'
+    p === 'ksnet' ||
+    p === 'tazapay'
     ? 'jpay'
     : 'chillpay';
 }
@@ -10332,6 +10366,7 @@ function normalizeAdminPgSource(raw) {
   if (p === 'omspay' || p === 'oms' || p === 'waylar') return 'omspay';
   if (p === 'payso' || p === 'paysolutions' || p === 'paysolution') return 'payso';
   if (p === 'ksnet') return 'ksnet';
+  if (p === 'tazapay' || p === 'taza') return 'tazapay';
   if (p === 'elementpay' || p === 'ep' || p === 'element') return 'elementpay';
   if (p === 'jpay') return 'jpay';
   if (p === 'chillpay' || p === 'chill') return 'chillpay';
@@ -10359,6 +10394,7 @@ function pgProviderDisplayLabel(locale, pgRaw) {
   if (pg === 'omspay') return t(locale, 'pg_provider_omspay') || 'OMSPAY';
   if (pg === 'payso') return t(locale, 'pg_provider_payso') || 'PAYSO';
   if (pg === 'ksnet') return t(locale, 'pg_provider_ksnet') || 'KSNET';
+  if (pg === 'tazapay') return t(locale, 'pg_provider_tazapay') || 'TAZAPAY';
   if (pg === 'elementpay') return t(locale, 'pg_provider_elementpay') || 'ElementPay';
   if (pg === 'jpay') return t(locale, 'pg_provider_jpay') || 'JPAY';
   return t(locale, 'pg_provider_chillpay') || 'ChillPay';
@@ -10387,6 +10423,7 @@ function getInternalLogPgAcquirer(log) {
   if (explicit === 'omspay' || explicit === 'oms' || explicit === 'waylar') return 'omspay';
   if (explicit === 'payso' || explicit === 'paysolutions' || explicit === 'paysolution') return 'payso';
   if (explicit === 'ksnet') return 'ksnet';
+  if (explicit === 'tazapay' || explicit === 'taza') return 'tazapay';
   if (explicit === 'elementpay' || explicit === 'ep') return 'elementpay';
   if (explicit === 'jpay') return 'jpay';
   // JPAY 노티 경로로 쌓인 로그( Soonpay 미러·가맹점 전산 POST ): 예전 행은 pgProvider 없이 저장됨 → JPAY 탭에서 안 보이던 문제 방지
@@ -10399,6 +10436,7 @@ function getInternalLogPgAcquirer(log) {
   if (rk.startsWith('omspay/') || rk === 'omspay') return 'omspay';
   if (rk.startsWith('payso/') || rk === 'payso') return 'payso';
   if (rk.startsWith('ksnet/') || rk === 'ksnet') return 'ksnet';
+  if (rk.startsWith('tazapay/') || rk === 'tazapay') return 'tazapay';
   if (rk.startsWith('elementpay/') || rk === 'elementpay') return 'elementpay';
   if (rk.startsWith('jpay/')) return 'jpay';
   if (log && (log.jpayRawRelay || log.jpaySoonpayMirror)) return 'jpay';
@@ -16059,6 +16097,39 @@ app.post('/noti/result/ksnet', async (req, res) => {
   }
 });
 
+app.post('/noti/tazapay', async (req, res) => {
+  try {
+    await handleTazapayWebhook(req, res);
+  } catch (e) {
+    console.error('[TAZAPAY] route error', e);
+    if (!res.headersSent) res.status(500).send('TAZAPAY error');
+  }
+});
+app.post('/noti/webhook/tazapay', async (req, res) => {
+  try {
+    await handleTazapayWebhook(req, res);
+  } catch (e) {
+    console.error('[TAZAPAY] route error', e);
+    if (!res.headersSent) res.status(500).send('TAZAPAY error');
+  }
+});
+app.get('/noti/result/tazapay', async (req, res) => {
+  try {
+    await handleTazapayBrowserResult(req, res);
+  } catch (e) {
+    console.error('[TAZAPAY] result error', e.message || e);
+    if (!res.headersSent) res.status(200).type('html').send('<html><body>TAZAPAY result unavailable</body></html>');
+  }
+});
+app.post('/noti/result/tazapay', async (req, res) => {
+  try {
+    await handleTazapayBrowserResult(req, res);
+  } catch (e) {
+    console.error('[TAZAPAY] result error', e.message || e);
+    if (!res.headersSent) res.status(200).type('html').send('<html><body>TAZAPAY result unavailable</body></html>');
+  }
+});
+
 app.post('/noti/qbang', async (req, res) => {
   try {
     await handleQbangWebhook(req, res);
@@ -16329,6 +16400,10 @@ app.post('/noti/:kind/:no', async (req, res) => {
     if (fixedNo === 'ksnet') {
       if (kind === 'result') return handleKsnetBrowserResult(req, res);
       return handleKsnetWebhook(req, res);
+    }
+    if (fixedNo === 'tazapay' || fixedNo === 'taza') {
+      if (kind === 'result') return handleTazapayBrowserResult(req, res);
+      return handleTazapayWebhook(req, res);
     }
   }
   if ((kind === 'callback' || kind === 'result') && isJpayNotiPathSegment(no)) {
@@ -16610,6 +16685,7 @@ function buildAdminSidebarNavItems(h) {
           merchantsRegisterLink('omspay', t(locale, 'merchants_nav_register_omspay')) +
           merchantsRegisterLink('payso', t(locale, 'merchants_nav_register_payso')) +
           merchantsRegisterLink('ksnet', t(locale, 'merchants_nav_register_ksnet')) +
+          merchantsRegisterLink('tazapay', t(locale, 'merchants_nav_register_tazapay')) +
           merchantsRegisterLink('qbang', t(locale, 'merchants_nav_register_qbang')),
         'merchants',
       ),
@@ -19805,6 +19881,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
                     ? t(locale, 'merchants_nav_register_payso')
                   : registerKind === 'ksnet'
                     ? t(locale, 'merchants_nav_register_ksnet')
+                  : registerKind === 'tazapay'
+                    ? t(locale, 'merchants_nav_register_tazapay')
                   : registerKind === 'qbang'
                     ? t(locale, 'merchants_nav_register_qbang')
                     : t(locale, 'merchants_nav_register_chillpay');
@@ -19817,9 +19895,10 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
   const registerOmspay = registerKind === 'omspay';
   const registerPayso = registerKind === 'payso';
   const registerKsnet = registerKind === 'ksnet';
+  const registerTazapay = registerKind === 'tazapay';
   const registerQbang = registerKind === 'qbang';
   const registerFixedIngress =
-    registerElementPay || registerOx || registerCrypto || registerIlk || registerQxipay || registerOmspay || registerPayso || registerKsnet || registerQbang;
+    registerElementPay || registerOx || registerCrypto || registerIlk || registerQxipay || registerOmspay || registerPayso || registerKsnet || registerTazapay || registerQbang;
 
   const sortType = (req.query.sort || 'recent').toString();
   const sortedEntries = getSortedMerchantEntries(sortType).filter(
@@ -19856,6 +19935,8 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
                     ? t(locale, 'merchants_empty_payso') || t(locale, 'merchants_empty')
                   : registerKind === 'ksnet'
                     ? t(locale, 'merchants_empty_ksnet') || t(locale, 'merchants_empty')
+                  : registerKind === 'tazapay'
+                    ? t(locale, 'merchants_empty_tazapay') || t(locale, 'merchants_empty')
                   : registerKind === 'qbang'
                     ? t(locale, 'merchants_empty_qbang') || t(locale, 'merchants_empty')
                     : t(locale, 'merchants_empty_chillpay') || t(locale, 'merchants_empty');
@@ -20188,6 +20269,12 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           <div style="margin-top:8px;font-size:12px;color:#1e3a8a;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/ksnet</div>
           <div style="margin-top:6px;font-size:12px;color:#1e3a8a;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/ksnet</div>
           <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_ksnet_result_hint')}</p>
+        </div>
+        <div id="merch-pg-tazapay-block" style="display:${registerTazapay ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#fdf4ff;border:1px solid #e9d5ff;border-radius:8px;">
+          <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_tazapay_ingress_hint')}</p>
+          <div style="margin-top:8px;font-size:12px;color:#6b21a8;word-break:break-all;"><strong>Webhook:</strong> ${notiHost}/noti/tazapay</div>
+          <div style="margin-top:6px;font-size:12px;color:#6b21a8;word-break:break-all;"><strong>Result:</strong> ${notiHost}/noti/result/tazapay</div>
+          <p class="admin-page-desc" style="margin:8px 0 0;font-size:12px;">${t(locale, 'merchants_tazapay_result_hint')}</p>
         </div>
         <div id="merch-pg-qbang-block" style="display:${registerQbang ? 'block' : 'none'};margin-bottom:12px;padding:10px 12px;background:#ecfdf5;border:1px solid #5eead4;border-radius:8px;">
           <p class="admin-page-desc" style="margin:0;">${t(locale, 'merchants_qbang_ingress_hint')}</p>
@@ -20616,13 +20703,15 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         var oms = kind === 'omspay';
         var payso = kind === 'payso';
         var ksnet = kind === 'ksnet';
+        var tazapay = kind === 'tazapay';
         var qb = kind === 'qbang';
-        var fixedIngress = ep || ox || cr || ilk || qx || oms || payso || ksnet || qb;
+        var fixedIngress = ep || ox || cr || ilk || qx || oms || payso || ksnet || tazapay || qb;
         var blockIlk = document.getElementById('merch-pg-ilk-block');
         var blockQx = document.getElementById('merch-pg-qxipay-block');
         var blockOms = document.getElementById('merch-pg-omspay-block');
         var blockPayso = document.getElementById('merch-pg-payso-block');
         var blockKsnet = document.getElementById('merch-pg-ksnet-block');
+        var blockTazapay = document.getElementById('merch-pg-tazapay-block');
         var blockQb = document.getElementById('merch-pg-qbang-block');
         if (blockChill) blockChill.style.display = j || fixedIngress ? 'none' : 'block';
         if (blockJpay) blockJpay.style.display = j ? 'block' : 'none';
@@ -20634,6 +20723,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
         if (blockOms) blockOms.style.display = oms ? 'block' : 'none';
         if (blockPayso) blockPayso.style.display = payso ? 'block' : 'none';
         if (blockKsnet) blockKsnet.style.display = ksnet ? 'block' : 'none';
+        if (blockTazapay) blockTazapay.style.display = tazapay ? 'block' : 'none';
         if (blockQb) blockQb.style.display = qb ? 'block' : 'none';
         if (chillSlotNo) chillSlotNo.disabled = !!(j || fixedIngress);
         if (jpaySlotNo) jpaySlotNo.disabled = !j;
@@ -20810,6 +20900,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
           : pgKindRaw === 'omspay' || pgKindRaw === 'oms' || pgKindRaw === 'waylar' ? 'omspay'
           : pgKindRaw === 'payso' || pgKindRaw === 'paysolutions' || pgKindRaw === 'paysolution' ? 'payso'
           : pgKindRaw === 'ksnet' ? 'ksnet'
+          : pgKindRaw === 'tazapay' || pgKindRaw === 'taza' ? 'tazapay'
           : pgKindRaw === 'qbang' || pgKindRaw === 'qbank' || pgKindRaw === 'qrbank' ? 'qbang'
           : 'chillpay';
         if (pgKindHidden) pgKindHidden.value = pgKind;
@@ -20825,6 +20916,7 @@ app.get('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =>
             omspay: '${(t(locale, 'merchants_nav_register_omspay') || 'OMSPAY 등록').replace(/'/g, "\\'")}',
             payso: '${(t(locale, 'merchants_nav_register_payso') || 'PAYSO 등록').replace(/'/g, "\\'")}',
             ksnet: '${(t(locale, 'merchants_nav_register_ksnet') || 'KSNET 등록').replace(/'/g, "\\'")}',
+            tazapay: '${(t(locale, 'merchants_nav_register_tazapay') || 'TAZAPAY 등록').replace(/'/g, "\\'")}',
             qbang: '${(t(locale, 'merchants_nav_register_qbang') || 'QBANG 등록').replace(/'/g, "\\'")}',
             chillpay: '${(t(locale, 'merchants_nav_register_chillpay') || 'CHILLPAY 등록').replace(/'/g, "\\'")}'
           };
@@ -20959,6 +21051,7 @@ function merchantsRegisterKindUrl(kind) {
   if (k === 'omspay' || k === 'oms' || k === 'waylar') return '/admin/merchants?kind=omspay';
   if (k === 'payso' || k === 'paysolutions' || k === 'paysolution') return '/admin/merchants?kind=payso';
   if (k === 'ksnet') return '/admin/merchants?kind=ksnet';
+  if (k === 'tazapay' || k === 'taza') return '/admin/merchants?kind=tazapay';
   if (k === 'qbang' || k === 'qbank' || k === 'qrbank') return '/admin/merchants?kind=qbang';
   return '/admin/merchants?kind=chillpay';
 }
@@ -20989,7 +21082,9 @@ function inferMerchantPgKind(m) {
     saved === 'payso' ||
     saved === 'paysolutions' ||
     saved === 'paysolution' ||
-    saved === 'ksnet'
+    saved === 'ksnet' ||
+    saved === 'tazapay' ||
+    saved === 'taza'
   ) {
     if (saved === 'oxpay') return 'ox';
     if (saved === 'ilkpay') return 'ilk';
@@ -20997,6 +21092,7 @@ function inferMerchantPgKind(m) {
     if (saved === 'qbank' || saved === 'qrbank') return 'qbang';
     if (saved === 'oms' || saved === 'waylar') return 'omspay';
     if (saved === 'paysolutions' || saved === 'paysolution') return 'payso';
+    if (saved === 'taza') return 'tazapay';
     return saved;
   }
   const jpayCb = String(m.jpayRouteCallbackKey || '').trim();
@@ -21016,14 +21112,16 @@ function inferMerchantPgKind(m) {
   if (rn.toLowerCase() === 'omspay' || rn.toLowerCase() === 'oms' || rn.toLowerCase() === 'waylar') return 'omspay';
   if (rn.toLowerCase() === 'payso' || rn.toLowerCase() === 'paysolutions' || rn.toLowerCase() === 'paysolution') return 'payso';
   if (rn.toLowerCase() === 'ksnet') return 'ksnet';
+  if (rn.toLowerCase() === 'tazapay' || rn.toLowerCase() === 'taza') return 'tazapay';
   const tid = String(m.internalTargetId || '').trim();
   if (tid && INTERNAL_TARGETS.has(tid)) {
     const pg = String(INTERNAL_TARGETS.get(tid).pgProvider || '').toLowerCase().trim();
-    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay' || pg === 'ox' || pg === 'oxpay' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'qxpay' || pg === 'omspay' || pg === 'oms' || pg === 'waylar' || pg === 'payso' || pg === 'paysolutions' || pg === 'paysolution' || pg === 'ksnet' || pg === 'qbang' || pg === 'qbank' || pg === 'qrbank') {
+    if (pg === 'jpay' || pg === 'chillpay' || pg === 'elementpay' || pg === 'ox' || pg === 'oxpay' || pg === 'crypto' || pg === 'ilk' || pg === 'qxipay' || pg === 'qxpay' || pg === 'omspay' || pg === 'oms' || pg === 'waylar' || pg === 'payso' || pg === 'paysolutions' || pg === 'paysolution' || pg === 'ksnet' || pg === 'tazapay' || pg === 'taza' || pg === 'qbang' || pg === 'qbank' || pg === 'qrbank') {
       if (pg === 'oxpay') return 'ox';
       if (pg === 'qxpay') return 'qxipay';
       if (pg === 'oms' || pg === 'waylar') return 'omspay';
       if (pg === 'paysolutions' || pg === 'paysolution') return 'payso';
+      if (pg === 'taza') return 'tazapay';
       if (pg === 'qbank' || pg === 'qrbank') return 'qbang';
       return pg;
     }
@@ -21292,6 +21390,8 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
                     ? 'payso'
                   : pgKindRaw === 'ksnet'
                     ? 'ksnet'
+                  : pgKindRaw === 'tazapay' || pgKindRaw === 'taza'
+                    ? 'tazapay'
                   : pgKindRaw === 'qbang' || pgKindRaw === 'qbank' || pgKindRaw === 'qrbank'
                     ? 'qbang'
                     : 'chillpay';
@@ -21304,6 +21404,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
     pgKind === 'omspay' ||
     pgKind === 'payso' ||
     pgKind === 'ksnet' ||
+    pgKind === 'tazapay' ||
     pgKind === 'qbang';
   let chillCb = '';
   let chillRs = '';
@@ -21498,7 +21599,7 @@ app.post('/admin/merchants', requireAuth, requirePage('merchants'), (req, res) =
         compName: String((prev && (prev.name || prev.label)) || '').trim() || undefined,
       },
     });
-  } else if (pgKind === 'ilk' || pgKind === 'qxipay' || pgKind === 'omspay' || pgKind === 'payso' || pgKind === 'ksnet' || pgKind === 'qbang') {
+  } else if (pgKind === 'ilk' || pgKind === 'qxipay' || pgKind === 'omspay' || pgKind === 'payso' || pgKind === 'ksnet' || pgKind === 'tazapay' || pgKind === 'qbang') {
     merchantRecord = buildFixedIngressMerchantObject(pgKind, {
       merchantId,
       callbackUrl: cbSaved,
@@ -21717,6 +21818,8 @@ app.post('/api/v1/icopay/merchants/provision', (req, res) => {
         ? provisionFixedIngressMerchant('payso', req.body, provisionMeta)
       : pgKindIn === 'ksnet'
         ? provisionFixedIngressMerchant('ksnet', req.body, provisionMeta)
+      : pgKindIn === 'tazapay' || pgKindIn === 'taza'
+        ? provisionFixedIngressMerchant('tazapay', req.body, provisionMeta)
       : pgKindIn === 'ox' || pgKindIn === 'oxpay'
         ? provisionOxMerchant(req.body, provisionMeta)
         : pgKindIn === 'elementpay'
@@ -22903,6 +23006,8 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#047857;color:#fff;border:1px solid #065f46';
   const ksnetOn =
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#1e3a8a;color:#fff;border:1px solid #1e40af';
+  const tazapayOn =
+    'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;background:#7c2d12;color:#fff;border:1px solid #9a3412';
   const pillInactive =
     'padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:600;font-size:13px;background:#f3f4f6;color:#6b7280;border:1px solid #d1d5db;';
   const withNavEnv = (path) => {
@@ -22932,6 +23037,8 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
                     ? 'payso'
                     : pgCfg.active === 'ksnet'
                       ? 'ksnet'
+                      : pgCfg.active === 'tazapay'
+                        ? 'tazapay'
                   : 'chillpay';
   const envOn =
     envTone === 'jpay'
@@ -22954,6 +23061,8 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
                     ? paysoOn
                     : envTone === 'ksnet'
                       ? ksnetOn
+                      : envTone === 'tazapay'
+                        ? tazapayOn
                   : chillOn;
   const envOff = pillInactive;
   const envCfg = c.env || {};
@@ -23056,24 +23165,28 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
       const hideOmspay = !!pgCfg.hideOmspay;
       const hidePayso = !!pgCfg.hidePayso;
       const hideKsnet = !!pgCfg.hideKsnet;
+      const hideTazapay = !!pgCfg.hideTazapay;
       const ilkActive = pgCfg.active === 'ilk';
       const qxipayActive = pgCfg.active === 'qxipay';
       const qbangActive = pgCfg.active === 'qbang';
       const omspayActive = pgCfg.active === 'omspay';
       const paysoActive = pgCfg.active === 'payso';
       const ksnetActive = pgCfg.active === 'ksnet';
+      const tazapayActive = pgCfg.active === 'tazapay';
       const ilkHref = withNavEnv(pgCfg.ilkUrl || '#');
       const qxipayHref = withNavEnv(pgCfg.qxipayUrl || '#');
       const qbangHref = withNavEnv(pgCfg.qbangUrl || '#');
       const omspayHref = withNavEnv(pgCfg.omspayUrl || '#');
       const paysoHref = withNavEnv(pgCfg.paysoUrl || '#');
       const ksnetHref = withNavEnv(pgCfg.ksnetUrl || '#');
+      const tazapayHref = withNavEnv(pgCfg.tazapayUrl || '#');
       const ilkLabel = esc(t(locale, 'pg_provider_ilk') || 'ILKPAY');
       const qxipayLabel = esc(t(locale, 'pg_provider_qxipay') || 'QXIPAY');
       const qbangLabel = esc(t(locale, 'pg_provider_qbang') || 'QBANG');
       const omspayLabel = esc(t(locale, 'pg_provider_omspay') || 'OMSPAY');
       const paysoLabel = esc(t(locale, 'pg_provider_payso') || 'PAYSO');
       const ksnetLabel = esc(t(locale, 'pg_provider_ksnet') || 'KSNET');
+      const tazapayLabel = esc(t(locale, 'pg_provider_tazapay') || 'TAZAPAY');
       if (!hideIlk && pgCfg.ilkUrl) {
         pgSeg +=
           '<span style="color:#94a3b8;font-weight:500;">|</span>' +
@@ -23140,6 +23253,17 @@ function buildCrHubToolbarHtml(locale, esc, member, cfg) {
           ksnetLabel +
           '</a>';
       }
+      if (!hideTazapay && pgCfg.tazapayUrl) {
+        pgSeg +=
+          '<span style="color:#94a3b8;font-weight:500;">|</span>' +
+          '<a href="' +
+          esc(tazapayHref) +
+          '" style="' +
+          (tazapayActive ? tazapayOn : pillInactive) +
+          '">' +
+          tazapayLabel +
+          '</a>';
+      }
       pgSeg += '</span>';
     }
   }
@@ -23179,6 +23303,7 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
   const qOmspay = logPgQueryWithBase(q, 'omspay', { page: 1 });
   const qPayso = logPgQueryWithBase(q, 'payso', { page: 1 });
   const qKsnet = logPgQueryWithBase(q, 'ksnet', { page: 1 });
+  const qTazapay = logPgQueryWithBase(q, 'tazapay', { page: 1 });
   const envLive = logPgQueryWithBase(q, logPg, { env: 'live', page: 1 });
   const envSand = logPgQueryWithBase(q, logPg, { env: 'sandbox', page: 1 });
   const currentEnv = (o.getEnv && o.getEnv()) || 'live';
@@ -23208,6 +23333,7 @@ function buildLogHubToolbarHtml(locale, esc, member, pathname, q, logPg, opts) {
       omspayUrl: pathname + '?' + buildQueryString(qOmspay),
       paysoUrl: pathname + '?' + buildQueryString(qPayso),
       ksnetUrl: pathname + '?' + buildQueryString(qKsnet),
+      tazapayUrl: pathname + '?' + buildQueryString(qTazapay),
     },
   });
 }
@@ -25233,6 +25359,7 @@ app.get('/admin/transactions', requireAuth, requirePage('cr_transactions'), (req
       omspayUrl: baseUrl + qs({ source: 'omspay', page: 1 }),
       paysoUrl: baseUrl + qs({ source: 'payso', page: 1 }),
       ksnetUrl: baseUrl + qs({ source: 'ksnet', page: 1 }),
+      tazapayUrl: baseUrl + qs({ source: 'tazapay', page: 1 }),
     },
   });
   const LEGEND_MAX_DESC = 80;
@@ -26091,6 +26218,7 @@ app.get('/admin/daily-noti-summary', requireAuth, requirePage('cr_transactions')
       omspayUrl: baseUrl + qs({ source: 'omspay' }),
       paysoUrl: baseUrl + qs({ source: 'payso' }),
       ksnetUrl: baseUrl + qs({ source: 'ksnet' }),
+      tazapayUrl: baseUrl + qs({ source: 'tazapay' }),
     },
   });
   const thead =
@@ -28592,6 +28720,7 @@ app.get('/admin/cancel-refund/cancel', requireAuth, requirePage('cr_cancel'), (r
       omspayUrl: cancelPgUrl('omspay'),
       paysoUrl: cancelPgUrl('payso'),
       ksnetUrl: cancelPgUrl('ksnet'),
+      tazapayUrl: cancelPgUrl('tazapay'),
     },
   });
   const cancelColDefs = getCrCancelListColumnDefs(locale, cancelPg);
@@ -29125,6 +29254,7 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
   const pgFilterOmspayLabel = t(locale, 'cr_filter_pg_omspay') || t(locale, 'pg_provider_omspay') || 'OMSPAY';
   const pgFilterPaysoLabel = t(locale, 'cr_filter_pg_payso') || t(locale, 'pg_provider_payso') || 'PAYSO';
   const pgFilterKsnetLabel = t(locale, 'cr_filter_pg_ksnet') || t(locale, 'pg_provider_ksnet') || 'KSNET';
+  const pgFilterTazapayLabel = t(locale, 'cr_filter_pg_tazapay') || t(locale, 'pg_provider_tazapay') || 'TAZAPAY';
   const filterLinks = `<div style="margin-bottom:12px;font-size:12px;color:#374151;">
     <a href="/admin/cancel-refund/noti?type=all&days=${days}${envParam}${pgParam}" style="padding:6px 12px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${typeFilter === 'all' ? '#2563eb' : '#e5e7eb'};color:${typeFilter === 'all' ? '#fff' : '#374151'};">${t(locale, 'cr_filter_all')}</a>
     <a href="/admin/cancel-refund/noti?type=void&days=${days}${envParam}${pgParam}" style="padding:6px 12px;margin-right:4px;font-size:12px;border-radius:6px;text-decoration:none;background:${typeFilter === 'void' ? '#2563eb' : '#e5e7eb'};color:${typeFilter === 'void' ? '#fff' : '#374151'};">${t(locale, 'cr_type_void')}</a>
@@ -29142,6 +29272,7 @@ app.get('/admin/cancel-refund/noti', requireAuth, requirePage('cr_noti'), (req, 
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=omspay" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'omspay' || pgFilter === 'oms' || pgFilter === 'waylar' ? '#166534' : '#e5e7eb'};color:${pgFilter === 'omspay' || pgFilter === 'oms' || pgFilter === 'waylar' ? '#fff' : '#374151'};">${pgFilterOmspayLabel}</a>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=payso" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'payso' || pgFilter === 'paysolutions' || pgFilter === 'paysolution' ? '#047857' : '#e5e7eb'};color:${pgFilter === 'payso' || pgFilter === 'paysolutions' || pgFilter === 'paysolution' ? '#fff' : '#374151'};">${pgFilterPaysoLabel}</a>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=ksnet" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'ksnet' ? '#1e3a8a' : '#e5e7eb'};color:${pgFilter === 'ksnet' ? '#fff' : '#374151'};">${pgFilterKsnetLabel}</a>
+    <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=${days}${envParam}&pg=tazapay" style="padding:6px 10px;margin-right:8px;font-size:12px;border-radius:6px;text-decoration:none;background:${pgFilter === 'tazapay' || pgFilter === 'taza' ? '#6b21a8' : '#e5e7eb'};color:${pgFilter === 'tazapay' || pgFilter === 'taza' ? '#fff' : '#374151'};">${pgFilterTazapayLabel}</a>
     <span style="margin:0 8px;color:#9ca3af;">|</span>
     <span>${t(locale, 'cr_period_recent_label')}</span>
     <a href="/admin/cancel-refund/noti?type=${encodeURIComponent(typeFilter)}&days=7${envParam}${pgParam}" style="margin-left:6px;font-size:12px;">7${t(locale, 'cr_days')}</a>
@@ -32951,6 +33082,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
   const pgIsOmspay = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'omspay' || (editTarget.pgProvider || '').toLowerCase() === 'oms' || (editTarget.pgProvider || '').toLowerCase() === 'waylar'));
   const pgIsPayso = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'payso' || (editTarget.pgProvider || '').toLowerCase() === 'paysolutions' || (editTarget.pgProvider || '').toLowerCase() === 'paysolution'));
   const pgIsKsnet = !!(editTarget && (editTarget.pgProvider || '').toLowerCase() === 'ksnet');
+  const pgIsTazapay = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'tazapay' || (editTarget.pgProvider || '').toLowerCase() === 'taza'));
   const pgIsQbang = !!(editTarget && ((editTarget.pgProvider || '').toLowerCase() === 'qbang' || (editTarget.pgProvider || '').toLowerCase() === 'qbank' || (editTarget.pgProvider || '').toLowerCase() === 'qrbank'));
   const formTzMode = editTarget ? normalizeInternalTargetTimezoneMode(editTarget.timezoneMode) : 'global';
   const formTzStd = editTarget ? (editTarget.standardTimezone || DEFAULT_CHILLPAY_TIMEZONE) : DEFAULT_CHILLPAY_TIMEZONE;
@@ -33096,7 +33228,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
         <label>${t(locale, 'internal_targets_name')}<input type="text" name="name" required value="${formNameVal}" /></label>
         <label>${t(locale, 'internal_targets_pg_provider')}
           <select name="pgProvider" id="internal-target-pg" style="width:100%;max-width:320px;padding:8px 10px;margin-top:4px;border-radius:6px;border:1px solid #d1d5db;">
-            <option value="chillpay"${!pgIsJpay && !pgIsElementPay && !pgIsOx && !pgIsCrypto && !pgIsIlk && !pgIsQxipay && !pgIsOmspay && !pgIsPayso && !pgIsKsnet && !pgIsQbang ? ' selected' : ''}>${t(locale, 'pg_provider_chillpay') || 'ChillPay'}</option>
+            <option value="chillpay"${!pgIsJpay && !pgIsElementPay && !pgIsOx && !pgIsCrypto && !pgIsIlk && !pgIsQxipay && !pgIsOmspay && !pgIsPayso && !pgIsKsnet && !pgIsTazapay && !pgIsQbang ? ' selected' : ''}>${t(locale, 'pg_provider_chillpay') || 'ChillPay'}</option>
             <option value="jpay"${pgIsJpay ? ' selected' : ''}>${t(locale, 'pg_provider_jpay') || 'JPAY'}</option>
             <option value="elementpay"${pgIsElementPay ? ' selected' : ''}>${t(locale, 'pg_provider_elementpay') || t(locale, 'merchants_pg_provider_elementpay') || 'ElementPay'}</option>
             <option value="ox"${pgIsOx ? ' selected' : ''}>${t(locale, 'pg_provider_ox') || 'OXPAY'}</option>
@@ -33106,6 +33238,7 @@ app.get('/admin/internal-targets', requireAuth, requirePage('internal_targets'),
             <option value="omspay"${pgIsOmspay ? ' selected' : ''}>${t(locale, 'pg_provider_omspay') || 'OMSPAY'}</option>
             <option value="payso"${pgIsPayso ? ' selected' : ''}>${t(locale, 'pg_provider_payso') || 'PAYSO'}</option>
             <option value="ksnet"${pgIsKsnet ? ' selected' : ''}>${t(locale, 'pg_provider_ksnet') || 'KSNET'}</option>
+            <option value="tazapay"${pgIsTazapay ? ' selected' : ''}>${t(locale, 'pg_provider_tazapay') || 'TAZAPAY'}</option>
             <option value="qbang"${pgIsQbang ? ' selected' : ''}>${t(locale, 'pg_provider_qbang') || 'QBANG'}</option>
           </select>
         </label>
