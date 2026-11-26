@@ -1,0 +1,33 @@
+---
+description: NOTI 운영 배포는 Deploy-Noti만, ICOPAY/부분본으로 locales·server 덮어쓰기 금지
+alwaysApply: true
+---
+
+# NOTI 배포 = Deploy-Noti만 (부분 덮어쓰기 재발 금지)
+
+`merchants_nav_register_payso` 같은 **키 문자열이 UI에 그대로 노출**되거나
+TAZAPAY 신규등록 메뉴가 사라지는 사고는, NOTI 정상본을 **다른 경로가 덮어써서** 반복된다.
+
+## 절대 금지
+
+- ICOPAY 저장소·부분 브랜치·미완성 `locales.js` / `server.js` 를 운영 `/srv/pg-noti/` 에 scp/rsync
+- `scp locales.js` / `scp server.js` 단독으로 Deploy-Noti 게이트 우회
+- “ICOPAY에서 고친 다국어”를 NOTI에 통째로 덮어쓰기 (PAYSO/TAZAPAY 키 소실)
+- 옛 스냅샷으로 운영 `server.js` 교체 (기존 PG 탭·`merchantsRegisterLink` 탈락)
+
+## 필수
+
+1. NOTI 런타임 변경은 **이 NOTI 워크스페이스에서만** 수정·배포한다.
+2. 배포는 **`scripts/deploy/Deploy-Noti.ps1`만** 사용. 파일은 **한 번에 하나씩**.
+3. `locales.js` / `server.js` 배포 시 게이트:
+   - `verify-pg-coexistence.js`
+   - `verify-locales-runtime.js` (`t()`로 payso/tazapay 등 등록 키 해석 확인)
+4. 배포 직후 원격에서 `LOCALES_RUNTIME_OK` + 공존 OK 확인.
+5. 하나라도 키/메뉴 누락이면 **즉시 정상본 재배포**. “나중에” 금지.
+
+## 원인 메모 (재발 패턴)
+
+- 정상 NOTI 배포 직후, **다른 시각**에 더 큰/다른 `locales.js`·`server.js` 가 올라오면
+  `merchants_nav_register_payso` / `merchants_nav_register_tazapay` 가 빠지고
+  `merchantsRegisterLink('tazapay')` 가 사라진다.
+- 그때 UI에 `merchants_nav_register_payso` 문자열이 그대로 보인다.

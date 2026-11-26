@@ -166,6 +166,14 @@ try {
                     throw ("배포 거부: locales.js 의 {0} 가 {1}회만 있음 (ko/ja/en/th/zh 5개 언어 필요)." -f $needle, $hits)
                 }
             }
+            $runtimeVerify = Join-Path $ScriptDir 'verify-locales-runtime.js'
+            if (Test-Path -LiteralPath $runtimeVerify) {
+                Write-Host "[GATE] local locales runtime t() check..."
+                & node $runtimeVerify $local
+                if ($LASTEXITCODE -ne 0) {
+                    throw "배포 거부: locales.js 런타임 키 검증 실패 (merchants_nav_register_* 등). 기존 PG 키를 덮어쓴 파일을 올리지 마세요."
+                }
+            }
             Write-Host "[GATE] locales PG keys ok"
         }
         $remoteRel = ($rel -replace '\\', '/')
@@ -190,6 +198,25 @@ try {
         Copy-ToRemote $c $requiredJson ($remoteDir.TrimEnd('/') + '/scripts/deploy/required-pg-coexistence.json')
         Write-Host "[GATE] remote PG coexistence check..."
         Invoke-RemoteOrThrow $c "node '$remoteDir/scripts/deploy/verify-pg-coexistence.js' '$remoteDir/server.js' '$remoteDir/scripts/deploy/required-pg-coexistence.json'"
+    }
+
+    # locales/server 업로드 후: PAYSO·TAZAPAY 등 등록 메뉴 키가 런타임에서 실제로 해석되는지 원격 재검증
+    # (ICOPAY/타경로 scp 로 부분 덮어쓰기 재발 차단 — Deploy-Noti 경유 배포만 통과)
+    $uploadedLocales = @($Files | Where-Object { ($_ -replace '\\', '/') -eq 'locales.js' }).Count -gt 0
+    $uploadedServer = @($Files | Where-Object { ($_ -replace '\\', '/') -eq 'server.js' }).Count -gt 0
+    if ($uploadedLocales -or $uploadedServer) {
+        $runtimeVerify = Join-Path $ScriptDir 'verify-locales-runtime.js'
+        if (Test-Path -LiteralPath $runtimeVerify) {
+            Invoke-RemoteOrThrow $c "mkdir -p '$remoteDir/scripts/deploy'"
+            Copy-ToRemote $c $runtimeVerify ($remoteDir.TrimEnd('/') + '/scripts/deploy/verify-locales-runtime.js')
+            if ($uploadedServer) {
+                Write-Host "[GATE] remote locales+nav runtime check..."
+                Invoke-RemoteOrThrow $c "node '$remoteDir/scripts/deploy/verify-locales-runtime.js' '$remoteDir/locales.js' '$remoteDir/server.js'"
+            } elseif ($uploadedLocales) {
+                Write-Host "[GATE] remote locales runtime check..."
+                Invoke-RemoteOrThrow $c "node '$remoteDir/scripts/deploy/verify-locales-runtime.js' '$remoteDir/locales.js'"
+            }
+        }
     }
 
     if (-not $SkipRestart) {
